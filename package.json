@@ -1,0 +1,9 @@
+{
+  "name": "dataflow_vuln_scan",
+  "version": "1.0.0",
+  "description": "Multi-agent data flow analysis orchestrator built on pi-coding-agent",
+  "scripts": {
+    "docker:build": "docker build -t dataflow_vuln_scan .",
+    "docker:run": "docker run --rm -p 3000:3000 --env-file .env dataflow_vuln_scan"
+  }
+}

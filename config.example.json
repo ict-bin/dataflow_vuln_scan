@@ -1,0 +1,34 @@
+{
+    "max_rounds": 3,
+    "max_rounds_exceeded_review_strategy": "treat_as_passed",
+    "min_rounds": 2,
+    "pass_threshold": "majority",
+    "agent_max_retries": 100,
+    "agent_retry_delay": 30,
+    "pi_max_retries": -1,
+    "pi_retry_delay": 10,
+    "max_trace_depth": 5,
+    "callee_concurrency": -1,
+
+    "workers": {
+        "default_tools": ["read", "bash", "edit", "write", "find"],
+        "system_prompt_dir": "/opt/dataflow_vuln_scan/prompts/workers",
+        "default_thinking_level": "off",
+        "agents": [
+            { "model": "gaiasec/auto" }
+        ]
+    },
+
+    "judges": {
+        "default_tools": ["read", "bash", "find"],
+        "system_prompt_dir": "/opt/dataflow_vuln_scan/prompts/judges",
+        "default_thinking_level": "off",
+        "agents": [
+            { "model": "gaiasec/auto" }
+        ]
+    },
+
+    "output_dir": "/data/output",
+    "archive_dir": "/data/output",
+    "result_dir": "/data/output"
+}
