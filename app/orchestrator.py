@@ -546,7 +546,6 @@ class Orchestrator(JudgeMixin):
         _analyzed: set[str] | None = None,
         _root_out_dir: Path | None = None,
         _root_output_dir: Path | None = None,
-        resume: bool = False,
     ) -> TaskResult:
         """BFS 队列 + 工作池架构:
         A 进入队列 → Worker 执行 W+J 分析 → 解析 callee B,C,D → 加入队列 → Worker 执行 B,C,D...
@@ -606,6 +605,10 @@ class Orchestrator(JudgeMixin):
         root_output_path.mkdir(parents=True, exist_ok=True)
         (root_output_path / "flag").write_text("0", encoding="utf-8")
 
+        # 所有 session 统一归档目录：run/sessions/
+        root_sessions_dir = root_out_dir / "sessions"
+        root_sessions_dir.mkdir(exist_ok=True)
+
         queue: asyncio.Queue = asyncio.Queue()
         all_results: dict[str, TaskResult] = {}   # func_key -> TaskResult
         sub_dataflow_files: list[tuple[str, str]] = []
@@ -623,11 +626,11 @@ class Orchestrator(JudgeMixin):
 
         # 根任务入队
         await queue.put((cfg.function_name, cfg.source_file, cfg.line_hint,
-                         cfg.model_copy(deep=True), root_task_id, 0, tainted_context))
+                         cfg.model_copy(deep=True), root_task_id, 0, tainted_context, None))
 
         async def process_item(item: tuple) -> None:
             self._raise_if_cancelled()
-            func_name, src_file, line_hint, task_cfg, tid, dep, taint_ctx = item
+            func_name, src_file, line_hint, task_cfg, tid, dep, taint_ctx, parent_session_file = item
 
             # 通知 CLI: 新函数开始
             self._emit("trace_start", tid,
@@ -648,27 +651,14 @@ class Orchestrator(JudgeMixin):
             out_dir = _nested_function_run_dir(root_out_dir, tid, dep, func_name)
             out_dir.mkdir(parents=True, exist_ok=True)
 
-            # ── 断点续跑：检查是否已有缓存分析结果 ─────────────────────────
+            # session 归档标签（用于 run/sessions/ 统一路径命名）
+            _slabel = re.sub(r'[^A-Za-z0-9_.-]+', '_', func_name).strip('._-') or 'func'
+            if len(_slabel) > 55:
+                _slabel = f"{_slabel[:46]}-{hashlib.sha1(func_name.encode()).hexdigest()[:8]}"
+            session_label = f"d{dep:02d}-{_slabel}"
+
             result: TaskResult | None = None
-            if resume:
-                _cached_df = _find_dataflow_file(out_dir, func_name)
-                if not _cached_df:
-                    _cached_df_path = df_dir / f"{safe_func}.md"
-                    if _cached_df_path.exists():
-                        _cached_df = str(_cached_df_path)
-                if _cached_df:
-                    try:
-                        cached_output = Path(_cached_df).read_text(encoding="utf-8")
-                        result = TaskResult(
-                            task_id=tid,
-                            status=TaskStatus.PASSED,
-                            task=task_cfg.task,
-                            final_output=cached_output,
-                        )
-                        self._emit("trace_skip", tid, function=func_name,
-                                   reason="resume: cached result reused", depth=dep)
-                    except OSError:
-                        result = None
+            completed_session_file: str = ""  # 完成后 worker session 路径，传递给 callee
 
             if result is None:
                 self._raise_if_cancelled()
@@ -701,9 +691,16 @@ class Orchestrator(JudgeMixin):
                     vuln_output_root=vuln_output_root,
                     on_event=self.on_event,
                     cancel_event=self._cancel_event,
+                    parent_session_file=parent_session_file,
+                    sessions_archive_dir=root_sessions_dir,
+                    session_label=session_label,
                 )
                 result = await workflow.run()
                 self._raise_if_cancelled()
+                # 取完成后的 worker session 路径，用作各 callee 继承的 parent session
+                completed_session_file = str(
+                    result.upstream_entry_metadata.get("worker_session_file") or ""
+                )
 
             _relativize_round_artifacts(result, out_dir, root_out_dir)
 
@@ -859,8 +856,11 @@ class Orchestrator(JudgeMixin):
                             pass
                     if self._is_cancelled():
                         break
+                    # 为每个 callee fork 父函数完成后的 worker session（继承完整分析上下文）
+                    # 多个 callee 并发读取同一源文件是安全的；各自写入独立目标文件无冲突
                     await queue.put((callee.function_name, sub_file, sub_line_hint, sub_cfg,
-                                     sub_tid, dep + 1, tainted_ctx_str))
+                                     sub_tid, dep + 1, tainted_ctx_str,
+                                     completed_session_file or None))
 
         async def worker(wid: int) -> None:
             while True:

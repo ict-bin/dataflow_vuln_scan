@@ -117,6 +117,10 @@ class DataflowVulnWorkflow:
         vuln_output_root: Path | None = None,
         on_event: Callable[[SwarmEvent], None] | None = None,
         cancel_event: asyncio.Event | None = None,
+        # session 继承相关参数
+        parent_session_file: str | None = None,       # 父函数完成后的 worker session（fork 源）
+        sessions_archive_dir: Path | None = None,     # 全局归档目录 run/sessions/
+        session_label: str = "",                     # 该函数的 session 文件前缀
     ):
         self.cfg = cfg
         self.func_name = func_name
@@ -131,6 +135,9 @@ class DataflowVulnWorkflow:
         self.max_depth = max_depth
         self.on_event = on_event or (lambda e: None)
         self.cancel_event = cancel_event
+        self.parent_session_file = parent_session_file
+        self.sessions_archive_dir = Path(sessions_archive_dir) if sessions_archive_dir else None
+        self.session_label = session_label or _safe_name(func_name)
         self.run_id = f"{task_id}:{hashlib.sha1((src_file+'::'+func_name).encode()).hexdigest()[:12]}"
         self.store = VulnScanStore(graph_db_path or (self.out_dir / "vuln-scan.sqlite"))
         self.graph_json_path = self.store.db_path.with_name("vuln-scan-graph.json")
@@ -212,7 +219,33 @@ class DataflowVulnWorkflow:
         graph_prompt = _read_prompt("prompts/taint-graph/default.md")
         follow_prompt = _read_prompt("prompts/followups/default.md") if self.dep > 0 else ""
         system_prompt = "\n\n".join(x for x in [system_prompt, graph_prompt, follow_prompt] if x)
-        session_file = str(self.sessions / "worker-0.jsonl")
+        # 优先使用全局归档目录，否则退回本地 sessions/
+        if self.sessions_archive_dir:
+            self.sessions_archive_dir.mkdir(parents=True, exist_ok=True)
+            session_file = str(self.sessions_archive_dir / f"{self.session_label}-worker.jsonl")
+        else:
+            session_file = str(self.sessions / "worker-0.jsonl")
+        # 继承父函数 session（fork：以父函数完整分析记忆作为本轮起点）
+        if (
+            self.parent_session_file
+            and Path(self.parent_session_file).exists()
+            and self.parent_session_file != session_file
+        ):
+            try:
+                shutil.copyfile(self.parent_session_file, session_file)
+                self._emit(
+                    "session_forked",
+                    parent_session=self.parent_session_file,
+                    child_session=session_file,
+                    function=self.func_name,
+                    depth=self.dep,
+                )
+            except OSError as _fork_err:
+                self._emit(
+                    "session_fork_error",
+                    error=str(_fork_err),
+                    function=self.func_name,
+                )
         prompt = self._build_single_worker_prompt(func_body)
         self._emit("worker_start", worker_id="worker-0", model=acfg.model, function=self.func_name, depth=self.dep)
         started = time.time()
@@ -246,7 +279,7 @@ class DataflowVulnWorkflow:
         rr = RoundResult(
             round=1, function_name=self.func_name, source_path=self.src_file, stage="worker", stage_round=1,
             duration_ms=max(0.0, (time.time() - started) * 1000.0), status="passed" if passed else "failed",
-            worker_results=[WorkerResult(worker_id="worker-0", model=acfg.model, output=final_output, dataflow_file=str(dataflow_file or ""), session_file="sessions/worker-0.jsonl", token_usage=res.token_usage, df_issues=graph_warnings)],
+            worker_results=[WorkerResult(worker_id="worker-0", model=acfg.model, output=final_output, dataflow_file=str(dataflow_file or ""), session_file=session_file, token_usage=res.token_usage, df_issues=graph_warnings)],
             judge_results=[], pass_count=1 if passed else 0, total_judges=0, passed=passed, best_worker_id="worker-0",
             module_completed=passed, completion_reason="script_validated" if passed else "script_validation_failed",
         )
@@ -259,7 +292,12 @@ class DataflowVulnWorkflow:
         if self._cancelled() or not self.cfg.workers.agents:
             return []
         acfg = self._agent_cfg()
-        fork_session = self.sessions / f"vuln-mining-{_safe_name(self.func_name)}.jsonl"
+        # 漏洞挖掘 fork session：归档到 run/sessions/，读取 worker session 作为起点
+        if self.sessions_archive_dir:
+            self.sessions_archive_dir.mkdir(parents=True, exist_ok=True)
+            fork_session = self.sessions_archive_dir / f"{self.session_label}-vuln-mining.jsonl"
+        else:
+            fork_session = self.sessions / f"vuln-mining-{_safe_name(self.func_name)}.jsonl"
         try:
             if base_session and Path(base_session).exists():
                 shutil.copyfile(base_session, fork_session)
@@ -327,6 +365,9 @@ class DataflowVulnWorkflow:
         node_ids = self._seed_nodes()
         self._emit("vuln_scan_graph_start", function=self.func_name, source_file=self.src_file, taints=self.taint_params, depth=self.dep)
         result, base_session, dataflow_text = await self._run_single_worker()
+        # 将 worker session 路径写入元数据，供 Orchestrator 传递给 callee 作为 parent session
+        if base_session:
+            result.upstream_entry_metadata["worker_session_file"] = base_session
         self._record_edges_from_result(result, node_ids)
         try:
             findings = await self._run_vuln_mining_fork(base_session, dataflow_text)

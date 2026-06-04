@@ -1968,53 +1968,8 @@ class TaskService:
         return self._row_to_dict(row)
 
     def resume_task(self, db: Session, task_id: str) -> dict:
-        """从断点续跑：保留同一任务 ID，跳过已完成阶段从断点继续。"""
-        row = self._get_or_404(db, task_id)
-        if row.status in ("pending", "running"):
-            from fastapi import HTTPException
-            raise HTTPException(400, "任务仍在运行中，请先取消后再续跑")
-        from sqlalchemy.orm.attributes import flag_modified
-        svc = _load_svc_config_from_db(db, row.project_id)
-        effective_output = row.output_path or svc.output_dir
-        prior_epoch = max(1, int(row.execution_epoch or 0))
-        resume_workspace = os.path.join(effective_output, task_id, "run", "epochs", f"{prior_epoch:04d}", "workspace-worker-0")
-        tcfg = dict(row.task_config_json or {})
-        tcfg["start_stage"] = 3
-        tcfg["resume_workspace"] = resume_workspace
-        tcfg["resume"] = True
-        row.task_config_json = tcfg
-        row.status = "pending"
-        row.finished_at = None
-        row.result_json = None
-        row.error = None
-        row.latest_abnormal_reason_json = None
-        row.execution_owner_id = None
-        row.execution_lease_until = None
-        row.execution_heartbeat_at = None
-        row.control_version = int(row.control_version or 0) + 1
-        row.dispatch_status = "pending"
-        flag_modified(row, "task_config_json")
-        flag_modified(row, "latest_abnormal_reason_json")
-        db.commit(); db.refresh(row)
-        _record_task_event(
-            db,
-            row=row,
-            event_type="task_resumed",
-            message="任务已从断点恢复执行",
-            status=row.status,
-            control_version=int(row.control_version or 0),
-            dispatch_status=row.dispatch_status,
-            payload={
-                "control_version": int(row.control_version or 0),
-                "resume_workspace": resume_workspace,
-                "start_stage": 3,
-            },
-        )
-        db.commit(); db.refresh(row)
-        self.request_cancel(task_id, reason="resume_requested")
-        log_event(logger, logging.INFO, "task resumed in-place", event="task_resumed",
-                  task_id=task_id, project_id=row.project_id, control_version=row.control_version, status="pending")
-        return self._row_to_dict(row)
+        """断点续跑暂未实现，重定向到 restart_task。"""
+        return self.restart_task(db, task_id)
 
     def cancel_task(self, db: Session, task_id: str) -> dict:
         row = self._get_or_404(db, task_id)
@@ -2423,11 +2378,6 @@ class TaskService:
             tcfg = row.task_config_json or {}
             if tcfg.get("start_stage"):
                 svc.start_stage = tcfg["start_stage"]
-            if tcfg.get("resume_workspace"):
-                svc.resume_workspace = tcfg["resume_workspace"]
-            # Legacy resume flag support
-            if tcfg.get("resume") and not tcfg.get("start_stage"):
-                svc.resume = True
 
             # Use row.output_path as the working root
             if row.output_path:
@@ -2439,14 +2389,12 @@ class TaskService:
             root_output_dir = (_task_root(row) / "output") if _task_root(row) else None
             task_root_path = str(_task_root(row)) if _task_root(row) else None
             epoch_run_root_path = str(epoch_run_root) if epoch_run_root is not None else None
-            if epoch_run_root is not None and not bool(tcfg.get("resume", False)):
+            if epoch_run_root is not None:
                 if epoch_run_root.exists():
                     try:
                         shutil.rmtree(epoch_run_root)
                     except OSError as exc:
                         logger.warning("failed to clean epoch run root %s: %s", epoch_run_root, exc)
-                epoch_run_root.mkdir(parents=True, exist_ok=True)
-            elif epoch_run_root is not None:
                 epoch_run_root.mkdir(parents=True, exist_ok=True)
 
             cfg = build_task_config(svc, row.prompt_content, cwd=row.source_root_path or row.input_path)
@@ -2502,7 +2450,6 @@ class TaskService:
                 task_id,
                 _root_out_dir=epoch_run_root,
                 _root_output_dir=root_output_dir,
-                resume=bool(tcfg.get("resume", False)),
             )
             if ctx is not None:
                 ctx.lease_stop_requested.set()

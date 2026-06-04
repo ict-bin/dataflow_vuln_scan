@@ -1875,8 +1875,8 @@ def restart_task(task_id: str, db: Session = Depends(get_db)):
 
 @router.post("/tasks/{task_id}/resume", status_code=201)
 def resume_task(task_id: str, db: Session = Depends(get_db)):
-    """从断点续跑：跳过已完成的函数，继续分析未完成部分。"""
-    return get_task_service().resume_task(db, task_id)
+    """resume 暂未实现，等同于 restart（重新执行）。"""
+    return get_task_service().restart_task(db, task_id)
 
 
 @router.delete("/tasks/{task_id}", status_code=204)

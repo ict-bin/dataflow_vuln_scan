@@ -7,7 +7,7 @@
     GET  /api/app/dataflow-vuln-scan/tasks/{id}/logs  实时阶段事件
     POST /api/app/dataflow-vuln-scan/tasks/{id}/cancel   取消任务
     POST /api/app/dataflow-vuln-scan/tasks/{id}/restart  重新运行
-    POST /api/app/dataflow-vuln-scan/tasks/{id}/resume   断点续跑
+        POST /api/app/dataflow-vuln-scan/tasks/{id}/resume   断点续跑（暂未实现，等同于 restart）
     DELETE /api/app/dataflow-vuln-scan/tasks/{id}        删除任务
     GET  /api/app/dataflow-vuln-scan/prompts        Prompt 模板列表
     POST /api/app/dataflow-vuln-scan/prompts        创建 Prompt 模板
