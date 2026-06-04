@@ -50,14 +50,14 @@ _FALLBACK_DEFAULT_CONFIG: Dict[str, Any] = {
         "default_tools": ["read", "bash", "edit", "write", "find"],
         "system_prompt_dir": "/opt/dataflow_vuln_scan/prompts/workers",
         "default_thinking_level": "off",
-        "agents": [{"model": "gaiasec/auto"}],
+        "agents": [{"model": "MiniMax/MiniMax-M2.5"}],
         "stage_models": {},
     },
     "judges": {
         "default_tools": ["read", "bash", "find"],
         "system_prompt_dir": "/opt/dataflow_vuln_scan/prompts/judges",
         "default_thinking_level": "off",
-        "agents": [{"model": "gaiasec/auto"}],
+        "agents": [],
         "stage_models": {},
     },
     "output_dir": "/data/app/secflow-app-dataflow-vuln-scan",
@@ -97,7 +97,16 @@ def _normalize_config_blob(data: Dict[str, Any]) -> Dict[str, Any]:
     normalized["max_rounds_exceeded_review_strategy"] = normalize_max_rounds_exceeded_review_strategy(
         normalized.get("max_rounds_exceeded_review_strategy")
     )
-    normalized["pass_threshold"] = normalize_pass_threshold(normalized.get("pass_threshold"))
+    # dataflow_vuln_scan has no Judge; pass_threshold is a compatibility field fixed to 0.
+    normalized["pass_threshold"] = 0
+    workers = normalized.setdefault("workers", {})
+    if isinstance(workers, dict):
+        agents = workers.get("agents") or []
+        if not agents:
+            workers["agents"] = [{"model": "MiniMax/MiniMax-M2.5"}]
+    judges = normalized.setdefault("judges", {})
+    if isinstance(judges, dict):
+        judges["agents"] = []
     return normalized
 
 

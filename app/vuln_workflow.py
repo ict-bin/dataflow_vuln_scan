@@ -1,41 +1,23 @@
-"""Architectural workflow for dataflow taint tracking + vulnerability mining.
-
-This module is intentionally separated from the legacy PerTaintWorkflow so the
-new service can evolve independently:
-
-  analyze-function-context  -> records taint edges/followups into SQLite
-  fork vuln-mining-context  -> detects in-function vulnerabilities
-  queue/fork followup funcs -> recursively continues taint tracking
-
-The first implementation is additive: it creates the SQLite graph, exports
-structured artifacts, and then delegates the mature per-taint function analysis to
-PerTaintWorkflow.  Prompt/skill files added in this change specify the stronger
-JSON contracts that later iterations can enforce strictly.
-"""
+"""Single-worker dataflow taint tracking + vulnerability mining workflow."""
 from __future__ import annotations
 
 import asyncio
 import hashlib
 import json
-import os
 import re
 import shutil
+import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable, Any
+from typing import Any, Callable, Iterable
 
-from .models import CalleeRef, SwarmEvent, TaskConfig, TaskResult
+from .config import load_system_prompts, resolve_system_prompt
+from .models import AgentInstanceConfig, RoundResult, SwarmEvent, TaskConfig, TaskResult, TaskStatus, TokenUsage, WorkerResult
 from .runner import run_agent
-from .taint_workflow import PerTaintWorkflow
-from .vuln_store import (
-    FollowupRecord,
-    TaintEdgeRecord,
-    TaintSourceRecord,
-    VulnFindingRecord,
-    VulnScanStore,
-)
+from .taint_workflow import _extract_function_body, _prepend_upstream_hint_section, _build_upstream_entry_metadata, _build_taint_hint_summary
 from .vuln_graph_validator import validate_taint_graph
+from .vuln_store import FollowupRecord, TaintEdgeRecord, TaintSourceRecord, VulnFindingRecord, VulnScanStore
 
 
 @dataclass
@@ -110,6 +92,13 @@ def _extract_json_from_text(text: str, key: str | None = None) -> Any:
     return None
 
 
+def _read_prompt(path: str) -> str:
+    try:
+        return (Path(__file__).resolve().parents[1] / path).read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
 class DataflowVulnWorkflow:
     def __init__(
         self,
@@ -147,6 +136,10 @@ class DataflowVulnWorkflow:
         self.graph_json_path = self.store.db_path.with_name("vuln-scan-graph.json")
         self.vuln_root = Path(vuln_output_root) if vuln_output_root is not None else (self.out_dir / "output" / "vulnerabilities")
         self.vuln_root.mkdir(parents=True, exist_ok=True)
+        self.ws = self.out_dir / "workspace-worker-0"
+        self.ws.mkdir(parents=True, exist_ok=True)
+        self.sessions = self.out_dir / "sessions"
+        self.sessions.mkdir(parents=True, exist_ok=True)
 
     def _emit(self, etype: str, **data: Any) -> None:
         try:
@@ -157,268 +150,201 @@ class DataflowVulnWorkflow:
     def _cancelled(self) -> bool:
         return bool(self.cancel_event and self.cancel_event.is_set())
 
+    def _agent_cfg(self) -> AgentInstanceConfig:
+        return self.cfg.workers.agents[0]
+
     def _seed_nodes(self) -> list[str]:
         node_ids: list[str] = []
         for item in self.taint_inputs:
             nid = _node_id(self.src_file, self.func_name, item.symbol, self.dep)
             node_ids.append(nid)
             self.store.upsert_taint_node(TaintSourceRecord(
-                node_id=nid,
-                source_file=self.src_file,
-                function_name=self.func_name,
-                taint_kind=item.kind,
-                symbol=item.symbol,
-                line=item.line,
-                call_expr=item.call_expr,
-                description=item.description,
-                depth=self.dep,
+                node_id=nid, source_file=self.src_file, function_name=self.func_name,
+                taint_kind=item.kind, symbol=item.symbol, line=item.line,
+                call_expr=item.call_expr, description=item.description, depth=self.dep,
             ))
         return node_ids
 
     def _write_design_doc(self) -> None:
         doc = self.out_dir / "vuln-scan-architecture.md"
-        if doc.exists():
+        if not doc.exists():
+            doc.write_text(_read_prompt("docs/architecture-vuln-scan.md") or "# 数据流漏洞挖掘架构\n", encoding="utf-8")
+
+    def _link_source_tree(self) -> None:
+        target_dir = Path(self.cfg.cwd)
+        if not target_dir.is_dir():
             return
-        doc.write_text(
-            "# 数据流漏洞挖掘架构\n\n"
-            "## 输入\n文件名 + 函数名 + 污点信息(参数/返回值/调用参数/变量) + 源码目录。\n\n"
-            "## SQLite 图数据库\n"
-            "- `taint_nodes`: 污点源/中间污点对象/跨函数节点。\n"
-            "- `taint_edges`: 单函数内每条污点传播边、校验/清洗/终止证据。\n"
-            "- `followups`: 需要跟入的 callee 与污点参数。\n"
-            "- `vulnerability_findings`: 每个漏洞独立记录并指向 output/vulnerabilities/<finding_id>。\n"
-            "- `context_forks`: fork 出来的漏洞挖掘/跨函数分析上下文。\n\n"
-            "## 终止规则\n"
-            "1. 完整清洗或强校验后无危险使用。\n"
-            "2. 污点仅参与日志/统计且不流入敏感 sink。\n"
-            "3. 返回常量/错误码，原污点不再传播。\n"
-            "4. 达到最大深度或遇到重复状态 `(file,function,taint-symbol)`。\n"
-            "5. 无函数定义、标准库/宏展开不可跟入时记录 skipped。\n\n"
-            "## 环路处理\n使用 `(source_file,function_name,taint_symbol,field_path)` 作为状态键；同一路径第二次出现标记 cycle，"
-            "仅保留回边，不继续 fork。\n",
-            encoding="utf-8",
+        for item in target_dir.iterdir():
+            dst = self.ws / item.name
+            if dst.exists():
+                continue
+            try:
+                dst.symlink_to(item, target_is_directory=item.is_dir())
+            except OSError:
+                pass
+
+    def _build_single_worker_prompt(self, func_body: str) -> str:
+        taints = [t.__dict__ for t in self.taint_inputs]
+        upstream = f"\n\n# 调用者传入的脏数据\n{self.taint_ctx}" if self.taint_ctx else ""
+        return (
+            "# 数据流污点跟踪 + 漏洞挖掘\n\n"
+            f"目标函数: `{self.src_file}::{self.func_name}`\n"
+            f"当前深度: {self.dep}/{self.max_depth}\n"
+            f"污点输入(JSON):\n```json\n{json.dumps(taints, ensure_ascii=False, indent=2)}\n```\n"
+            f"{upstream}\n\n"
+            "## 函数源码（带绝对行号）\n```cpp\n"
+            f"{func_body}\n```\n\n"
+            "请一个 Worker 在当前函数内同时分析所有污点，不要按污点拆分 worker。\n"
+            "必须使用 write 工具写出：\n"
+            "1. `taint-graph.json`\n2. `dataflow-<function>.md`\n3. `tainted.list`（无跟入点则写空文件）\n4. `taintvars.json`\n"
+            "`taint-graph.json` 必须包含 edges/followups/termination，并且每条边都有 line/evidence/sanitizer_effect；终止边必须有 termination_reason。\n"
+            "同时在报告中判断当前函数内是否存在漏洞候选，漏洞判断会由后续 fork 上下文复核。\n"
         )
+
+    async def _run_single_worker(self) -> tuple[TaskResult, str, str]:
+        self._link_source_tree()
+        func_body = _extract_function_body(self.ws, self.src_file, self.func_name, self.line_hint)
+        if not func_body.strip():
+            return self._make_result("# 数据流漏洞挖掘受限\n\n未提取到有效函数体。\n", None, False, "function_body_missing"), "", ""
+        acfg = self._agent_cfg()
+        worker_prompts = load_system_prompts(self.cfg.workers.system_prompt_dir, 1)
+        system_prompt = resolve_system_prompt(0, acfg, worker_prompts)
+        graph_prompt = _read_prompt("prompts/taint-graph/default.md")
+        follow_prompt = _read_prompt("prompts/followups/default.md") if self.dep > 0 else ""
+        system_prompt = "\n\n".join(x for x in [system_prompt, graph_prompt, follow_prompt] if x)
+        session_file = str(self.sessions / "worker-0.jsonl")
+        prompt = self._build_single_worker_prompt(func_body)
+        self._emit("worker_start", worker_id="worker-0", model=acfg.model, function=self.func_name, depth=self.dep)
+        started = time.time()
+        res = await run_agent(
+            prompt=prompt, model=acfg.model, tools=acfg.tools or self.cfg.workers.default_tools,
+            cwd=str(self.ws), session_file=session_file, system_prompt=system_prompt,
+            cancel_event=self.cancel_event, run_timeout_seconds=self.cfg.agent_run_timeout_seconds,
+            timeout_retry_enabled=self.cfg.agent_timeout_retry_enabled, timeout_max_retries=self.cfg.agent_timeout_max_retries,
+            pi_max_retries=self.cfg.pi_max_retries, pi_retry_delay=self.cfg.pi_retry_delay,
+            task_context={"task_id": self.task_id, "task_root": str(self.out_dir.parent), "task_run_root": str(self.out_dir)},
+        )
+        self._emit("worker_done", worker_id="worker-0", output=res.output[:300], tokens_in=res.token_usage.input, tokens_out=res.token_usage.output)
+        total_tokens = TokenUsage(); total_tokens += res.token_usage
+        dataflow_file = next(self.ws.glob("dataflow-*.md"), None)
+        df_content = ""
+        if dataflow_file:
+            df_content = dataflow_file.read_text(encoding="utf-8", errors="replace")
+        graph_path = self.ws / "taint-graph.json"
+        graph_warnings: list[str] = []
+        if graph_path.exists():
+            try:
+                graph_warnings = validate_taint_graph(json.loads(graph_path.read_text(encoding="utf-8")))
+            except Exception as exc:
+                graph_warnings = [f"taint-graph.json parse failed: {exc}"]
+        else:
+            graph_warnings = ["missing taint-graph.json"]
+        if graph_warnings:
+            (self.out_dir / "taint-graph.validation.json").write_text(json.dumps({"warnings": graph_warnings}, ensure_ascii=False, indent=2), encoding="utf-8")
+        passed = bool(df_content.strip()) and not graph_warnings
+        final_output = df_content or res.output
+        rr = RoundResult(
+            round=1, function_name=self.func_name, source_path=self.src_file, stage="worker", stage_round=1,
+            duration_ms=max(0.0, (time.time() - started) * 1000.0), status="passed" if passed else "failed",
+            worker_results=[WorkerResult(worker_id="worker-0", model=acfg.model, output=final_output, dataflow_file=str(dataflow_file or ""), session_file="sessions/worker-0.jsonl", token_usage=res.token_usage, df_issues=graph_warnings)],
+            judge_results=[], pass_count=1 if passed else 0, total_judges=0, passed=passed, best_worker_id="worker-0",
+            module_completed=passed, completion_reason="script_validated" if passed else "script_validation_failed",
+        )
+        result = self._make_result(final_output, res, passed, "script_validated" if passed else "script_validation_failed", rounds=[rr], total_tokens=total_tokens)
+        if dataflow_file:
+            (self.out_dir / dataflow_file.name).write_text(df_content, encoding="utf-8")
+        return result, str(session_file), df_content or res.output
 
     async def _run_vuln_mining_fork(self, base_session: str, dataflow_text: str) -> list[VulnFindingRecord]:
         if self._cancelled() or not self.cfg.workers.agents:
             return []
-        acfg = self.cfg.workers.agents[0]
-        fork_session = self.out_dir / "sessions" / f"vuln-mining-{_safe_name(self.func_name)}.jsonl"
+        acfg = self._agent_cfg()
+        fork_session = self.sessions / f"vuln-mining-{_safe_name(self.func_name)}.jsonl"
         try:
             if base_session and Path(base_session).exists():
                 shutil.copyfile(base_session, fork_session)
         except OSError:
             pass
         fork_id = "fork_" + hashlib.sha1((self.run_id + str(fork_session) + "vuln").encode()).hexdigest()[:16]
-        self.store.add_context_fork(
-            fork_id=fork_id,
-            run_id=self.run_id,
-            purpose="vulnerability_mining",
-            session_file=str(fork_session),
-            node_id=_node_id(self.src_file, self.func_name, self.taint_params[0] if self.taint_params else "all", self.dep),
-            status="running",
-        )
+        node = _node_id(self.src_file, self.func_name, self.taint_params[0] if self.taint_params else "all", self.dep)
+        self.store.add_context_fork(fork_id=fork_id, run_id=self.run_id, purpose="vulnerability_mining", session_file=str(fork_session), node_id=node, status="running")
         prompt = (
-            f"# 阶段：漏洞挖掘 Fork\n\n"
-            f"你正在一个从污点分析上下文复制出来的 fork session 中工作。\n"
-            f"目标函数: `{self.src_file}::{self.func_name}`\n"
-            f"污点: {', '.join(self.taint_params)}\n\n"
-            f"基于下面的单函数污点传播结果，判断是否存在漏洞。\n"
-            f"必须输出 JSON：{{\"findings\":[{{\"vuln_type\":...,\"severity\":...,\"title\":...,\"summary\":...,\"evidence\":...,\"exploitability\":...,\"confidence\":0.0}}]}}。\n\n"
-            f"```markdown\n{dataflow_text[:30000]}\n```"
+            f"# 阶段：漏洞挖掘 Fork\n\n目标函数: `{self.src_file}::{self.func_name}`\n污点: {', '.join(self.taint_params)}\n\n"
+            f"基于下面的单函数污点传播结果，判断是否存在漏洞。必须输出 JSON: {{\"findings\":[]}}。\n\n```markdown\n{dataflow_text[:30000]}\n```"
         )
-        system_prompt = ""
-        prompt_path = Path(__file__).resolve().parents[1] / "prompts" / "vuln-miners" / "default.md"
-        try:
-            system_prompt = prompt_path.read_text(encoding="utf-8")
-        except OSError:
-            pass
         output = await run_agent(
-            prompt=prompt,
-            model=acfg.model,
-            tools=acfg.tools or self.cfg.workers.default_tools,
-            cwd=str(self.out_dir),
-            session_file=str(fork_session),
-            system_prompt=system_prompt,
-            cancel_event=self.cancel_event,
-            run_timeout_seconds=self.cfg.agent_run_timeout_seconds,
-            timeout_retry_enabled=self.cfg.agent_timeout_retry_enabled,
-            timeout_max_retries=self.cfg.agent_timeout_max_retries,
-            pi_max_retries=self.cfg.pi_max_retries,
-            pi_retry_delay=self.cfg.pi_retry_delay,
+            prompt=prompt, model=acfg.model, tools=acfg.tools or self.cfg.workers.default_tools,
+            cwd=str(self.out_dir), session_file=str(fork_session), system_prompt=_read_prompt("prompts/vuln-miners/default.md"),
+            cancel_event=self.cancel_event, run_timeout_seconds=self.cfg.agent_run_timeout_seconds,
+            timeout_retry_enabled=self.cfg.agent_timeout_retry_enabled, timeout_max_retries=self.cfg.agent_timeout_max_retries,
+            pi_max_retries=self.cfg.pi_max_retries, pi_retry_delay=self.cfg.pi_retry_delay,
             task_context={"task_id": self.task_id, "task_root": str(self.out_dir.parent), "task_run_root": str(self.out_dir)},
         )
         parsed = _extract_json_from_text(output.output, "findings") or {"findings": []}
-        self.store.add_context_fork(
-            fork_id=fork_id,
-            run_id=self.run_id,
-            purpose="vulnerability_mining",
-            session_file=str(fork_session),
-            node_id=_node_id(self.src_file, self.func_name, self.taint_params[0] if self.taint_params else "all", self.dep),
-            status="completed" if not output.error else "error",
-        )
+        self.store.add_context_fork(fork_id=fork_id, run_id=self.run_id, purpose="vulnerability_mining", session_file=str(fork_session), node_id=node, status="completed" if not output.error else "error")
         findings: list[VulnFindingRecord] = []
         for idx, item in enumerate(parsed.get("findings") or []):
             if not isinstance(item, dict):
                 continue
             finding_id = f"vuln_{hashlib.sha1((self.run_id+str(idx)+json.dumps(item, ensure_ascii=False)).encode()).hexdigest()[:16]}"
-            fdir = self.vuln_root / finding_id
-            fdir.mkdir(parents=True, exist_ok=True)
-            report = fdir / "vulnerability-report.md"
-            taint_report = fdir / "taint-path-report.md"
-            ctx_file = fdir / "context.jsonl"
-            report.write_text(
-                f"# {item.get('title') or finding_id}\n\n"
-                f"- 类型: {item.get('vuln_type','unknown')}\n"
-                f"- 严重性: {item.get('severity','unknown')}\n"
-                f"- 置信度: {item.get('confidence',0)}\n\n"
-                f"## 摘要\n{item.get('summary','')}\n\n"
-                f"## 证据\n{item.get('evidence','')}\n\n"
-                f"## 可利用性\n{item.get('exploitability','')}\n",
-                encoding="utf-8",
-            )
-            taint_report.write_text(dataflow_text, encoding="utf-8")
+            fdir = self.vuln_root / finding_id; fdir.mkdir(parents=True, exist_ok=True)
+            (fdir / "vulnerability-report.md").write_text(f"# {item.get('title') or finding_id}\n\n## 摘要\n{item.get('summary','')}\n\n## 证据\n{item.get('evidence','')}\n\n## 可利用性\n{item.get('exploitability','')}\n", encoding="utf-8")
+            (fdir / "taint-path-report.md").write_text(dataflow_text, encoding="utf-8")
             try:
-                if fork_session.exists():
-                    shutil.copyfile(fork_session, ctx_file)
+                if fork_session.exists(): shutil.copyfile(fork_session, fdir / "context.jsonl")
             except OSError:
-                ctx_file.write_text("", encoding="utf-8")
-            rec = VulnFindingRecord(
-                finding_id=finding_id,
-                run_id=self.run_id,
-                node_id=_node_id(self.src_file, self.func_name, self.taint_params[0] if self.taint_params else "all", self.dep),
-                vuln_type=str(item.get("vuln_type") or "unknown"),
-                severity=str(item.get("severity") or "unknown"),
-                title=str(item.get("title") or finding_id),
-                summary=str(item.get("summary") or ""),
-                evidence=str(item.get("evidence") or ""),
-                exploitability=str(item.get("exploitability") or ""),
-                confidence=float(item.get("confidence") or 0),
-                output_dir=str(fdir),
-            )
-            self.store.add_finding(rec)
-            findings.append(rec)
+                (fdir / "context.jsonl").write_text("", encoding="utf-8")
+            rec = VulnFindingRecord(finding_id=finding_id, run_id=self.run_id, node_id=node, vuln_type=str(item.get("vuln_type") or "unknown"), severity=str(item.get("severity") or "unknown"), title=str(item.get("title") or finding_id), summary=str(item.get("summary") or ""), evidence=str(item.get("evidence") or ""), exploitability=str(item.get("exploitability") or ""), confidence=float(item.get("confidence") or 0), output_dir=str(fdir))
+            self.store.add_finding(rec); findings.append(rec)
         return findings
 
     def _record_edges_from_result(self, result: TaskResult, node_ids: list[str]) -> None:
         text = result.final_output or ""
         edges: list[TaintEdgeRecord] = []
         followups: list[FollowupRecord] = []
-        # Best-effort structured parse: prompt asks for taint-graph.json; fallback to callee table parser.
-        graph_path = next(self.out_dir.glob("workspace-worker-*/taint-graph.json"), None)
+        graph_path = self.ws / "taint-graph.json"
         graph = None
-        if graph_path:
-            try:
-                graph = json.loads(graph_path.read_text(encoding="utf-8"))
-            except Exception:
-                graph = None
+        if graph_path.exists():
+            try: graph = json.loads(graph_path.read_text(encoding="utf-8"))
+            except Exception: graph = None
         if isinstance(graph, dict):
-            validation_warnings = validate_taint_graph(graph)
-            if validation_warnings:
-                (self.out_dir / "taint-graph.validation.json").write_text(
-                    json.dumps({"warnings": validation_warnings}, ensure_ascii=False, indent=2),
-                    encoding="utf-8",
-                )
             for item in graph.get("edges") or []:
-                if not isinstance(item, dict):
-                    continue
+                if not isinstance(item, dict): continue
                 src = str(item.get("from") or item.get("from_symbol") or "").strip() or (self.taint_params[0] if self.taint_params else "unknown")
                 dst = str(item.get("to") or item.get("to_symbol") or "").strip() or "unknown"
-                edge = TaintEdgeRecord(
-                    edge_id=_edge_id(self.run_id, self.func_name, src, dst, str(item.get("line") or "")),
-                    run_id=self.run_id,
-                    from_node_id=node_ids[0] if node_ids else "",
-                    to_node_id=_node_id(self.src_file, self.func_name, dst, self.dep),
-                    source_file=self.src_file,
-                    function_name=self.func_name,
-                    from_symbol=src,
-                    to_symbol=dst,
-                    line=str(item.get("line") or ""),
-                    operation=str(item.get("operation") or ""),
-                    evidence=str(item.get("evidence") or ""),
-                    sanitizer=str(item.get("sanitizer") or ""),
-                    sanitizer_effect=str(item.get("sanitizer_effect") or "none"),
-                    validation=str(item.get("validation") or ""),
-                    termination_reason=str(item.get("termination_reason") or ""),
-                    confidence=float(item.get("confidence") or 0),
-                )
-                edges.append(edge)
-        # Followups from tainted.list / parsed markdown are still consumed by Orchestrator; store them too.
+                edges.append(TaintEdgeRecord(edge_id=_edge_id(self.run_id, self.func_name, src, dst, str(item.get("line") or "")), run_id=self.run_id, from_node_id=node_ids[0] if node_ids else "", to_node_id=_node_id(self.src_file, self.func_name, dst, self.dep), source_file=self.src_file, function_name=self.func_name, from_symbol=src, to_symbol=dst, line=str(item.get("line") or ""), operation=str(item.get("operation") or ""), evidence=str(item.get("evidence") or ""), sanitizer=str(item.get("sanitizer") or ""), sanitizer_effect=str(item.get("sanitizer_effect") or "none"), validation=str(item.get("validation") or ""), termination_reason=str(item.get("termination_reason") or ""), confidence=float(item.get("confidence") or 0)))
         from .parsers import _parse_callees, _read_tainted_list
-        callees = _read_tainted_list(str(self.out_dir)) or _parse_callees(text)
+        callees = _read_tainted_list(str(self.out_dir)) or _read_tainted_list(str(self.ws)) or _parse_callees(text)
         for c in callees:
             eid = _edge_id(self.run_id, self.func_name, self.taint_params[0] if self.taint_params else "taint", c.function_name, c.line)
-            edges.append(TaintEdgeRecord(
-                edge_id=eid,
-                run_id=self.run_id,
-                from_node_id=node_ids[0] if node_ids else "",
-                to_node_id=_node_id(c.file or self.src_file, c.function_name, c.tainted_params or "*", self.dep + 1),
-                source_file=self.src_file,
-                function_name=self.func_name,
-                from_symbol=self.taint_params[0] if self.taint_params else "taint",
-                to_symbol=c.tainted_params or "*",
-                line=c.line,
-                operation="call_arg",
-                evidence=c.description,
-            ))
-            followups.append(FollowupRecord(
-                followup_id="follow_" + hashlib.sha1((eid+c.function_name).encode()).hexdigest()[:16],
-                edge_id=eid,
-                parent_node_id=node_ids[0] if node_ids else "",
-                callee_file=c.file or self.src_file,
-                callee_function=c.function_name,
-                callee_line=c.line,
-                tainted_params_json=json.dumps([x.strip() for x in (c.tainted_params or "").split(',') if x.strip()], ensure_ascii=False),
-                depth=self.dep + 1,
-            ))
-        self.store.add_taint_edges(edges)
-        self.store.add_followups(followups)
+            edges.append(TaintEdgeRecord(edge_id=eid, run_id=self.run_id, from_node_id=node_ids[0] if node_ids else "", to_node_id=_node_id(c.file or self.src_file, c.function_name, c.tainted_params or "*", self.dep + 1), source_file=self.src_file, function_name=self.func_name, from_symbol=self.taint_params[0] if self.taint_params else "taint", to_symbol=c.tainted_params or "*", line=c.line, operation="call_arg", evidence=c.description))
+            followups.append(FollowupRecord(followup_id="follow_" + hashlib.sha1((eid+c.function_name).encode()).hexdigest()[:16], edge_id=eid, parent_node_id=node_ids[0] if node_ids else "", callee_file=c.file or self.src_file, callee_function=c.function_name, callee_line=c.line, tainted_params_json=json.dumps([x.strip() for x in (c.tainted_params or "").split(',') if x.strip()], ensure_ascii=False), depth=self.dep + 1))
+        self.store.add_taint_edges(edges); self.store.add_followups(followups)
 
     async def run(self) -> TaskResult:
         self._write_design_doc()
         self.store.start_run(self.run_id, self.task_id, self.src_file, self.func_name, self.cfg.cwd, self.cfg.model_dump())
         node_ids = self._seed_nodes()
         self._emit("vuln_scan_graph_start", function=self.func_name, source_file=self.src_file, taints=self.taint_params, depth=self.dep)
-
-        legacy = PerTaintWorkflow(
-            cfg=self.cfg,
-            func_name=self.func_name,
-            src_file=self.src_file,
-            line_hint=self.line_hint,
-            taint_params=self.taint_params,
-            taint_ctx=self.taint_ctx,
-            task_id=self.task_id,
-            out_dir=self.out_dir,
-            dep=self.dep,
-            max_depth=self.max_depth,
-            on_event=self.on_event,
-            cancel_event=self.cancel_event,
-        )
-        result = await legacy.run()
+        result, base_session, dataflow_text = await self._run_single_worker()
         self._record_edges_from_result(result, node_ids)
-
-        base_session = str(self.out_dir / "sessions" / "worker-0-base.jsonl")
         try:
-            findings = await self._run_vuln_mining_fork(base_session, result.final_output or "")
+            findings = await self._run_vuln_mining_fork(base_session, dataflow_text)
             self._emit("vuln_scan_findings", function=self.func_name, count=len(findings), depth=self.dep)
         except Exception as exc:
             self._emit("vuln_scan_error", function=self.func_name, error=str(exc), depth=self.dep)
-
         graph_export = self.store.export_json()
         self.graph_json_path.write_text(json.dumps(graph_export, ensure_ascii=False, indent=2), encoding="utf-8")
         self.store.finish_run(self.run_id, result.status.value if hasattr(result.status, "value") else str(result.status))
-        result.upstream_entry_metadata = dict(result.upstream_entry_metadata or {})
-        summary = {
-            "runs": len(graph_export.get("analysis_runs") or []),
-            "nodes": len(graph_export.get("taint_nodes") or []),
-            "edges": len(graph_export.get("taint_edges") or []),
-            "followups": len(graph_export.get("followups") or []),
-            "findings": len(graph_export.get("vulnerability_findings") or []),
-        }
+        summary = {"runs": len(graph_export.get("analysis_runs") or []), "nodes": len(graph_export.get("taint_nodes") or []), "edges": len(graph_export.get("taint_edges") or []), "followups": len(graph_export.get("followups") or []), "findings": len(graph_export.get("vulnerability_findings") or [])}
         result.vuln_summary = summary
-        result.upstream_entry_metadata["vuln_scan"] = {
-            "sqlite_path": str(self.store.db_path),
-            "graph_json_path": str(self.graph_json_path),
-            "vulnerabilities_dir": str(self.vuln_root),
-        }
+        result.upstream_entry_metadata = dict(result.upstream_entry_metadata or {})
+        result.upstream_entry_metadata["vuln_scan"] = {"sqlite_path": str(self.store.db_path), "graph_json_path": str(self.graph_json_path), "vulnerabilities_dir": str(self.vuln_root)}
         return result
+
+    def _make_result(self, final_output: str, agent_result: Any, passed: bool, completion_reason: str, *, rounds: list[RoundResult] | None = None, total_tokens: TokenUsage | None = None) -> TaskResult:
+        status = TaskStatus.PASSED if passed else TaskStatus.FAILED
+        entry_metadata = _build_upstream_entry_metadata(self.cfg)
+        taint_hint_summary = _build_taint_hint_summary(self.cfg, self.taint_params)
+        output = _prepend_upstream_hint_section(final_output, entry_metadata=entry_metadata, taint_hint_summary=taint_hint_summary)
+        return TaskResult(task_id=self.task_id, task=self.cfg.task, status=status, analysis_status=status.value, completion_reason=completion_reason, upstream_entry_metadata=entry_metadata, taint_hint_summary=taint_hint_summary, final_output=output, rounds=rounds or [], total_tokens=total_tokens or TokenUsage(), error=(completion_reason if not passed else None))

@@ -266,13 +266,10 @@ def build_task_config(svc: ServiceConfig, prompt: str, cwd: str = None) -> TaskC
     )
 
     _backfill_role(cfg.workers)
-    _backfill_role(cfg.judges)
+    # dataflow_vuln_scan intentionally has no Judge; script validators decide output validity.
+    cfg.judges.agents = []
 
-    mode = normalize_pass_threshold(getattr(svc, "pass_threshold", None)) or "majority"
-    if mode == "all":
-        cfg.pass_threshold = cfg.judge_count
-    else:  # "majority" or unknown
-        cfg.pass_threshold = math.ceil(cfg.judge_count / 2)
+    cfg.pass_threshold = 0
 
     return cfg
 

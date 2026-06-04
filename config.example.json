@@ -15,7 +15,7 @@
         "system_prompt_dir": "/opt/dataflow_vuln_scan/prompts/workers",
         "default_thinking_level": "off",
         "agents": [
-            { "model": "gaiasec/auto" }
+            { "model": "MiniMax/MiniMax-M2.5" }
         ]
     },
 
@@ -23,9 +23,7 @@
         "default_tools": ["read", "bash", "find"],
         "system_prompt_dir": "/opt/dataflow_vuln_scan/prompts/judges",
         "default_thinking_level": "off",
-        "agents": [
-            { "model": "gaiasec/auto" }
-        ]
+        "agents": []
     },
 
     "output_dir": "/data/output",

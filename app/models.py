@@ -133,11 +133,11 @@ class TaskConfig(BaseModel):
 
     @property
     def worker_count(self) -> int:
-        return len(self.workers.agents)
+        return min(1, len(self.workers.agents))
 
     @property
     def judge_count(self) -> int:
-        return len(self.judges.agents)
+        return 0
 
 
 # ─── Token 统计 ───────────────────────────────────────────────────────────────
