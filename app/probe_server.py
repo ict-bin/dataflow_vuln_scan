@@ -8,7 +8,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable
 
-logger = logging.getLogger("dfa.probe")
+logger = logging.getLogger("dvs.probe")
 
 
 class ThreadedProbeServer:

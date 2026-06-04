@@ -79,7 +79,7 @@ class AppDvsTaskEvent(Base):
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
     task_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     project_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
-    source: Mapped[str] = mapped_column(String(32), nullable=False, default="dfa", index=True)
+    source: Mapped[str] = mapped_column(String(32), nullable=False, default="dvs", index=True)
     level: Mapped[str] = mapped_column(String(16), nullable=False, default="info", index=True)
     event_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     status: Mapped[Optional[str]] = mapped_column(String(32), nullable=True, index=True)

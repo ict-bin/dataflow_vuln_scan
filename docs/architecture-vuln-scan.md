@@ -1,0 +1,145 @@
+# dataflow_vuln_scan 架构重构设计
+
+## 目标
+
+`dataflow_vuln_scan` 不再只是复用数据流分析能力，而是按以下流程执行：
+
+1. 单函数内污点传播精细分析。
+2. 将污点节点、边、清洗/校验/终止信息写入 task-local SQLite 图数据库。
+3. 从当前上下文 fork 一份漏洞挖掘上下文，判断当前函数内路径是否形成漏洞。
+4. 根据 followup callee 继续跨函数跟入；多个跟入点使用独立上下文并由 worker 队列按 POD 槽位调度。
+5. 漏洞按 finding 独立输出目录归档。
+
+## 输入模型
+
+任务输入包括：
+
+- `source_file`: 文件名或相对源码路径。
+- `function_name`: 目标函数名。
+- `source_root_path`/`input_path`: 源码目录。
+- `taint_params`: 函数入参型污点。
+- `taint_details`: 更通用的污点描述，可表示：
+  - 函数入参；
+  - 某行函数调用返回值；
+  - 某行函数调用参数；
+  - 局部变量/字段/全局对象。
+
+## SQLite 图数据库
+
+每个任务在 `run/vuln-scan.sqlite` 中维护完整树/图。
+
+### `analysis_runs`
+
+记录一次函数级分析运行：task、根文件、根函数、源码根目录、状态、配置快照。
+
+### `taint_nodes`
+
+记录污点源和中间污点载体：
+
+- `taint_kind`: `param | return_value | call_argument | local | field | global | unknown`
+- `symbol`: 污点变量/字段/表达式。
+- `line`: 来源行。
+- `parent_node_id`: 跨函数父节点。
+- `depth`: 递归深度。
+- `context_session`: 产生该节点的上下文文件。
+
+### `taint_edges`
+
+记录单函数内每条传播边：
+
+- `from_symbol` -> `to_symbol`
+- `operation`: assignment/call_arg/return/field/container/condition/sink/terminate/validation/sanitizer
+- `evidence`: 带行号源码证据。
+- `sanitizer`: 清洗/校验函数或表达式。
+- `sanitizer_effect`: `none | partial | complete | unknown`
+- `validation`: 边界、长度、权限、类型、状态机等校验。
+- `termination_reason`: 如果终止，必须记录原因。
+
+### `followups`
+
+记录下一步需要跟入的函数以及对应污点参数。状态支持：
+
+- pending/queued/running/completed/skipped/cycle/depth_limit
+
+### `vulnerability_findings`
+
+每个漏洞独立记录，并指向：
+
+```text
+output/vulnerabilities/<finding_id>/
+  taint-path-report.md
+  context.jsonl
+  vulnerability-report.md
+```
+
+### `context_forks`
+
+记录 fork 的上下文：
+
+- `purpose=vulnerability_mining`: 当前函数漏洞判断 fork。
+- 后续可扩展 `purpose=followup_analysis`。
+
+## Fork 策略
+
+### 漏洞挖掘 fork
+
+当前函数污点分析完成后，复制 base session 为漏洞挖掘 session，仅判断当前函数内是否存在漏洞，不继续递归。
+
+### Followup fork
+
+当前函数有多个跟入点时：
+
+- 第一个跟入点复用主递归队列上下文。
+- 第 2..N 个跟入点视为独立 fork，上下文由 BFS worker 池排队执行。
+- 实际进程并发由现有 worker slot / lease / `callee_concurrency` 控制，避免超过 POD agent 槽位。
+
+## 终止规则
+
+污点传播可终止但必须写入图数据库：
+
+1. 完整清洗/强校验后，后续只使用安全值。
+2. 污点只进入日志/统计/调试输出，不影响敏感操作。
+3. 函数返回常量/错误码，污点未写入输出参数、全局对象、堆对象。
+4. 达到最大深度。
+5. `(source_file,function_name,taint_symbol,field_path)` 状态重复，标记 cycle/back-edge。
+6. 无可解析函数定义或标准库/宏无法跟入，标记 skipped/unknown，不直接判定安全。
+
+## 环路与回合路径
+
+状态键：
+
+```text
+source_file :: function_name :: taint_symbol :: field_path
+```
+
+策略：
+
+- 首次出现：正常分析。
+- 第二次出现：记录回边，允许保守摘要，但不再无限展开。
+- 达到 `max_trace_depth`：记录 depth_limit followup。
+
+## API
+
+新增：
+
+```text
+GET /api/app/dataflow-vuln-scan/tasks/{task_id}/vuln-graph
+GET /api/app/dataflow-vuln-scan/tasks/{task_id}/vuln-findings
+```
+
+## 阶段提示词与 Skill
+
+提示词：
+
+```text
+prompts/taint-graph/default.md
+prompts/vuln-miners/default.md
+prompts/followups/default.md
+```
+
+Skills：
+
+```text
+skills/write-taint-graph/SKILL.md
+skills/mine-dataflow-vulnerability/SKILL.md
+```

@@ -20,7 +20,7 @@ class _JsonFormatter(logging.Formatter):
         payload: dict = {
             "ts": ts,
             "level": record.levelname,
-            "service": getattr(record, "service", "dataflow_analyse"),
+            "service": getattr(record, "service", "dataflow_vuln_scan"),
             "logger": record.name,
             "message": record.getMessage(),
         }
@@ -47,7 +47,7 @@ class _JsonFormatter(logging.Formatter):
         return json.dumps(payload, ensure_ascii=False)
 
 
-def configure_container_logging(service: str = "dataflow_analyse") -> None:
+def configure_container_logging(service: str = "dataflow_vuln_scan") -> None:
     """配置全局 JSON 日志（输出到 stderr）。"""
     handler = logging.StreamHandler(sys.stderr)
     handler.setFormatter(_JsonFormatter())

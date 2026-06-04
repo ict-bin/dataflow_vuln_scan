@@ -12,7 +12,7 @@ from app.config import load_service_config
 from app.db.models import AppDvsProjectConfig
 from app.models import normalize_max_rounds_exceeded_review_strategy, normalize_pass_threshold
 
-logger = logging.getLogger("dfa.config_service")
+logger = logging.getLogger("dvs.config_service")
 
 # Fields in workers/judges that must NOT be stored in DB — always use fixed defaults
 _ROLE_READONLY_FIELDS = {"system_prompt_dir"}

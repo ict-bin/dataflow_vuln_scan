@@ -10,7 +10,7 @@ import httpx
 
 from app.config import get_service_yaml
 
-logger = logging.getLogger("dfa.registry")
+logger = logging.getLogger("dvs.registry")
 
 
 class RegistryService:

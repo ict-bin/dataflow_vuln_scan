@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from .models import Base
 
-logger = logging.getLogger("dfa.db")
+logger = logging.getLogger("dvs.db")
 
 _engine = None
 _SessionLocal = None
@@ -34,7 +34,7 @@ _MIGRATIONS = [
             id VARCHAR(32) NOT NULL PRIMARY KEY,
             task_id VARCHAR(64) NOT NULL,
             project_id VARCHAR(100) NOT NULL,
-            source VARCHAR(32) NOT NULL DEFAULT 'dfa',
+            source VARCHAR(32) NOT NULL DEFAULT 'dvs',
             level VARCHAR(16) NOT NULL DEFAULT 'info',
             event_type VARCHAR(64) NOT NULL,
             status VARCHAR(32) NULL,

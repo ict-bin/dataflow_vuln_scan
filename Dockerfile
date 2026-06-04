@@ -38,7 +38,9 @@ RUN mkdir -p /root/.pi/agent/bin \
     # ~/.pi/agent/skills/ 是 pi 全局 skill 目录，任何 cwd 都能发现
     && mkdir -p /root/.pi/agent/skills \
     && ln -sf /opt/dataflow_vuln_scan/skills/write-dataflow /root/.pi/agent/skills/write-dataflow \
-    && ln -sf /opt/dataflow_vuln_scan/skills/write-taint-flow /root/.pi/agent/skills/write-taint-flow
+    && ln -sf /opt/dataflow_vuln_scan/skills/write-taint-flow /root/.pi/agent/skills/write-taint-flow \
+    && ln -sf /opt/dataflow_vuln_scan/skills/write-taint-graph /root/.pi/agent/skills/write-taint-graph \
+    && ln -sf /opt/dataflow_vuln_scan/skills/mine-dataflow-vulnerability /root/.pi/agent/skills/mine-dataflow-vulnerability
 
 RUN ln -sf "$(which rg)" /root/.pi/agent/bin/rg \
     && echo "ripgrep ready: $(rg --version | head -1)"

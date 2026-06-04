@@ -15,7 +15,7 @@ from app.service.config_service import get_config_service
 
 from . import router
 
-logger = logging.getLogger("dfa.api.config")
+logger = logging.getLogger("dvs.api.config")
 
 
 class ConfigSaveRequest(BaseModel):

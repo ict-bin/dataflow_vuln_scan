@@ -21,6 +21,7 @@ from app.time_utils import isoformat_local
 from app.service.worker_snapshot import build_worker_cluster_snapshot
 from app.service.session_index import build_session_catalog
 from app.service.task_service import generate_prompt_from_path, get_task_service
+from app.vuln_graph_service import load_vuln_scan_graph, summarize_graph
 from .deps import ensure_admin_user, ensure_project_access, get_current_user
 
 from . import router
@@ -368,16 +369,16 @@ async def _fanout_get_json(urls: list[str], *, path: str, token: str, params: di
                 response = await client.get(url, headers=headers, params=params)
                 if response.status_code == 200:
                     return response.json(), base_url, None
-                logger.warning("dfa-agent-fanout http_error url=%s status=%s body=%s", url, response.status_code, response.text[:200])
+                logger.warning("dvs-agent-fanout http_error url=%s status=%s body=%s", url, response.status_code, response.text[:200])
                 return None, None, {"attempted_url": url, "error_kind": "http_error", "status_code": response.status_code, "message": response.text[:200]}
             except httpx.ConnectTimeout:
-                logger.warning("dfa-agent-fanout connect_timeout url=%s", url)
+                logger.warning("dvs-agent-fanout connect_timeout url=%s", url)
                 return None, None, {"attempted_url": url, "error_kind": "connect_timeout", "status_code": None, "message": "connect timeout"}
             except httpx.ConnectError:
-                logger.warning("dfa-agent-fanout connection_refused url=%s", url)
+                logger.warning("dvs-agent-fanout connection_refused url=%s", url)
                 return None, None, {"attempted_url": url, "error_kind": "connection_refused", "status_code": None, "message": "connection refused"}
             except Exception as exc:
-                logger.warning("dfa-agent-fanout transport_error url=%s", url, exc_info=True)
+                logger.warning("dvs-agent-fanout transport_error url=%s", url, exc_info=True)
                 return None, None, {"attempted_url": url, "error_kind": "transport_error", "status_code": None, "message": str(exc)}
     return None, None, {"attempted_url": None, "error_kind": "no_target", "status_code": None, "message": "no target responded"}
 
@@ -508,7 +509,7 @@ async def _build_agent_aggregate_snapshot(token: str, db: Session) -> dict[str, 
             continue
         sources += 1
         if process_source:
-            logger.info("dfa agent aggregate source=%s", process_source)
+            logger.info("dvs agent aggregate source=%s", process_source)
         for item in worker_snapshot.get("processes") or []:
             key = (str(item.get("pod_name") or ""), int(item.get("pid") or 0))
             if key in seen_process_keys:
@@ -541,7 +542,7 @@ async def _build_agent_aggregate_snapshot(token: str, db: Session) -> dict[str, 
         total_healthy_pods = len([row for row in pod_rows if bool(row.get("healthy", True))])
 
     summary = {
-        "pod_name": "dfa-aggregate",
+        "pod_name": "dvs-aggregate",
         "active_processes": len([item for item in merged_processes if str(item.get("owner_kind") or "") == "tracked"]),
         "residual_processes": len([item for item in merged_processes if str(item.get("owner_kind") or "") == "residual"]),
         "unknown_processes": len([item for item in merged_processes if str(item.get("owner_kind") or "") == "unknown"]),
@@ -674,7 +675,7 @@ async def _build_agent_aggregate_summary(token: str, db: Session) -> dict[str, A
         }
     else:
         summary = {
-            "pod_name": "dfa-aggregate",
+            "pod_name": "dvs-aggregate",
             **counters,
             "scanned_at": __import__("time").time(),
             "aggregate_mode": "fanout",
@@ -1351,16 +1352,16 @@ async def _fanout_post_json(urls: list[str], *, path: str, token: str, params: d
                 response = await client.post(url, headers=headers, params=params)
                 if response.status_code == 200:
                     return response.json(), base_url, None
-                logger.warning("dfa agent fanout post non-200 status=%s url=%s", response.status_code, url)
+                logger.warning("dvs agent fanout post non-200 status=%s url=%s", response.status_code, url)
                 return None, None, {"attempted_url": url, "error_kind": "http_error", "status_code": response.status_code, "message": response.text[:200]}
             except httpx.ConnectTimeout:
-                logger.warning("dfa agent fanout post connect_timeout url=%s", url)
+                logger.warning("dvs agent fanout post connect_timeout url=%s", url)
                 return None, None, {"attempted_url": url, "error_kind": "connect_timeout", "status_code": None, "message": "connect timeout"}
             except httpx.ConnectError:
-                logger.warning("dfa agent fanout post connection_refused url=%s", url)
+                logger.warning("dvs agent fanout post connection_refused url=%s", url)
                 return None, None, {"attempted_url": url, "error_kind": "connection_refused", "status_code": None, "message": "connection refused"}
             except Exception as exc:
-                logger.warning("dfa agent fanout post failed url=%s", url, exc_info=True)
+                logger.warning("dvs agent fanout post failed url=%s", url, exc_info=True)
                 return None, None, {"attempted_url": url, "error_kind": "transport_error", "status_code": None, "message": str(exc)}
     return None, None, {"attempted_url": None, "error_kind": "no_target", "status_code": None, "message": "no target responded"}
 
@@ -1704,6 +1705,38 @@ async def kill_all_agent_aggregate_suspected_orphans(
         skipped=skipped,
         items=[AgentProcessKillItemResponse(**item) for item in items],
     )
+
+
+@router.get("/tasks/{task_id}/vuln-graph")
+def get_task_vuln_graph(task_id: str, db: Session = Depends(get_db)):
+    row = _get_task_row(db, task_id)
+    root = _task_root(row)
+    latest_run_root = _latest_epoch_run_root(root) if str(root) else Path()
+    run_root = latest_run_root if latest_run_root.exists() else root / "run"
+    graph = load_vuln_scan_graph(run_root)
+    return {
+        "task_id": task_id,
+        "available": bool(graph.get("analysis_runs") or graph.get("taint_nodes") or graph.get("taint_edges") or graph.get("vulnerability_findings")),
+        "run_root": str(run_root),
+        "summary": summarize_graph(graph),
+        "graph": graph,
+    }
+
+
+@router.get("/tasks/{task_id}/vuln-findings")
+def get_task_vuln_findings(task_id: str, db: Session = Depends(get_db)):
+    row = _get_task_row(db, task_id)
+    root = _task_root(row)
+    latest_run_root = _latest_epoch_run_root(root) if str(root) else Path()
+    run_root = latest_run_root if latest_run_root.exists() else root / "run"
+    graph = load_vuln_scan_graph(run_root)
+    findings = graph.get("vulnerability_findings") or []
+    return {
+        "task_id": task_id,
+        "available": bool(findings),
+        "count": len(findings),
+        "items": findings,
+    }
 
 
 @router.get("/tasks/{task_id}")

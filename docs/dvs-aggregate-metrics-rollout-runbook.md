@@ -61,7 +61,7 @@ K8S:
 4. Deploy frontend image.
 5. Open the performance dashboard and validate DVS cards/alerts.
 6. Run the validation checklist from:
-   - [dfa-aggregate-metrics-validation.md](/home/runshine/CLionProjects/sothoth/13-secflow-service/image_build/secflow-app-dataflow-vuln-scan/docs/dfa-aggregate-metrics-validation.md)
+   - [dvs-aggregate-metrics-validation.md](/home/runshine/CLionProjects/sothoth/13-secflow-service/image_build/secflow-app-dataflow-vuln-scan/docs/dvs-aggregate-metrics-validation.md)
 
 ## K8S Commands
 
@@ -118,7 +118,7 @@ Key checks:
 
 ```bash
 kubectl -n secflow-ns get pods -l name=secflow-app-dataflow-vuln-scan,role=api
-kubectl -n secflow-ns port-forward pod/<dfa-api-pod> 18081:8080
+kubectl -n secflow-ns port-forward pod/<dvs-api-pod> 18081:8080
 curl -s http://127.0.0.1:18081/api/app/dataflow-vuln-scan/metrics | grep secflow_dvs_local
 ```
 
@@ -132,7 +132,7 @@ Key checks:
 
 ```bash
 kubectl -n secflow-ns get pods -l name=secflow-app-dataflow-vuln-scan,role=worker
-kubectl -n secflow-ns port-forward pod/<dfa-worker-pod> 18082:8080
+kubectl -n secflow-ns port-forward pod/<dvs-worker-pod> 18082:8080
 curl -s http://127.0.0.1:18082/api/app/dataflow-vuln-scan/metrics | grep secflow_dvs_local
 ```
 

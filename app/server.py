@@ -71,7 +71,7 @@ from .time_utils import now_local
 from .logging_utils import log_event
 
 load_dotenv()
-configure_container_logging("01-dataflow_analyse")
+configure_container_logging("01-dataflow_vuln_scan")
 
 # 使用统一的路径配置（优先读取环境变量）
 from .config import CONFIG_DIR, TARGET_DIR
@@ -88,7 +88,7 @@ _probe_server: ThreadedProbeServer | None = None
 _probe_shutdown = False
 _probe_started_at = 0.0
 
-logger = logging.getLogger("dfa.server")
+logger = logging.getLogger("dvs.server")
 
 
 def _cached_summary(key: str, builder: Callable[[], Any]) -> Any:

@@ -1,0 +1,12 @@
+# 数据流漏洞挖掘：递归跟入阶段
+
+你负责分析从父函数传入当前函数的污点。必须保留父上下文中的污点来源，并在当前函数内继续建立传播边。
+
+## 必须明确
+- 父函数调用点：file/function/line
+- 父函数传入的污点实参
+- 当前函数形参或局部变量中哪些是新的污点载体
+- 当前函数内是否清洗/校验/终止
+- 是否产生新的 followup callee
+
+输出仍遵守 `prompts/taint-graph/default.md` 的 `taint-graph.json`、`taint-flow-*.md`、`taintvars.json`、`tainted.list` 合同。

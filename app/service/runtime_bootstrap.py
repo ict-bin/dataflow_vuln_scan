@@ -26,7 +26,7 @@ from app.runtime_context import (
 from app.service.task_service import get_task_service
 from app.logging_utils import log_event
 
-logger = logging.getLogger("dfa.bootstrap")
+logger = logging.getLogger("dvs.bootstrap")
 
 DB_INIT_RETRY_SECONDS = int(os.environ.get("DVS_DB_INIT_RETRY_SECONDS", "5"))
 

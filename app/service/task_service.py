@@ -46,13 +46,13 @@ from app.service.session_index import build_session_catalog
 from app.time_utils import isoformat_local, now_local
 from app.agent_process import cleanup_orphan_pi_processes, cleanup_task_agent_processes
 
-logger = logging.getLogger("dfa.task_service")
+logger = logging.getLogger("dvs.task_service")
 
 SERVICE_CONFIG_PATH = os.environ.get("SERVICE_CONFIG", "/app/config.json")
 ENTRY_CONTEXT_MAX_CHARS = 32000
 ENTRY_CONTEXT_MAX_TAINTS = 64
 ENTRY_CONTEXT_MAX_DESC_CHARS = 2240
-TASK_EVENT_SOURCE_DVS = "dfa"
+TASK_EVENT_SOURCE_DVS = "dvs"
 TASK_EVENT_RENEW_INTERVAL_SECONDS = max(60, HEARTBEAT_INTERVAL_SECONDS * 6)
 EXECUTION_SUPERVISOR_INTERVAL_SECONDS = float(os.environ.get("DVS_EXECUTION_SUPERVISOR_INTERVAL_SECONDS", "5"))
 EXECUTION_NO_PROGRESS_SECONDS = float(os.environ.get("DVS_EXECUTION_NO_PROGRESS_SECONDS", "120"))
@@ -255,7 +255,7 @@ def _record_task_event(
     except IntegrityError:
         db.rollback()
         logger.warning(
-            "dfa task event dedupe conflict ignored: task_id=%s event_type=%s dedupe_key=%s",
+            "dvs task event dedupe conflict ignored: task_id=%s event_type=%s dedupe_key=%s",
             row.task_id,
             event_type,
             event_dedupe_key,

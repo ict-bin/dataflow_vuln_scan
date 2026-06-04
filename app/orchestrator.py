@@ -37,7 +37,8 @@ from .models import (
     normalize_max_rounds_exceeded_review_strategy,
 )
 from .runner import run_agent, run_agents_parallel
-from .taint_workflow import PerTaintWorkflow
+from .vuln_workflow import DataflowVulnWorkflow
+from .vuln_store import VulnScanStore
 from .judge_runner import JudgeMixin
 from .parsers import (
     _extract_result,
@@ -596,6 +597,9 @@ class Orchestrator(JudgeMixin):
         else:
             root_out_dir = Path(os.path.abspath(cfg.output_dir)) / root_task_id / "run"
         root_out_dir.mkdir(parents=True, exist_ok=True)
+        graph_db_path = root_out_dir / "vuln-scan.sqlite"
+        vuln_output_root = root_out_dir.parent / "output" / "vulnerabilities"
+        vuln_output_root.mkdir(parents=True, exist_ok=True)
 
         # flag=0 写入 output/ 目录
         root_output_path = root_out_dir.parent / "output"
@@ -668,9 +672,7 @@ class Orchestrator(JudgeMixin):
 
             if result is None:
                 self._raise_if_cancelled()
-                # 执行：使用 PerTaintWorkflow 实现多 session 并行污点分析
-                _taint_match = re.search(r'外部输入参数.*?为[:：]\s*([^\n]+)',
-                                        task_cfg.task or "")
+                _taint_match = re.search(r'外部输入参数.*?为[:：]\s*([^\n]+)', task_cfg.task or "")
                 _taint_list: list[str] = []
                 if _taint_match:
                     raw_taints = _taint_match.group(1)
@@ -683,18 +685,20 @@ class Orchestrator(JudgeMixin):
                         _taint_list = [t.strip().strip('`') for t in _tc_m.group(1).split(',') if t.strip()]
                 if not _taint_list:
                     _taint_list = ["all"]
-
-                workflow = PerTaintWorkflow(
+                # 执行：数据流污点跟踪 + 漏洞挖掘架构化工作流
+                workflow = DataflowVulnWorkflow(
                     cfg=task_cfg,
                     func_name=func_name,
                     src_file=src_file,
                     line_hint=line_hint,
-                    taint_params=_taint_list,
+                    taint_params=(task_cfg.taint_params or _taint_list),
                     taint_ctx=taint_ctx or "",
                     task_id=tid,
                     out_dir=out_dir,
                     dep=dep,
                     max_depth=max_depth,
+                    graph_db_path=graph_db_path,
+                    vuln_output_root=vuln_output_root,
                     on_event=self.on_event,
                     cancel_event=self._cancel_event,
                 )
@@ -809,7 +813,7 @@ class Orchestrator(JudgeMixin):
                     self._emit("trace_callees", tid, function=func_name,
                                callees=[c.function_name for c in valid], depth=dep)
 
-                for callee in valid[:MAX_CALLEES_PER_LEVEL]:
+                for index, callee in enumerate(valid[:MAX_CALLEES_PER_LEVEL]):
                     self._raise_if_cancelled()
                     sub_file = callee.file or src_file
                     sub_cfg = task_cfg.model_copy(deep=True)
@@ -834,6 +838,25 @@ class Orchestrator(JudgeMixin):
                         # fallback: 调用点行号（粗略）
                         sub_line_hint = callee.line if callee.line.startswith("L") else (
                             "L" + callee.line.lstrip("L") if callee.line else "")
+                    if index > 0:
+                        # 语义上的 fork：每个额外跟入点使用独立上下文/任务目录；底层仍由 BFS worker 池按 POD 槽位排队执行。
+                        self._emit("context_fork", tid,
+                                   parent_function=func_name,
+                                   callee_function=callee.function_name,
+                                   fork_index=index,
+                                   depth=dep + 1,
+                                   reason="multiple followup callees")
+                        try:
+                            VulnScanStore(graph_db_path).add_context_fork(
+                                fork_id="fork_" + hashlib.sha1((tid + callee.function_name + str(index)).encode()).hexdigest()[:16],
+                                run_id=f"{tid}:{hashlib.sha1((src_file+'::'+func_name).encode()).hexdigest()[:12]}",
+                                purpose="followup_analysis",
+                                session_file=str(_nested_function_run_dir(root_out_dir, sub_tid, dep + 1, callee.function_name) / "sessions"),
+                                node_id="",
+                                status="queued",
+                            )
+                        except Exception:
+                            pass
                     if self._is_cancelled():
                         break
                     await queue.put((callee.function_name, sub_file, sub_line_hint, sub_cfg,

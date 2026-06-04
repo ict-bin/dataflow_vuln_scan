@@ -254,6 +254,7 @@ class TaskResult(BaseModel):
     taint_hint_summary: list[dict] = Field(default_factory=list)
     rounds: list[RoundResult] = Field(default_factory=list)
     final_output: str = ""
+    vuln_summary: dict = Field(default_factory=dict)
     total_duration_ms: float = 0
     total_tokens: TokenUsage = Field(default_factory=TokenUsage)
     error: Optional[str] = None

@@ -31,7 +31,7 @@ from typing import Callable, Optional
 from .agent_process import AgentProcessHandle, find_pi_command, process_group_id
 from .models import TokenUsage
 
-logger = logging.getLogger("dfa.runner")
+logger = logging.getLogger("dvs.runner")
 
 _MAX_BACKOFF = 300  # 退避上限 5 分钟
 _QUERY_ENGINE_401_MAX_RETRIES = 10
@@ -662,7 +662,7 @@ async def run_agent(
             sys_tmp_file = _sp_path
         except OSError:
             tmp_dir, sys_tmp_file = _write_temp_markdown(
-                tmp_dir, "dfa-", "system.md", system_prompt
+                tmp_dir, "dvs-", "system.md", system_prompt
             )
         args.extend(["--system-prompt", sys_tmp_file])
 

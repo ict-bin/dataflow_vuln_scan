@@ -312,7 +312,7 @@ curl -s http://127.0.0.1:18080/api/app/dataflow-vuln-scan/metrics/aggregate | gr
 ### Fetch local metrics from one pod
 
 ```bash
-kubectl -n secflow-ns port-forward pod/<dfa-api-pod> 18081:8080
+kubectl -n secflow-ns port-forward pod/<dvs-api-pod> 18081:8080
 curl -s http://127.0.0.1:18081/api/app/dataflow-vuln-scan/metrics | grep secflow_dvs_local
 ```
 

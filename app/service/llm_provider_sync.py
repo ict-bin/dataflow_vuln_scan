@@ -11,7 +11,7 @@ from typing import Any
 
 import httpx
 
-logger = logging.getLogger("dfa.llm_sync")
+logger = logging.getLogger("dvs.llm_sync")
 
 _PI_DIR = os.environ.get("PI_CODING_AGENT_DIR", "/root/.pi/agent")
 _DEFAULT_CONTEXT_WINDOW = 128000

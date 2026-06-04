@@ -24,7 +24,7 @@ from .models import (
     normalize_pass_threshold,
 )
 
-logger = logging.getLogger("dfa.config")
+logger = logging.getLogger("dvs.config")
 
 # 容器内固定挂载路径（可通过环境变量覆盖）
 # ENV: TARGET_DIR, CONFIG_DIR, OUTPUT_DIR
