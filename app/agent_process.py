@@ -151,6 +151,7 @@ class AgentProcessInfo:
     cwd: str
     cmdline: str
     environ: dict[str, str]
+    started_at: float | None = None
 
 
 def _iter_agent_processes() -> list[AgentProcessInfo]:
@@ -168,6 +169,10 @@ def _iter_agent_processes() -> list[AgentProcessInfo]:
             continue
         if comm != "pi" and exe != "node":
             continue
+        try:
+            started_at = os.stat(proc_dir).st_ctime
+        except Exception:
+            started_at = None
         candidates.append(
             AgentProcessInfo(
                 pid=pid,
@@ -178,6 +183,7 @@ def _iter_agent_processes() -> list[AgentProcessInfo]:
                 cwd=_safe_readlink(proc_dir / "cwd"),
                 cmdline=_read_proc_cmdline(pid),
                 environ=_read_proc_environ(pid),
+                started_at=started_at,
             )
         )
     return candidates
@@ -272,10 +278,21 @@ def cleanup_orphan_pi_processes(
 ) -> int:
     killed = 0
     seen_pgids: set[tuple[str, int]] = set()
+    try:
+        grace_seconds = max(0, int(os.environ.get("DVS_ORPHAN_PI_GRACE_SECONDS", "900")))
+    except ValueError:
+        grace_seconds = 900
+    now = time.time()
     for info in _iter_agent_processes():
         if info.ppid != 1:
             continue
         if not _matches_target(info, None):
+            continue
+        # pi RPC 子进程在部分 Node/npm 组合下会短暂重挂到 pid=1。
+        # 这些进程仍然携带 DVS_TASK_ID，且很可能是当前正在执行的 agent。
+        # 避免 worker-slot 周期性 orphan sweep 在 agent 刚启动后立即误杀，
+        # 只清理超过宽限期的孤儿；取消/重试等场景仍由 targeted cleanup 立即处理。
+        if info.started_at is not None and grace_seconds > 0 and (now - info.started_at) < grace_seconds:
             continue
         key = ("pg", info.pgid) if info.pgid is not None else ("pid", info.pid)
         if key in seen_pgids:
