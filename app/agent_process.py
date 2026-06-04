@@ -284,14 +284,28 @@ def cleanup_orphan_pi_processes(
         grace_seconds = 900
     now = time.time()
     for info in _iter_agent_processes():
-        if info.ppid != 1:
-            continue
         if not _matches_target(info, None):
             continue
-        # pi RPC 子进程在部分 Node/npm 组合下会短暂重挂到 pid=1。
-        # 这些进程仍然携带 DVS_TASK_ID，且很可能是当前正在执行的 agent。
-        # 避免 worker-slot 周期性 orphan sweep 在 agent 刚启动后立即误杀，
-        # 只清理超过宽限期的孤儿；取消/重试等场景仍由 targeted cleanup 立即处理。
+        # ── 孤儿判断：父进程是否真实存活 ─────────────────────────────────
+        # 原始 ppid==1 检测在容器环境下完全失效：
+        #   entrypoint.sh 使用 `exec "$@"` → python3 main.py 成为 PID 1
+        #   → 所有 pi 子进程的 ppid 都是 1（python3 本身，并非 init）
+        #   → 900s 宽限期后所有活跃 pi 进程都会被误杀
+        # 正确方法：用 os.kill(ppid, 0) 探测父进程是否仍在进程表中
+        #   ProcessLookupError → 父进程已消失 → 进程真正成为孤儿
+        #   成功 / PermissionError → 父进程存活 → 不是孤儿，跳过
+        ppid = info.ppid
+        if ppid is not None and ppid > 0:
+            try:
+                os.kill(ppid, 0)
+                continue  # 父进程存活 → 非孤儿，跳过
+            except ProcessLookupError:
+                pass  # 父进程已消失 → 真正的孤儿，继续判断
+            except PermissionError:
+                continue  # 父进程存在但无权发信号 → 非孤儿，跳过
+            except Exception:
+                continue  # 其他异常保守处理，不杀
+        # 宽限期：只清理启动超过 grace_seconds 的孤儿（避免误杀刚启动的进程）
         if info.started_at is not None and grace_seconds > 0 and (now - info.started_at) < grace_seconds:
             continue
         key = ("pg", info.pgid) if info.pgid is not None else ("pid", info.pid)
