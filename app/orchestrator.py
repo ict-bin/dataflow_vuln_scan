@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import math
 import os
 import re
@@ -39,6 +40,8 @@ from .models import (
 from .runner import run_agent, run_agents_parallel
 from .vuln_workflow import DataflowVulnWorkflow
 from .vuln_store import VulnScanStore, FollowupRecord
+
+logger = logging.getLogger("dvs.orchestrator")
 from .judge_runner import JudgeMixin
 from .parsers import (
     _extract_result,
@@ -619,17 +622,23 @@ class Orchestrator(JudgeMixin):
         # 初始化根目录
         root_task_id = task_id or make_id()
         if _root_out_dir is not None:
-            # 已经是 run/ 子目录
+            # 已经是 run/epochs/<epoch>/ 子目录；共享 run 工作区是其父父目录（run/）
             root_out_dir = _root_out_dir
+            shared_run_dir = root_out_dir.parent.parent  # run/epochs/../.. = run/
         else:
             root_out_dir = Path(os.path.abspath(cfg.output_dir)) / root_task_id / "run"
+            shared_run_dir = root_out_dir  # 旧路径模式，run/ 本身
         root_out_dir.mkdir(parents=True, exist_ok=True)
-        # flag=0 写入 output/ 目录；漏洞图谱数据库和漏洞报告直接位于 output/。
-        root_output_path = root_out_dir.parent / "output"
+        shared_run_dir.mkdir(parents=True, exist_ok=True)
+
+        # 正确的 output/ 路径：由调用方（task_service）传入，或根据任务根目录计算
+        root_output_path = Path(_root_output_dir) if _root_output_dir is not None else (shared_run_dir.parent / "output")
         root_output_path.mkdir(parents=True, exist_ok=True)
         (root_output_path / "flag").write_text("0", encoding="utf-8")
-        graph_db_path = root_output_path / "vuln-scan.sqlite"
-        vuln_output_root = root_output_path / "vulnerabilities"
+
+        # 执行期间：图谱数据库和漏洞报告放在共享 run/ 工作区，最终归档时复制到 output/
+        graph_db_path = shared_run_dir / "vuln-scan.sqlite"
+        vuln_output_root = shared_run_dir / "vulnerabilities"
         vuln_output_root.mkdir(parents=True, exist_ok=True)
 
         # 所有 session 统一归档目录：run/sessions/
@@ -765,23 +774,39 @@ class Orchestrator(JudgeMixin):
                 # 因此先 fork 后台任务，让漏洞挖掘与 BFS 后续跟入点并行运行。
                 vuln_mining_task = asyncio.create_task(workflow.run_vuln_mining_after_taint(result))
 
-            # ── 解析 callee 并加入队列 ─────────────────────────────────────
+            # ── 解析 callee 并加入队列 ─────
             if dep < max_depth and result.final_output:
                 target_dir = os.path.abspath(task_cfg.cwd)
-                store = VulnScanStore(graph_db_path)
-                db_followups = store.list_followups(run_id=getattr(workflow, "run_id", "") if workflow is not None else None, status="pending")
-                callees: list[CalleeRef] = [
-                    CalleeRef(
-                        function_name=f.callee_function,
-                        file=f.callee_file,
-                        line=f.callee_line,
-                        tainted_params=",".join(json.loads(f.tainted_params_json or "[]")) if f.tainted_params_json else "",
-                        description=f.reason,
-                    )
-                    for f in db_followups
-                ]
+                # 优先从 result 元数据直接获取 followup，避免 SQLite JOIN 复杂性
+                _fup_refs: list[dict] = (result.upstream_entry_metadata or {}).get("followup_refs") or []
+                if _fup_refs:
+                    callees: list[CalleeRef] = [
+                        CalleeRef(
+                            function_name=str(f.get("callee_function") or ""),
+                            file=str(f.get("callee_file") or ""),
+                            line=str(f.get("callee_line") or ""),
+                            tainted_params=",".join(json.loads(f.get("tainted_params_json") or "[]")) if f.get("tainted_params_json") else "",
+                            description=str(f.get("reason") or ""),
+                        )
+                        for f in _fup_refs if f.get("callee_function")
+                    ]
+                else:
+                    try:
+                        _store = VulnScanStore(graph_db_path)
+                        _db_fups = _store.list_followups(run_id=getattr(workflow, "run_id", "") if workflow is not None else None, status="pending")
+                        callees = [
+                            CalleeRef(
+                                function_name=f.callee_function, file=f.callee_file, line=f.callee_line,
+                                tainted_params=",".join(json.loads(f.tainted_params_json or "[]")) if f.tainted_params_json else "",
+                                description=f.reason,
+                            )
+                            for f in _db_fups
+                        ]
+                    except Exception as _store_exc:
+                        logger.warning("followup store read failed: %s", _store_exc)
+                        callees = []
                 if not callees:
-                    self._emit("trace_skip", tid, function=func_name, reason="no sqlite followups")
+                    self._emit("trace_skip", tid, function=func_name, reason="no followups")
                 valid: list[CalleeRef] = []
                 for callee in callees:
                     resolved_name, resolved_file = _resolve_function_pointer_followup(target_dir, callee, func_name)
@@ -930,7 +955,7 @@ class Orchestrator(JudgeMixin):
                 root_result.total_duration_ms = total_duration_ms
 
             # 最终报告只展示漏洞简报列表；完整污点图谱/边/跟入点以 output/vuln-scan.sqlite 为准。
-            root_result.final_output = self._build_vulnerability_brief_report(root_result, root_out_dir.parent / "output")
+            root_result.final_output = self._build_vulnerability_brief_report(root_result, graph_db_path)
 
             # ── 最终归档 ──────────────────────────────────────────────────────────
             self._do_final_archive(root_result, root_out_dir, _root_output_dir)
@@ -938,13 +963,12 @@ class Orchestrator(JudgeMixin):
         finally:
             self._cancel_event = None
 
-    def _build_vulnerability_brief_report(self, result: TaskResult, output_path: Path) -> str:
+    def _build_vulnerability_brief_report(self, result: TaskResult, graph_db_path: Path) -> str:
         """构建最终报告：只展示漏洞简报列表，不内嵌数据流全文。"""
-        graph_path = output_path / "vuln-scan.sqlite"
         graph = {}
-        if graph_path.exists():
+        if graph_db_path.exists():
             try:
-                graph = VulnScanStore(graph_path).export_json()
+                graph = VulnScanStore(graph_db_path).export_json()
             except Exception:
                 graph = {}
         findings = graph.get("vulnerability_findings") or []
@@ -1003,8 +1027,32 @@ class Orchestrator(JudgeMixin):
         (output_path / result_filename).write_text(cleaned_output, encoding="utf-8")
         result.final_output = cleaned_output
 
-        # 不再将 dataflow 全文复制到 output；完整污点传播信息以 SQLite 图谱为准，
-        # output/final_report.md 仅保留漏洞简报列表，output/vulnerabilities/ 保留漏洞报告。
+        # 将执行期间生成的 SQLite 图谱和漏洞报告从 run/ 工作区复制到 output/
+        # shared_run_dir = run/，或旧路径下的 root_out_dir
+        _shared = root_out_dir.parent.parent if ("epochs" in root_out_dir.parts and "run" in root_out_dir.parts) else root_out_dir
+        _run_sqlite = _shared / "vuln-scan.sqlite"
+        _out_sqlite = output_path / "vuln-scan.sqlite"
+        if _run_sqlite.exists() and _run_sqlite != _out_sqlite:
+            try:
+                shutil.copy2(_run_sqlite, _out_sqlite)
+            except OSError as _e:
+                logger.warning("archive: failed to copy vuln-scan.sqlite: %s", _e)
+        _run_vulns = _shared / "vulnerabilities"
+        _out_vulns = output_path / "vulnerabilities"
+        if _run_vulns.exists() and _run_vulns != _out_vulns:
+            try:
+                if _out_vulns.exists():
+                    shutil.rmtree(_out_vulns)
+                shutil.copytree(_run_vulns, _out_vulns)
+            except OSError as _e:
+                logger.warning("archive: failed to copy vulnerabilities: %s", _e)
+        _run_manifest = _shared / "artifact-manifest.json"
+        _out_manifest = output_path / "artifact-manifest.json"
+        if _run_manifest.exists() and _run_manifest != _out_manifest:
+            try:
+                shutil.copy2(_run_manifest, _out_manifest)
+            except OSError:
+                pass
 
         # 写 flag 文件(仅 PASSED 为 1,其他保持 0)
         if result.status == TaskStatus.PASSED:

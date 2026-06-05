@@ -460,8 +460,16 @@ class DataflowVulnWorkflow:
             edges.append(TaintEdgeRecord(edge_id=eid, run_id=self.run_id, from_node_id=node_ids[0] if node_ids else "", to_node_id=_node_id(c.file or self.src_file, c.function_name, c.tainted_params or "*", self.dep + 1), source_file=self.src_file, function_name=self.func_name, from_symbol=self.taint_params[0] if self.taint_params else "taint", to_symbol=c.tainted_params or "*", line=c.line, operation="call_arg", evidence=c.description))
             followups.append(FollowupRecord(followup_id="follow_" + hashlib.sha1((eid+c.function_name).encode()).hexdigest()[:16], edge_id=eid, parent_node_id=node_ids[0] if node_ids else "", callee_file=c.file or self.src_file, callee_function=c.function_name, callee_line=c.line, tainted_params_json=json.dumps([x.strip() for x in (c.tainted_params or "").split(',') if x.strip()], ensure_ascii=False), depth=self.dep + 1))
         self.store.add_taint_edges(edges); self.store.add_followups(followups)
+        # 带回 result 元数据，供 Orchestrator 直接利用，避免 SQLite JOIN 查询
+        if followups:
+            _meta = result.upstream_entry_metadata or {}
+            _meta["followup_refs"] = [
+                {"callee_function": f.callee_function, "callee_file": f.callee_file,
+                 "callee_line": f.callee_line, "tainted_params_json": f.tainted_params_json, "reason": f.reason}
+                for f in followups
+            ]
+            result.upstream_entry_metadata = _meta
         self.store.append_artifact_manifest(
-            "taint_graph",
             [
                 {"path": "sqlite:taint_nodes/taint_edges/followups", "kind": "sqlite", "role": "taint_graph", "exists": True},
             ],
