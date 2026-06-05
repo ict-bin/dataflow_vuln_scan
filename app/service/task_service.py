@@ -2404,6 +2404,10 @@ class TaskService:
                 cfg.function_name = str(tcfg["function_name"])
             if tcfg.get("line_hint"):
                 cfg.line_hint = str(tcfg["line_hint"])
+            if tcfg.get("funcdb_path"):
+                cfg.funcdb_path = str(tcfg["funcdb_path"]).strip()
+            if tcfg.get("func_hash"):
+                cfg.func_hash = str(tcfg["func_hash"]).strip()
             if isinstance(tcfg.get("taint_params"), list):
                 cfg.taint_params = [str(value).strip() for value in tcfg["taint_params"] if str(value).strip()]
             if tcfg.get("function_description"):

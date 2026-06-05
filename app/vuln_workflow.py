@@ -216,7 +216,14 @@ class DataflowVulnWorkflow:
 
     async def _run_single_worker(self) -> tuple[TaskResult, str, str]:
         self._link_source_tree()
-        func_body = _extract_function_body(self.ws, self.src_file, self.func_name, self.line_hint)
+        func_body = _extract_function_body(
+            self.ws,
+            self.src_file,
+            self.func_name,
+            self.line_hint,
+            funcdb_path=getattr(self.cfg, "funcdb_path", ""),
+            func_hash=getattr(self.cfg, "func_hash", ""),
+        )
         if not func_body.strip():
             return self._make_result("# 数据流漏洞挖掘受限\n\n未提取到有效函数体。\n", None, False, "function_body_missing"), "", ""
         acfg = self._agent_cfg()
@@ -320,7 +327,9 @@ class DataflowVulnWorkflow:
         self.store.add_context_fork(fork_id=fork_id, run_id=self.run_id, purpose="vulnerability_mining", session_file=str(fork_session), node_id=node, status="running")
         prompt = (
             f"# 阶段：漏洞挖掘 Fork\n\n目标函数: `{self.src_file}::{self.func_name}`\n污点: {', '.join(self.taint_params)}\n\n"
-            f"基于下面的单函数污点传播结果，判断是否存在漏洞。必须输出 JSON: {{\"findings\":[]}}。\n\n```markdown\n{dataflow_text[:30000]}\n```"
+            "基于下面的单函数污点传播结果，判断是否存在漏洞。必须输出 JSON: {\"findings\":[]}。\n"
+            "每个 finding 必须包含 `source_file`（漏洞所在文件，相对源码根目录优先）和 `line`（漏洞发生行号，如 L123 或 123）。\n\n"
+            f"```markdown\n{dataflow_text[:30000]}\n```"
         )
         miner_system_prompt = (
             "# 内嵌技能：mine-dataflow-vulnerability\n"
@@ -345,13 +354,13 @@ class DataflowVulnWorkflow:
                 continue
             finding_id = f"vuln_{hashlib.sha1((self.run_id+str(idx)+json.dumps(item, ensure_ascii=False)).encode()).hexdigest()[:16]}"
             fdir = self.vuln_root / finding_id; fdir.mkdir(parents=True, exist_ok=True)
-            (fdir / "vulnerability-report.md").write_text(f"# {item.get('title') or finding_id}\n\n## 摘要\n{item.get('summary','')}\n\n## 证据\n{item.get('evidence','')}\n\n## 可利用性\n{item.get('exploitability','')}\n", encoding="utf-8")
+            (fdir / "vulnerability-report.md").write_text(f"# {item.get('title') or finding_id}\n\n## 位置\n- 文件: `{item.get('source_file') or item.get('file') or self.src_file}`\n- 行号: `{item.get('line') or item.get('line_hint') or item.get('vuln_line') or 'unknown'}`\n\n## 摘要\n{item.get('summary','')}\n\n## 证据\n{item.get('evidence','')}\n\n## 可利用性\n{item.get('exploitability','')}\n", encoding="utf-8")
             (fdir / "taint-path-report.md").write_text(dataflow_text, encoding="utf-8")
             try:
                 if fork_session.exists(): shutil.copyfile(fork_session, fdir / "context.jsonl")
             except OSError:
                 (fdir / "context.jsonl").write_text("", encoding="utf-8")
-            rec = VulnFindingRecord(finding_id=finding_id, run_id=self.run_id, node_id=node, vuln_type=str(item.get("vuln_type") or "unknown"), severity=str(item.get("severity") or "unknown"), title=str(item.get("title") or finding_id), summary=str(item.get("summary") or ""), evidence=str(item.get("evidence") or ""), exploitability=str(item.get("exploitability") or ""), confidence=float(item.get("confidence") or 0), output_dir=str(fdir))
+            rec = VulnFindingRecord(finding_id=finding_id, run_id=self.run_id, node_id=node, source_file=str(item.get("source_file") or item.get("file") or self.src_file), line=str(item.get("line") or item.get("line_hint") or item.get("vuln_line") or ""), vuln_type=str(item.get("vuln_type") or "unknown"), severity=str(item.get("severity") or "unknown"), title=str(item.get("title") or finding_id), summary=str(item.get("summary") or ""), evidence=str(item.get("evidence") or ""), exploitability=str(item.get("exploitability") or ""), confidence=float(item.get("confidence") or 0), output_dir=str(fdir))
             self.store.add_finding(rec); findings.append(rec)
         return findings
 

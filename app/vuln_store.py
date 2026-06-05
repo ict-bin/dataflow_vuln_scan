@@ -74,6 +74,8 @@ class VulnFindingRecord:
     run_id: str
     node_id: str
     edge_id: str = ""
+    source_file: str = ""
+    line: str = ""
     vuln_type: str = "unknown"
     severity: str = "unknown"
     title: str = ""
@@ -180,6 +182,8 @@ class VulnScanStore:
                   run_id TEXT NOT NULL,
                   node_id TEXT NOT NULL,
                   edge_id TEXT NOT NULL DEFAULT '',
+                  source_file TEXT NOT NULL DEFAULT '',
+                  line TEXT NOT NULL DEFAULT '',
                   vuln_type TEXT NOT NULL DEFAULT 'unknown',
                   severity TEXT NOT NULL DEFAULT 'unknown',
                   title TEXT NOT NULL DEFAULT '',
@@ -209,6 +213,14 @@ class VulnScanStore:
                 CREATE INDEX IF NOT EXISTS ix_findings_run ON vulnerability_findings(run_id);
                 """
             )
+            for column, ddl in [
+                ("source_file", "ALTER TABLE vulnerability_findings ADD COLUMN source_file TEXT NOT NULL DEFAULT ''"),
+                ("line", "ALTER TABLE vulnerability_findings ADD COLUMN line TEXT NOT NULL DEFAULT ''"),
+            ]:
+                try:
+                    conn.execute(ddl)
+                except Exception:
+                    pass
 
     def start_run(self, run_id: str, task_id: str, root_file: str, root_function: str, source_root: str, config: dict[str, Any] | None = None) -> None:
         with self.connect() as conn:

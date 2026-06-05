@@ -69,7 +69,8 @@ class TaskCreateRequest(BaseModel):
     function_description_source: Optional[str] = None
     entry_reason: Optional[str] = None
     entry_reason_source: Optional[str] = None
-    taint_details: list[Dict[str, Any]] = []
+    funcdb_path: Optional[str] = None
+    func_hash: Optional[str] = None
     task_origin_type: Optional[str] = None
     parent_project_id: Optional[str] = None
     parent_task_id: Optional[str] = None
@@ -1069,6 +1070,10 @@ def create_task(body: TaskCreateRequest, db: Session = Depends(get_db)):
             for item in body.taint_details
             if isinstance(item, dict) and str(item.get("name") or item.get("taint") or item.get("param") or "").strip()
         ]
+    if body.funcdb_path:
+        task_config_json["funcdb_path"] = str(body.funcdb_path).strip()
+    if body.func_hash:
+        task_config_json["func_hash"] = str(body.func_hash).strip()
 
     svc = get_task_service()
     return svc.create_task(

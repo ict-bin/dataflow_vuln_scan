@@ -61,13 +61,117 @@ def _add_line_numbers(lines: list, start_lineno: int) -> str:
     )
 
 
+def _extract_function_body_from_funcdb(
+    funcdb_path: str = "",
+    *,
+    func_hash: str = "",
+    src_file: str = "",
+    func_name: str = "",
+    line_hint: str = "",
+) -> str:
+    """Read EA funcdb and return authoritative function body with absolute line numbers.
+
+    funcdb_path may be a single *_functions.db file or a directory containing funcdb files.
+    Prefer func_hash, then source_file + function + line_hint matching.
+    """
+    if not str(funcdb_path or "").strip():
+        return ""
+    import sqlite3 as _sqlite3
+    from pathlib import Path as _Path
+    import os as _os
+
+    root = _Path(str(funcdb_path).strip())
+    if root.is_file():
+        db_files = [root]
+    elif root.is_dir():
+        db_files = sorted(root.glob("*_functions.db"))
+    else:
+        return ""
+    hint_num = 0
+    if line_hint:
+        try:
+            hint_num = int(str(line_hint).lstrip("Ll"))
+        except ValueError:
+            hint_num = 0
+    src_norm = str(src_file or "").replace("\\", "/").strip()
+    short = str(func_name or "").split("::")[-1]
+
+    def _score(row: dict) -> int:
+        score = 0
+        if func_hash and row.get("func_hash") == func_hash:
+            score += 10000
+        if short and row.get("name") == short:
+            score += 1000
+        elif short and str(row.get("name") or "").endswith("::" + short):
+            score += 800
+        file_path = str(row.get("file_path") or row.get("rel_path") or row.get("original_path") or "").replace("\\", "/")
+        if src_norm and file_path:
+            if file_path == src_norm or file_path.endswith("/" + src_norm) or src_norm.endswith("/" + file_path):
+                score += 500
+            elif _os.path.basename(file_path) == _os.path.basename(src_norm):
+                score += 100
+        if hint_num > 0:
+            start = int(row.get("start_line") or 0)
+            end = int(row.get("end_line") or 0)
+            if start <= hint_num <= end:
+                score += 300
+            else:
+                score -= min(abs(start - hint_num), 200)
+        return score
+
+    candidates: list[dict] = []
+    for db_file in db_files:
+        try:
+            conn = _sqlite3.connect(str(db_file))
+            conn.row_factory = _sqlite3.Row
+            if func_hash:
+                rows = conn.execute(
+                    """SELECT f.*, fm.rel_path AS file_path, fm.original_path AS original_path
+                       FROM functions f LEFT JOIN file_meta fm ON fm.file_hash=f.file_hash
+                       WHERE f.func_hash=?""",
+                    (func_hash,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """SELECT f.*, fm.rel_path AS file_path, fm.original_path AS original_path
+                       FROM functions f LEFT JOIN file_meta fm ON fm.file_hash=f.file_hash
+                       WHERE f.name=? OR f.name LIKE ?""",
+                    (short, f"%::{short}"),
+                ).fetchall()
+            for r in rows:
+                d = dict(r); d["__db_file"] = str(db_file); candidates.append(d)
+            conn.close()
+        except Exception:
+            continue
+    if not candidates:
+        return ""
+    best = max(candidates, key=_score)
+    body = str(best.get("body") or "").strip("\n")
+    start_line = int(best.get("start_line") or 0)
+    end_line = int(best.get("end_line") or 0)
+    if not body.strip() or start_line <= 0:
+        return ""
+    file_path = str(best.get("file_path") or best.get("original_path") or src_file)
+    header = f"// {file_path}  L{start_line}-L{end_line or start_line}  ({len(body.splitlines())} lines)  [EA funcdb]"
+    return header + chr(10) + _add_line_numbers(body.splitlines(), start_line)
+
+
 def _extract_function_body(ws, src_file: str, func_name: str,
-                           line_hint: str = "") -> str:
+                           line_hint: str = "", funcdb_path: str = "", func_hash: str = "") -> str:
     """Orchestrator extracts function body with absolute line numbers injected.
     Returns text where every line is prefixed 'L{n}: ' so LLM uses correct line numbers.
     line_hint: e.g. 'L228' — used to prefer the overload at or after that line.
     """
     import subprocess, re as _re
+    funcdb_body = _extract_function_body_from_funcdb(
+        funcdb_path,
+        func_hash=func_hash,
+        src_file=src_file,
+        func_name=func_name,
+        line_hint=line_hint,
+    )
+    if funcdb_body.strip():
+        return funcdb_body
     cmd = ['extract_func', src_file, func_name]
     if line_hint:
         cmd += ['--line', line_hint.lstrip('Ll')]

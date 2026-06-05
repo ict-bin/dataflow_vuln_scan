@@ -107,6 +107,8 @@ class TaskConfig(BaseModel):
     entry_reason: str = Field(default="", description="上游入口分析给出的入口判定原因")
     entry_reason_source: str = Field(default="", description="入口判定原因来源：agent/default")
     taint_details: list[dict[str, str]] = Field(default_factory=list, description="上游入口分析给出的逐 taint 说明")
+    funcdb_path: str = Field(default="", description="EA 阶段 funcdb 文件或 funcdb 目录路径，用于精确提取函数体")
+    func_hash: str = Field(default="", description="EA 阶段函数哈希，用于在 funcdb 中精确定位函数")
     cwd: str = Field(default="/data/target", description="待分析文件所在目录")
 
     # 服务配置部分（从 ServiceConfig 合并）
