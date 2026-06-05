@@ -470,6 +470,7 @@ class DataflowVulnWorkflow:
             ]
             result.upstream_entry_metadata = _meta
         self.store.append_artifact_manifest(
+            "taint_tracking",
             [
                 {"path": "sqlite:taint_nodes/taint_edges/followups", "kind": "sqlite", "role": "taint_graph", "exists": True},
             ],
