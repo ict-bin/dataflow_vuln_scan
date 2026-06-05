@@ -44,7 +44,7 @@ from app.service.execution_coordinator import (
 )
 from app.service.session_index import build_session_catalog
 from app.time_utils import isoformat_local, now_local
-from app.agent_process import cleanup_orphan_pi_processes, cleanup_task_agent_processes
+from app.agent_process import cleanup_orphan_pi_processes, cleanup_task_agent_processes, cleanup_worker_runtime_processes
 
 logger = logging.getLogger("dvs.task_service")
 
@@ -1410,13 +1410,49 @@ class TaskService:
                         contexts = list(_running_task_contexts.items())
                     for task_id, ctx in contexts:
                         if ctx.execution_alive():
+                            db_gen = get_db()
+                            db: Session = next(db_gen)
+                            try:
+                                snapshot = load_execution_snapshot(db, task_id)
+                                if (
+                                    snapshot is None
+                                    or snapshot.status == "cancelled"
+                                    or snapshot.execution_owner_id != WORKER_ID
+                                    or int(snapshot.execution_epoch or 0) != int(ctx.epoch or 0)
+                                    or int(snapshot.control_version or 0) != int(ctx.control_version or 0)
+                                ):
+                                    ctx.termination_reason = "control_plane_state_changed"
+                                    ctx.cancel_requested.set()
+                                    if ctx.orch is not None:
+                                        ctx.orch.abort()
+                                    self._cleanup_worker_runtime(
+                                        label=f"task_control_change:{task_id}",
+                                        task_id=task_id,
+                                        reason="cancel_resume_restart_or_lease_change",
+                                    )
+                                    continue
+                            finally:
+                                try:
+                                    next(db_gen)
+                                except StopIteration:
+                                    pass
                             if ctx.cancel_requested.is_set() and ctx.orch is not None:
                                 ctx.orch.abort()
+                                self._cleanup_worker_runtime(
+                                    label=f"task_cancel_requested:{task_id}",
+                                    task_id=task_id,
+                                    reason=ctx.termination_reason or "cancel_requested",
+                                )
                             if EXECUTION_NO_PROGRESS_SECONDS > 0 and (_time.time() - max(ctx.last_progress_at, ctx.started_at)) > EXECUTION_NO_PROGRESS_SECONDS:
                                 ctx.termination_reason = "no_progress"
                                 ctx.cancel_requested.set()
                                 if ctx.orch is not None:
                                     ctx.orch.abort()
+                                self._cleanup_worker_runtime(
+                                    label=f"task_no_progress:{task_id}",
+                                    task_id=task_id,
+                                    reason="no_progress",
+                                )
                             continue
                         db_gen = get_db()
                         db: Session = next(db_gen)
@@ -1492,12 +1528,33 @@ class TaskService:
             db.commit()
         return len(recovered)
 
+    def _cleanup_worker_runtime(self, *, label: str, task_id: str | None = None, reason: str = "") -> int:
+        """Best-effort full runtime cleanup for one-slot worker pods."""
+        try:
+            cleaned = cleanup_worker_runtime_processes(logger.warning, label=label)
+            log_event(
+                logger,
+                logging.INFO,
+                "worker runtime cleanup finished",
+                event="worker_runtime_cleanup_finished",
+                task_id=task_id,
+                owner_id=WORKER_ID,
+                label=label,
+                reason=reason,
+                cleaned_groups=cleaned,
+            )
+            return cleaned
+        except Exception as exc:
+            logger.warning("worker runtime cleanup failed [%s]: %s", label, exc, exc_info=True)
+            return 0
+
     async def dispatch_once(self) -> str | None:
         if self.local_running_task_count() >= MAX_LOCAL_RUNNING_TASKS:
             from app.metrics import observe_local_event
 
             observe_local_event("dispatch_capacity_blocked", "skip")
             return None
+        self._cleanup_worker_runtime(label="pre_dispatch", reason="before_claim")
         from app.db import get_db
         db_gen = get_db()
         db: Session = next(db_gen)
@@ -1932,6 +1989,7 @@ class TaskService:
     def restart_task(self, db: Session, task_id: str) -> dict:
         """在原任务ID上重置并重新执行（SA 模式：in-place restart）。"""
         row = self._get_or_404(db, task_id)
+        self._cleanup_worker_runtime(label=f"task_restart:{task_id}", task_id=task_id, reason="restart_requested")
         from sqlalchemy.orm.attributes import flag_modified
         clean_config = {k: v for k, v in (row.task_config_json or {}).items()
                         if k not in ("start_stage", "resume_workspace", "resume")} or None
@@ -1973,6 +2031,7 @@ class TaskService:
 
     def cancel_task(self, db: Session, task_id: str) -> dict:
         row = self._get_or_404(db, task_id)
+        self._cleanup_worker_runtime(label=f"task_cancel:{task_id}", task_id=task_id, reason="cancel_requested")
         if row.status in ("passed", "failed", "error", "cancelled"):
             return self._row_to_dict(row)
         ctx = _get_running_task_context(task_id)
@@ -2563,6 +2622,7 @@ class TaskService:
             log_event(logger, logging.INFO, "terminal state committed", event="task_terminal_committed",
                       task_id=task_id, owner_id=WORKER_ID, epoch=epoch, control_version=control_version,
                       status=terminal_status)
+            self._cleanup_worker_runtime(label=f"task_terminal:{task_id}", task_id=task_id, reason="task_terminal_committed")
 
         except asyncio.CancelledError:
             from app.metrics import observe_local_event
@@ -2684,6 +2744,7 @@ class TaskService:
                 )
             try:
                 orphan_cleaned = cleanup_orphan_pi_processes(logger.warning, label=f"task_finally:{task_id}")
+                full_cleaned = self._cleanup_worker_runtime(label=f"task_finally_full:{task_id}", task_id=task_id, reason="task_finally")
                 log_event(
                     logger,
                     logging.INFO,
@@ -2695,6 +2756,7 @@ class TaskService:
                     control_version=control_version,
                     cleaned_groups=targeted_cleaned,
                     orphan_cleaned_groups=orphan_cleaned,
+                    full_runtime_cleaned_groups=full_cleaned,
                 )
             except Exception:
                 logger.warning("failed to cleanup orphan pi processes for %s", task_id, exc_info=True)
