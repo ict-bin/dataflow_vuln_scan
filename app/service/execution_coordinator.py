@@ -45,13 +45,49 @@ def _lease_deadline():
 
 
 def _with_clean_restart_flag(config: Any, *, reason: str, previous_owner_id: str | None, previous_epoch: int | None) -> dict[str, Any]:
-    cfg = dict(config or {}) if isinstance(config, dict) else {}
+    import datetime as _dt
+    if isinstance(config, str):
+        try:
+            config = json.loads(config)
+        except Exception:
+            config = {}
+    cfg = {k: v for k, v in (config or {}).items() if k and not k.startswith("_")} if isinstance(config, dict) else {}
     cfg["_force_clean_restart"] = True
     cfg["_restart_reason"] = reason
     cfg["_restart_previous_owner_id"] = previous_owner_id or ""
     cfg["_restart_previous_epoch"] = int(previous_epoch or 0)
-    cfg["_restart_marked_at"] = now_local().isoformat()
+    cfg["_restart_marked_at"] = _dt.datetime.now().isoformat()
     return cfg
+
+
+def _clean_restart_update_fields(row: AppDvsTask | None, *, reason: str) -> dict:
+    """Build SQLAlchemy update dict for a clean restart."""
+    import datetime as _dt
+    now_iso = _dt.datetime.now().isoformat()
+    base_cfg: dict[str, Any] = {}
+    if row is not None:
+        raw = row.task_config_json
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except Exception:
+                raw = {}
+        if isinstance(raw, dict):
+            base_cfg = {k: v for k, v in raw.items() if k and not k.startswith("_")}
+    base_cfg["_force_clean_restart"] = True
+    base_cfg["_restart_reason"] = reason
+    base_cfg["_restart_previous_owner_id"] = str(row.execution_owner_id or "") if row else ""
+    base_cfg["_restart_previous_epoch"] = int(row.execution_epoch or 0) if row else 0
+    base_cfg["_restart_marked_at"] = now_iso
+    return {
+        AppDvsTask.task_config_json: base_cfg,
+        AppDvsTask.result_json: None,
+        AppDvsTask.stages_json: None,
+        AppDvsTask.latest_abnormal_reason_json: None,
+        AppDvsTask.error: None,
+        AppDvsTask.finished_at: None,
+        AppDvsTask.started_at: None,
+    }
 
 
 def _mark_row_clean_restart(row: AppDvsTask, *, reason: str, previous_owner_id: str | None = None, previous_epoch: int | None = None) -> None:
