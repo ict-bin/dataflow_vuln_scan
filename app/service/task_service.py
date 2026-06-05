@@ -1976,6 +1976,28 @@ class TaskService:
         row = self._get_or_404(db, task_id)
         self.request_cancel(task_id, reason="restart_requested")
         self._cleanup_worker_runtime(label=f"task_restart:{task_id}", task_id=task_id, reason="restart_requested_before_pending")
+        task_root = _task_root(row)
+        run_dir_removed = False
+        output_dir_removed = False
+        cleanup_errors: list[str] = []
+        if task_root is not None:
+            for child_name in ("run", "output"):
+                child = task_root / child_name
+                if child.exists():
+                    try:
+                        shutil.rmtree(child)
+                        if child_name == "run":
+                            run_dir_removed = True
+                        if child_name == "output":
+                            output_dir_removed = True
+                    except Exception as exc:
+                        cleanup_errors.append(f"{child_name}: {exc}")
+        deleted_events = int(
+            db.query(AppDvsTaskEvent)
+            .filter(AppDvsTaskEvent.task_id == row.task_id)
+            .delete(synchronize_session=False)
+            or 0
+        )
         from sqlalchemy.orm.attributes import flag_modified
         clean_config = {k: v for k, v in (row.task_config_json or {}).items()
                         if k not in ("start_stage", "resume_workspace", "resume")} or None
@@ -1988,6 +2010,7 @@ class TaskService:
         row.error = None
         row.latest_abnormal_reason_json = None
         row.execution_owner_id = None
+        row.execution_epoch = int(row.execution_epoch or 0) + 1
         row.execution_lease_until = None
         row.execution_heartbeat_at = None
         row.control_version = int(row.control_version or 0) + 1
@@ -2003,7 +2026,14 @@ class TaskService:
             status=row.status,
             control_version=int(row.control_version or 0),
             dispatch_status=row.dispatch_status,
-            payload={"control_version": int(row.control_version or 0)},
+            payload={
+                "control_version": int(row.control_version or 0),
+                "execution_epoch": int(row.execution_epoch or 0),
+                "deleted_event_count": deleted_events,
+                "run_dir_removed": run_dir_removed,
+                "output_dir_removed": output_dir_removed,
+                "cleanup_errors": cleanup_errors,
+            },
         )
         db.commit(); db.refresh(row)
         log_event(logger, logging.INFO, "task restarted in-place", event="task_restarted",
