@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import timedelta
+from typing import Any
 
 from sqlalchemy.orm import Session
 
@@ -43,6 +44,48 @@ def _lease_deadline():
     return now_local() + timedelta(seconds=LEASE_TTL_SECONDS)
 
 
+def _with_clean_restart_flag(config: Any, *, reason: str, previous_owner_id: str | None, previous_epoch: int | None) -> dict[str, Any]:
+    cfg = dict(config or {}) if isinstance(config, dict) else {}
+    cfg["_force_clean_restart"] = True
+    cfg["_restart_reason"] = reason
+    cfg["_restart_previous_owner_id"] = previous_owner_id or ""
+    cfg["_restart_previous_epoch"] = int(previous_epoch or 0)
+    cfg["_restart_marked_at"] = now_local().isoformat()
+    return cfg
+
+
+def _mark_row_clean_restart(row: AppDvsTask, *, reason: str, previous_owner_id: str | None = None, previous_epoch: int | None = None) -> None:
+    row.task_config_json = _with_clean_restart_flag(
+        row.task_config_json,
+        reason=reason,
+        previous_owner_id=previous_owner_id if previous_owner_id is not None else row.execution_owner_id,
+        previous_epoch=previous_epoch if previous_epoch is not None else int(row.execution_epoch or 0),
+    )
+    row.result_json = None
+    row.stages_json = None
+    row.latest_abnormal_reason_json = None
+    row.error = None
+    row.finished_at = None
+    row.started_at = None
+
+
+def _clean_restart_update_fields(row: AppDvsTask, *, reason: str) -> dict:
+    return {
+        AppDvsTask.task_config_json: _with_clean_restart_flag(
+            row.task_config_json,
+            reason=reason,
+            previous_owner_id=row.execution_owner_id,
+            previous_epoch=int(row.execution_epoch or 0),
+        ),
+        AppDvsTask.result_json: None,
+        AppDvsTask.stages_json: None,
+        AppDvsTask.latest_abnormal_reason_json: None,
+        AppDvsTask.error: None,
+        AppDvsTask.finished_at: None,
+        AppDvsTask.started_at: None,
+    }
+
+
 def claim_one_runnable_task(db: Session, owner_id: str) -> ClaimedTask | None:
     now = now_local()
     candidate = (
@@ -67,9 +110,9 @@ def claim_one_runnable_task(db: Session, owner_id: str) -> ClaimedTask | None:
         AppDvsTask.dispatch_status: "leased",
     }
     if expected_status == "running":
-        # Reclaimed tasks lost their worker lease during rollout/crash; make them
-        # re-enter the normal dispatch path instead of staying in stale running.
+        # No checkpoint/resume support: a reclaimed running task must be a clean business restart.
         update_fields[AppDvsTask.status] = "pending"
+        update_fields.update(_clean_restart_update_fields(candidate, reason="claim_expired_running"))
 
     updated = (
         db.query(AppDvsTask)
@@ -168,6 +211,10 @@ def recover_running_task_if_owner(
                 AppDvsTask.execution_lease_until: None,
                 AppDvsTask.execution_heartbeat_at: None,
                 AppDvsTask.dispatch_status: "pending",
+                **_clean_restart_update_fields(
+                    db.query(AppDvsTask).filter_by(task_id=task_id).first(),  # type: ignore[arg-type]
+                    reason=reason,
+                ),
             },
             synchronize_session=False,
         )
@@ -201,6 +248,14 @@ def reclaim_orphaned_running_tasks(db: Session, *, limit: int = 100) -> list[Rec
             reason = "missing_lease"
         else:
             reason = "expired_lease"
+        fields = {
+            AppDvsTask.status: "pending",
+            AppDvsTask.execution_owner_id: None,
+            AppDvsTask.execution_lease_until: None,
+            AppDvsTask.execution_heartbeat_at: None,
+            AppDvsTask.dispatch_status: "pending",
+        }
+        fields.update(_clean_restart_update_fields(row, reason=reason))
         updated = (
             db.query(AppDvsTask)
             .filter(
@@ -209,13 +264,7 @@ def reclaim_orphaned_running_tasks(db: Session, *, limit: int = 100) -> list[Rec
                 AppDvsTask.status == "running",
             )
             .update(
-                {
-                    AppDvsTask.status: "pending",
-                    AppDvsTask.execution_owner_id: None,
-                    AppDvsTask.execution_lease_until: None,
-                    AppDvsTask.execution_heartbeat_at: None,
-                    AppDvsTask.dispatch_status: "pending",
-                },
+                fields,
                 synchronize_session=False,
             )
         )

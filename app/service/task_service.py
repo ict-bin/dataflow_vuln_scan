@@ -41,6 +41,7 @@ from app.service.execution_coordinator import (
     release_lease,
     renew_lease,
     still_owner,
+    _mark_row_clean_restart,
 )
 from app.service.session_index import build_session_catalog
 from app.time_utils import isoformat_local, now_local
@@ -1462,6 +1463,8 @@ class TaskService:
             row = db.query(AppDvsTask).filter_by(task_id=item.task_id).first()
             if row is None:
                 continue
+            _mark_row_clean_restart(row, reason=item.reason, previous_owner_id=item.previous_owner_id)
+            db.add(row)
             payload = {
                 "previous_owner_id": item.previous_owner_id,
                 "previous_dispatch_status": item.previous_dispatch_status,
@@ -2297,7 +2300,70 @@ class TaskService:
                 db.commit()
                 return
 
-            started_at = row.started_at or now_local()
+            # ── Clean Restart ─────────────────────────────────────────────────────────
+            # 没有断点续做能力：只要任务是从 lease 恢复过来的，就必须做一次干净重启，
+            # 清理旧 output / SQLite 图谱 / session，新 epoch 从根函数全量重跑。
+            tcfg_pre = row.task_config_json or {}
+            force_clean_restart = bool(tcfg_pre.pop("_force_clean_restart", False))
+            restart_reason = str(tcfg_pre.pop("_restart_reason", "") or "")
+            restart_prev_owner = str(tcfg_pre.pop("_restart_previous_owner_id", "") or "")
+            restart_prev_epoch = int(tcfg_pre.pop("_restart_previous_epoch", 0) or 0)
+            tcfg_pre.pop("_restart_marked_at", None)
+            if force_clean_restart:
+                row.task_config_json = tcfg_pre
+                db.add(row)
+                db.commit()
+                task_root = _task_root(row)
+                _cleaned: list[str] = []
+                if task_root:
+                    output_root = task_root / "output"
+                    for _artifact in [
+                        output_root / "vuln-scan.sqlite",
+                        output_root / "vulnerabilities",
+                        output_root / "artifact-manifest.json",
+                        output_root / "final_report.md",
+                        output_root / "flag",
+                    ]:
+                        try:
+                            if _artifact.is_dir():
+                                shutil.rmtree(_artifact)
+                                _cleaned.append(str(_artifact))
+                            elif _artifact.exists():
+                                _artifact.unlink()
+                                _cleaned.append(str(_artifact))
+                        except OSError:
+                            pass
+                    run_root = task_root / "run" / "epochs"
+                    if run_root.is_dir():
+                        for _epoch_dir in sorted(run_root.iterdir()):
+                            if _epoch_dir.is_dir() and _epoch_dir.name != f"{int(epoch):04d}":
+                                try:
+                                    shutil.rmtree(_epoch_dir)
+                                    _cleaned.append(str(_epoch_dir))
+                                except OSError:
+                                    pass
+                log_event(logger, logging.INFO, "clean restart applied for recovered task",
+                          event="task_clean_restart", task_id=task_id, owner_id=WORKER_ID, epoch=epoch,
+                          restart_reason=restart_reason, prev_owner=restart_prev_owner, prev_epoch=restart_prev_epoch,
+                          cleaned_count=len(_cleaned))
+                db.expire(row)
+                db.refresh(row)
+                _record_task_event(
+                    db, row=row, event_type="task_clean_restart",
+                    message=f"任务因 lease 恢复触发干净重启（无断点续做能力）：{restart_reason}",
+                    level="warning", status=row.status,
+                    worker_id=WORKER_ID, execution_owner_id=WORKER_ID,
+                    execution_epoch=epoch, control_version=control_version,
+                    dispatch_status=row.dispatch_status,
+                    payload={
+                        "restart_reason": restart_reason, "previous_owner_id": restart_prev_owner,
+                        "previous_epoch": restart_prev_epoch, "new_epoch": epoch,
+                        "cleaned": _cleaned,
+                    },
+                )
+                db.commit()
+
+            started_at = now_local() if force_clean_restart else (row.started_at or now_local())
             if not begin_execution_if_owner(db, task_id, WORKER_ID, epoch, control_version, started_at=started_at):
                 from app.metrics import observe_local_event
 
