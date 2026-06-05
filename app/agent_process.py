@@ -175,10 +175,16 @@ def _iter_runtime_processes() -> list[AgentProcessInfo]:
         pid = int(proc_dir.name)
         try:
             status = (proc_dir / "status").read_text(encoding="utf-8", errors="replace")
+            if "\nState:\tZ" in status or "\nState: Z" in status:
+                continue
             comm = (proc_dir / "comm").read_text(encoding="utf-8", errors="replace").strip()
             exe = os.path.basename(_safe_readlink(proc_dir / "exe"))
         except Exception:
             continue
+        try:
+            started_at = os.stat(proc_dir).st_ctime
+        except Exception:
+            started_at = None
         info = AgentProcessInfo(
             pid=pid,
             ppid=_read_ppid(status),
@@ -188,7 +194,7 @@ def _iter_runtime_processes() -> list[AgentProcessInfo]:
             cwd=_safe_readlink(proc_dir / "cwd"),
             cmdline=_read_proc_cmdline(pid),
             environ=_read_proc_environ(pid),
-            started_at=(os.stat(proc_dir).st_ctime if proc_dir.exists() else None),
+            started_at=started_at,
         )
         if _is_runtime_process(info):
             candidates.append(info)

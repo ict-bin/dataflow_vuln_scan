@@ -1425,11 +1425,6 @@ class TaskService:
                                     ctx.cancel_requested.set()
                                     if ctx.orch is not None:
                                         ctx.orch.abort()
-                                    self._cleanup_worker_runtime(
-                                        label=f"task_control_change:{task_id}",
-                                        task_id=task_id,
-                                        reason="cancel_resume_restart_or_lease_change",
-                                    )
                                     continue
                             finally:
                                 try:
@@ -1438,21 +1433,11 @@ class TaskService:
                                     pass
                             if ctx.cancel_requested.is_set() and ctx.orch is not None:
                                 ctx.orch.abort()
-                                self._cleanup_worker_runtime(
-                                    label=f"task_cancel_requested:{task_id}",
-                                    task_id=task_id,
-                                    reason=ctx.termination_reason or "cancel_requested",
-                                )
                             if EXECUTION_NO_PROGRESS_SECONDS > 0 and (_time.time() - max(ctx.last_progress_at, ctx.started_at)) > EXECUTION_NO_PROGRESS_SECONDS:
                                 ctx.termination_reason = "no_progress"
                                 ctx.cancel_requested.set()
                                 if ctx.orch is not None:
                                     ctx.orch.abort()
-                                self._cleanup_worker_runtime(
-                                    label=f"task_no_progress:{task_id}",
-                                    task_id=task_id,
-                                    reason="no_progress",
-                                )
                             continue
                         db_gen = get_db()
                         db: Session = next(db_gen)
@@ -1989,7 +1974,8 @@ class TaskService:
     def restart_task(self, db: Session, task_id: str) -> dict:
         """在原任务ID上重置并重新执行（SA 模式：in-place restart）。"""
         row = self._get_or_404(db, task_id)
-        self._cleanup_worker_runtime(label=f"task_restart:{task_id}", task_id=task_id, reason="restart_requested")
+        self.request_cancel(task_id, reason="restart_requested")
+        self._cleanup_worker_runtime(label=f"task_restart:{task_id}", task_id=task_id, reason="restart_requested_before_pending")
         from sqlalchemy.orm.attributes import flag_modified
         clean_config = {k: v for k, v in (row.task_config_json or {}).items()
                         if k not in ("start_stage", "resume_workspace", "resume")} or None
@@ -2020,7 +2006,6 @@ class TaskService:
             payload={"control_version": int(row.control_version or 0)},
         )
         db.commit(); db.refresh(row)
-        self.request_cancel(task_id, reason="restart_requested")
         log_event(logger, logging.INFO, "task restarted in-place", event="task_restarted",
                   task_id=task_id, project_id=row.project_id, control_version=row.control_version)
         return self._row_to_dict(row)
