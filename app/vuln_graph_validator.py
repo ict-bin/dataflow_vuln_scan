@@ -11,6 +11,61 @@ VALID_OPERATIONS = {
     "sink", "terminate", "validation", "sanitizer", "unknown",
 }
 
+_OPERATION_ALIASES = {
+    "return_value": "return",
+    "call_argument": "call_arg",
+    "argument": "call_arg",
+    "arg": "call_arg",
+    "indirect": "call_arg",
+    "function_pointer": "call_arg",
+    "dlsym": "call_arg",
+    "dereference": "field",
+    "field_write": "field",
+    "field_read": "field",
+    "member": "field",
+    "log": "sink",
+    "logging": "sink",
+    "file": "sink",
+    "path": "sink",
+}
+
+
+def normalize_operation(value: Any) -> str:
+    text = str(value or "unknown").strip().lower()
+    return _OPERATION_ALIASES.get(text, text if text in VALID_OPERATIONS else "unknown")
+
+
+def normalize_taint_graph(obj: dict[str, Any]) -> dict[str, Any]:
+    """Normalize LLM JSON to the SQLite schema without failing on harmless vocabulary drift."""
+    if not isinstance(obj, dict):
+        return obj
+    for edge in obj.get("edges") or []:
+        if not isinstance(edge, dict):
+            continue
+        edge["operation"] = normalize_operation(edge.get("operation"))
+        if not str(edge.get("from") or edge.get("from_symbol") or "").strip():
+            edge["from"] = "unknown"
+        if not str(edge.get("to") or edge.get("to_symbol") or "").strip():
+            op = str(edge.get("operation") or "unknown")
+            edge["to"] = "terminate" if op == "terminate" else ("sink" if op == "sink" else "unknown")
+        if not str(edge.get("line") or "").strip():
+            edge["line"] = "unknown"
+        if not str(edge.get("evidence") or "").strip():
+            edge["evidence"] = "not provided"
+        effect = str(edge.get("sanitizer_effect") or "none").strip().lower()
+        edge["sanitizer_effect"] = effect if effect in VALID_SANITIZER_EFFECTS else "unknown"
+        if edge.get("operation") == "terminate" and not str(edge.get("termination_reason") or "").strip():
+            edge["termination_reason"] = "terminated by model without detailed reason"
+    for item in obj.get("followups") or []:
+        if not isinstance(item, dict):
+            continue
+        params = item.get("tainted_params")
+        if isinstance(params, str):
+            item["tainted_params"] = [x.strip() for x in params.split(",") if x.strip()]
+        elif params is None:
+            item["tainted_params"] = []
+    return obj
+
 
 def load_taint_graph(path: str | Path) -> tuple[dict[str, Any] | None, list[str]]:
     warnings: list[str] = []

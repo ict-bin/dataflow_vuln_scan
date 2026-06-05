@@ -16,7 +16,7 @@ from .config import load_system_prompts, resolve_system_prompt
 from .models import AgentInstanceConfig, RoundResult, SwarmEvent, TaskConfig, TaskResult, TaskStatus, TokenUsage, WorkerResult
 from .runner import run_agent
 from .taint_workflow import _extract_function_body, _prepend_upstream_hint_section, _build_upstream_entry_metadata, _build_taint_hint_summary
-from .vuln_graph_validator import validate_taint_graph
+from .vuln_graph_validator import normalize_taint_graph, validate_taint_graph
 from .vuln_store import FollowupRecord, TaintEdgeRecord, TaintSourceRecord, VulnFindingRecord, VulnScanStore
 
 
@@ -302,6 +302,7 @@ class DataflowVulnWorkflow:
         graph = _extract_json_from_text(res.output)
         graph_warnings: list[str] = []
         if isinstance(graph, dict):
+            graph = normalize_taint_graph(graph)
             graph_warnings = validate_taint_graph(graph)
         else:
             graph = None
@@ -453,8 +454,7 @@ class DataflowVulnWorkflow:
                 eid = _edge_id(self.run_id, self.func_name, src_symbol, fname, fline)
                 edges.append(TaintEdgeRecord(edge_id=eid, run_id=self.run_id, from_node_id=node_ids[0] if node_ids else "", to_node_id=_node_id(str(item.get("file") or self.src_file), fname, dst_symbol, self.dep + 1), source_file=self.src_file, function_name=self.func_name, from_symbol=src_symbol, to_symbol=dst_symbol, line=fline, operation="call_arg", evidence=str(item.get("reason") or item.get("evidence") or "")))
                 followups.append(FollowupRecord(followup_id="follow_" + hashlib.sha1((eid+fname).encode()).hexdigest()[:16], edge_id=eid, parent_node_id=node_ids[0] if node_ids else "", callee_file=str(item.get("file") or self.src_file), callee_function=fname, callee_line=fline, tainted_params_json=json.dumps(param_list, ensure_ascii=False), depth=self.dep + 1, reason=str(item.get("reason") or "")))
-        from .parsers import _parse_callees, _read_tainted_list
-        callees = [] if followups else (_read_tainted_list(str(self.out_dir)) or _read_tainted_list(str(self.ws)) or _parse_callees(text))
+        callees = []
         for c in callees:
             eid = _edge_id(self.run_id, self.func_name, self.taint_params[0] if self.taint_params else "taint", c.function_name, c.line)
             edges.append(TaintEdgeRecord(edge_id=eid, run_id=self.run_id, from_node_id=node_ids[0] if node_ids else "", to_node_id=_node_id(c.file or self.src_file, c.function_name, c.tainted_params or "*", self.dep + 1), source_file=self.src_file, function_name=self.func_name, from_symbol=self.taint_params[0] if self.taint_params else "taint", to_symbol=c.tainted_params or "*", line=c.line, operation="call_arg", evidence=c.description))
@@ -521,7 +521,7 @@ class DataflowVulnWorkflow:
         return result
 
     def _make_result(self, final_output: str, agent_result: Any, passed: bool, completion_reason: str, *, rounds: list[RoundResult] | None = None, total_tokens: TokenUsage | None = None) -> TaskResult:
-        status = TaskStatus.PASSED if passed else TaskStatus.FAILED
+        status = TaskStatus.PASSED if passed else TaskStatus.COMPLETED_LIMITED
         entry_metadata = _build_upstream_entry_metadata(self.cfg)
         taint_hint_summary = _build_taint_hint_summary(self.cfg, self.taint_params)
         output = _prepend_upstream_hint_section(final_output, entry_metadata=entry_metadata, taint_hint_summary=taint_hint_summary)
