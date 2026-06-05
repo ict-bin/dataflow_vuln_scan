@@ -1,15 +1,22 @@
 ---
 name: write-taint-graph
-description: Write structured single-function taint graph artifacts for dataflow vulnerability mining.
+description: Produce structured single-function taint graph JSON for dataflow vulnerability mining.
 ---
 
 # write-taint-graph skill
 
-When analysing one function for `dataflow_vuln_scan`, always write these artifacts:
+Do not write intermediate artifact files. Do not create `taint-graph.json`, `tainted.list`, `taintvars.json`, `dataflow-*.md`, or `taint-flow-*.md`.
 
-1. `taint-graph.json` — structured taint nodes, edges, sanitizers, termination, followups.
-2. `taint-flow-<taint>.md` — human-readable taint path report with line numbers.
-3. `taintvars.json` — newly introduced tainted carriers.
-4. `tainted.list` — followup callees in `file###Func###Lline###params` format.
+Return one JSON object in the final answer. The service will parse that JSON and persist taints, edges, followups, and findings into the task-local SQLite database.
 
-Every edge must include line evidence and sanitizer/validation status. Do not drop a taint silently: if it terminates, record why.
+Required top-level keys:
+- `function`
+- `source_file`
+- `taints`
+- `edges`
+- `followups`
+- `termination`
+
+Each edge must include line evidence and sanitizer/validation status. Do not drop a taint silently: if it terminates, record why.
+
+`followups` is the only callee handoff channel. Each item must include `file`, `function`, `line`, `tainted_params`, and `reason`.

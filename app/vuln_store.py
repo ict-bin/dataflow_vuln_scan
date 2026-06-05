@@ -7,6 +7,10 @@ platform database.
 """
 from __future__ import annotations
 
+try:
+    import fcntl  # type: ignore
+except Exception:  # pragma: no cover - Windows local tests
+    fcntl = None
 import json
 import sqlite3
 import time
@@ -274,6 +278,61 @@ class VulnScanStore:
                 f"INSERT OR REPLACE INTO vulnerability_findings ({','.join(cols)}) VALUES ({','.join('?' for _ in cols)})",
                 [data[c] for c in cols],
             )
+
+    def list_followups(self, run_id: str | None = None, *, status: str | None = None) -> list[FollowupRecord]:
+        where: list[str] = []
+        params: list[Any] = []
+        if run_id:
+            where.append("e.run_id=?")
+            params.append(run_id)
+        if status:
+            where.append("f.status=?")
+            params.append(status)
+        sql = """SELECT f.* FROM followups f
+                 LEFT JOIN taint_edges e ON e.edge_id=f.edge_id"""
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY f.depth ASC, f.callee_function ASC, f.followup_id ASC"
+        with self.connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [FollowupRecord(**dict(row)) for row in rows]
+
+    def append_artifact_manifest(self, stage: str, artifacts: list[dict[str, Any]], *, function_name: str = "", source_file: str = "", task_id: str = "", run_id: str = "") -> None:
+        """Append a deterministic artifact inventory entry under the SQLite-adjacent output directory."""
+        manifest_path = self.db_path.parent / "artifact-manifest.json"
+        entry = {
+            "stage": stage,
+            "task_id": task_id,
+            "run_id": run_id,
+            "function": function_name,
+            "source_file": source_file,
+            "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "artifacts": artifacts,
+        }
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        with manifest_path.open("a+", encoding="utf-8") as fh:
+            if fcntl is not None:
+                try:
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+                except OSError:
+                    pass
+            fh.seek(0)
+            try:
+                data = json.loads(fh.read() or "[]")
+                if not isinstance(data, list):
+                    data = []
+            except Exception:
+                data = []
+            data.append(entry)
+            fh.seek(0)
+            fh.truncate()
+            json.dump(data, fh, ensure_ascii=False, indent=2)
+            fh.write("\n")
+            if fcntl is not None:
+                try:
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+                except OSError:
+                    pass
 
     def add_context_fork(
         self,

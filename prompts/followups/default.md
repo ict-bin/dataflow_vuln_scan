@@ -9,4 +9,4 @@
 - 当前函数内是否清洗/校验/终止
 - 是否产生新的 followup callee
 
-输出仍遵守 `prompts/taint-graph/default.md` 的 `taint-graph.json`、`taint-flow-*.md`、`taintvars.json`、`tainted.list` 合同。
+输出仍遵守 `prompts/taint-graph/default.md` 的 JSON 合同。不要写任何中间产物文件；followups 字段是唯一的跟入点输出。

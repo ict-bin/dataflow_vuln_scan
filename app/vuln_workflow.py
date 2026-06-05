@@ -183,15 +183,36 @@ class DataflowVulnWorkflow:
             doc.write_text(_read_prompt("docs/architecture-vuln-scan.md") or "# 数据流漏洞挖掘架构\n", encoding="utf-8")
 
     def _link_source_tree(self) -> None:
-        target_dir = Path(self.cfg.cwd)
+        target_dir = Path(self.cfg.cwd).resolve()
         if not target_dir.is_dir():
             return
-        for item in target_dir.iterdir():
-            dst = self.ws / item.name
-            if dst.exists():
+        # 不能把源码目录整体 symlink 到 workspace：历史任务曾把 dataflow/taint 产物写入源码根，
+        # 整目录 symlink 会让模型在 src/... 下写文件时直接污染源码目录。这里改为镜像目录结构，
+        # 仅把真实源码文件逐个 symlink 进 workspace；新产物只能落在 workspace 自身。
+        artifact_names = {"tainted.list", "taintvars.json", "taint-graph.json", "vuln-scan.sqlite", "artifact-manifest.json"}
+        artifact_prefixes = ("dataflow-", "taint-flow-")
+        skip_dirs = {".git", ".svn", ".hg", "run", "output", "sessions", "workspace-worker-0", "workspace-worker-1", "__pycache__"}
+        def _skip(path: Path) -> bool:
+            if any(part in skip_dirs or part.startswith("workspace-worker-") for part in path.relative_to(target_dir).parts[:-1]):
+                return True
+            name = path.name
+            return name in artifact_names or any(name.startswith(prefix) for prefix in artifact_prefixes) or name.endswith((".jsonl", ".lock", ".backup"))
+        for src in target_dir.rglob("*"):
+            try:
+                rel = src.relative_to(target_dir)
+            except ValueError:
+                continue
+            if _skip(src):
+                continue
+            dst = self.ws / rel
+            if src.is_dir():
+                dst.mkdir(parents=True, exist_ok=True)
+                continue
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            if dst.exists() or dst.is_symlink():
                 continue
             try:
-                dst.symlink_to(item, target_is_directory=item.is_dir())
+                shutil.copy2(src, dst)
             except OSError:
                 pass
 
@@ -207,12 +228,10 @@ class DataflowVulnWorkflow:
             "## 函数源码（带绝对行号）\n```cpp\n"
             f"{func_body}\n```\n\n"
             "请一个 Worker 在当前函数内同时分析所有污点，不要按污点拆分 worker。\n"
-            "必须使用 write 工具在当前工作目录写出临时中间产物：\n"
-            "1. `taint-graph.json`（仅供服务端导入 SQLite，最终不会作为任务输出保留）\n"
-            "2. `dataflow-<function>.md`（仅供服务端解析/调试，最终报告不会直接展示数据流全文）\n"
-            "3. `tainted.list`（无跟入点则写空文件）\n"
-            "4. `taintvars.json`（可选，仅供服务端兼容解析，最终不会作为任务输出保留）\n"
-            "`taint-graph.json` 必须包含 edges/followups/termination，并且每条边都有 line/evidence/sanitizer_effect；终止边必须有 termination_reason。\n"
+            "不要写任何中间产物文件；禁止创建 `taint-graph.json`、`tainted.list`、`taintvars.json`、`dataflow-*.md` 或 `taint-flow-*.md`。\n"
+            "请在最终回复中直接输出一个 JSON 对象，包含 function/source_file/taints/edges/followups/termination。\n"
+            "`followups` 是唯一跟入点输出，每个元素必须包含 file/function/line/tainted_params/reason；服务端会直接写入 SQLite。\n"
+            "每条 edge 都必须有 line/evidence/sanitizer_effect；终止边必须有 termination_reason。\n"
             "同时在报告中判断当前函数内是否存在漏洞候选，漏洞判断会由后续 fork 上下文复核。\n"
         )
 
@@ -280,23 +299,19 @@ class DataflowVulnWorkflow:
         )
         self._emit("worker_done", worker_id="worker-0", output=res.output[:300], tokens_in=res.token_usage.input, tokens_out=res.token_usage.output)
         total_tokens = TokenUsage(); total_tokens += res.token_usage
-        dataflow_file = next(self.ws.glob("dataflow-*.md"), None)
-        df_content = ""
-        if dataflow_file:
-            df_content = dataflow_file.read_text(encoding="utf-8", errors="replace")
-        graph_path = self.ws / "taint-graph.json"
+        graph = _extract_json_from_text(res.output)
         graph_warnings: list[str] = []
-        if graph_path.exists():
-            try:
-                graph_warnings = validate_taint_graph(json.loads(graph_path.read_text(encoding="utf-8")))
-            except Exception as exc:
-                graph_warnings = [f"taint-graph.json parse failed: {exc}"]
+        if isinstance(graph, dict):
+            graph_warnings = validate_taint_graph(graph)
         else:
-            graph_warnings = ["missing taint-graph.json"]
+            graph = None
+            graph_warnings = ["missing taint graph JSON in final response"]
+        dataflow_file = None
+        df_content = res.output
         if graph_warnings:
             (self.out_dir / "taint-graph.validation.json").write_text(json.dumps({"warnings": graph_warnings}, ensure_ascii=False, indent=2), encoding="utf-8")
-        passed = bool(df_content.strip()) and not graph_warnings
-        final_output = df_content or res.output
+        passed = not graph_warnings
+        final_output = res.output
         rr = RoundResult(
             round=1, function_name=self.func_name, source_path=self.src_file, stage="worker", stage_round=1,
             duration_ms=max(0.0, (time.time() - started) * 1000.0), status="passed" if passed else "failed",
@@ -305,8 +320,8 @@ class DataflowVulnWorkflow:
             module_completed=passed, completion_reason="script_validated" if passed else "script_validation_failed",
         )
         result = self._make_result(final_output, res, passed, "script_validated" if passed else "script_validation_failed", rounds=[rr], total_tokens=total_tokens)
-        if dataflow_file:
-            (self.out_dir / dataflow_file.name).write_text(df_content, encoding="utf-8")
+        if isinstance(graph, dict):
+            result.upstream_entry_metadata["taint_graph"] = graph
         return result, str(session_file), df_content or res.output
 
     async def _run_vuln_mining_fork(self, base_session: str, dataflow_text: str) -> list[VulnFindingRecord]:
@@ -366,6 +381,18 @@ class DataflowVulnWorkflow:
                 (fdir / "context.jsonl").write_text("", encoding="utf-8")
             rec = VulnFindingRecord(finding_id=finding_id, run_id=self.run_id, node_id=node, source_file=str(item.get("source_file") or item.get("file") or self.src_file), line=str(item.get("line") or item.get("line_hint") or item.get("vuln_line") or ""), vuln_type=str(item.get("vuln_type") or "unknown"), severity=str(item.get("severity") or "unknown"), title=str(item.get("title") or finding_id), summary=str(item.get("summary") or ""), evidence=str(item.get("evidence") or ""), exploitability=str(item.get("exploitability") or ""), confidence=float(item.get("confidence") or 0), output_dir=str(fdir))
             self.store.add_finding(rec); findings.append(rec)
+            self.store.append_artifact_manifest(
+                "vulnerability_mining",
+                [
+                    {"path": str(report_path), "kind": "markdown", "role": "vulnerability_report", "exists": report_path.exists()},
+                    {"path": str(taint_report_path), "kind": "markdown", "role": "taint_path_report", "exists": taint_report_path.exists()},
+                    {"path": str(fdir / "context.jsonl"), "kind": "jsonl", "role": "fork_session", "exists": (fdir / "context.jsonl").exists()},
+                ],
+                function_name=self.func_name,
+                source_file=self.src_file,
+                task_id=self.task_id,
+                run_id=self.run_id,
+            )
             try:
                 from .vuln_intake_reporter import report_finding_to_intake
                 report_result = await report_finding_to_intake(
@@ -396,9 +423,9 @@ class DataflowVulnWorkflow:
         text = result.final_output or ""
         edges: list[TaintEdgeRecord] = []
         followups: list[FollowupRecord] = []
+        graph = (result.upstream_entry_metadata or {}).get("taint_graph")
         graph_path = self.ws / "taint-graph.json"
-        graph = None
-        if graph_path.exists():
+        if not isinstance(graph, dict) and graph_path.exists():
             try: graph = json.loads(graph_path.read_text(encoding="utf-8"))
             except Exception: graph = None
         if isinstance(graph, dict):
@@ -407,13 +434,42 @@ class DataflowVulnWorkflow:
                 src = str(item.get("from") or item.get("from_symbol") or "").strip() or (self.taint_params[0] if self.taint_params else "unknown")
                 dst = str(item.get("to") or item.get("to_symbol") or "").strip() or "unknown"
                 edges.append(TaintEdgeRecord(edge_id=_edge_id(self.run_id, self.func_name, src, dst, str(item.get("line") or "")), run_id=self.run_id, from_node_id=node_ids[0] if node_ids else "", to_node_id=_node_id(self.src_file, self.func_name, dst, self.dep), source_file=self.src_file, function_name=self.func_name, from_symbol=src, to_symbol=dst, line=str(item.get("line") or ""), operation=str(item.get("operation") or ""), evidence=str(item.get("evidence") or ""), sanitizer=str(item.get("sanitizer") or ""), sanitizer_effect=str(item.get("sanitizer_effect") or "none"), validation=str(item.get("validation") or ""), termination_reason=str(item.get("termination_reason") or ""), confidence=float(item.get("confidence") or 0)))
+            for item in graph.get("followups") or []:
+                if not isinstance(item, dict):
+                    continue
+                fname = str(item.get("function") or item.get("callee_function") or "").strip()
+                if not fname:
+                    continue
+                fline = str(item.get("line") or item.get("callee_line") or "").strip()
+                params = item.get("tainted_params") or item.get("params") or []
+                if isinstance(params, str):
+                    param_list = [x.strip() for x in params.split(",") if x.strip()]
+                elif isinstance(params, list):
+                    param_list = [str(x).strip() for x in params if str(x).strip()]
+                else:
+                    param_list = []
+                src_symbol = self.taint_params[0] if self.taint_params else "taint"
+                dst_symbol = ",".join(param_list) or "*"
+                eid = _edge_id(self.run_id, self.func_name, src_symbol, fname, fline)
+                edges.append(TaintEdgeRecord(edge_id=eid, run_id=self.run_id, from_node_id=node_ids[0] if node_ids else "", to_node_id=_node_id(str(item.get("file") or self.src_file), fname, dst_symbol, self.dep + 1), source_file=self.src_file, function_name=self.func_name, from_symbol=src_symbol, to_symbol=dst_symbol, line=fline, operation="call_arg", evidence=str(item.get("reason") or item.get("evidence") or "")))
+                followups.append(FollowupRecord(followup_id="follow_" + hashlib.sha1((eid+fname).encode()).hexdigest()[:16], edge_id=eid, parent_node_id=node_ids[0] if node_ids else "", callee_file=str(item.get("file") or self.src_file), callee_function=fname, callee_line=fline, tainted_params_json=json.dumps(param_list, ensure_ascii=False), depth=self.dep + 1, reason=str(item.get("reason") or "")))
         from .parsers import _parse_callees, _read_tainted_list
-        callees = _read_tainted_list(str(self.out_dir)) or _read_tainted_list(str(self.ws)) or _parse_callees(text)
+        callees = [] if followups else (_read_tainted_list(str(self.out_dir)) or _read_tainted_list(str(self.ws)) or _parse_callees(text))
         for c in callees:
             eid = _edge_id(self.run_id, self.func_name, self.taint_params[0] if self.taint_params else "taint", c.function_name, c.line)
             edges.append(TaintEdgeRecord(edge_id=eid, run_id=self.run_id, from_node_id=node_ids[0] if node_ids else "", to_node_id=_node_id(c.file or self.src_file, c.function_name, c.tainted_params or "*", self.dep + 1), source_file=self.src_file, function_name=self.func_name, from_symbol=self.taint_params[0] if self.taint_params else "taint", to_symbol=c.tainted_params or "*", line=c.line, operation="call_arg", evidence=c.description))
             followups.append(FollowupRecord(followup_id="follow_" + hashlib.sha1((eid+c.function_name).encode()).hexdigest()[:16], edge_id=eid, parent_node_id=node_ids[0] if node_ids else "", callee_file=c.file or self.src_file, callee_function=c.function_name, callee_line=c.line, tainted_params_json=json.dumps([x.strip() for x in (c.tainted_params or "").split(',') if x.strip()], ensure_ascii=False), depth=self.dep + 1))
         self.store.add_taint_edges(edges); self.store.add_followups(followups)
+        self.store.append_artifact_manifest(
+            "taint_graph",
+            [
+                {"path": "sqlite:taint_nodes/taint_edges/followups", "kind": "sqlite", "role": "taint_graph", "exists": True},
+            ],
+            function_name=self.func_name,
+            source_file=self.src_file,
+            task_id=self.task_id,
+            run_id=self.run_id,
+        )
 
     def _finalize_taint_result(self, result: TaskResult) -> TaskResult:
         graph_export = self.store.export_json()
@@ -422,8 +478,8 @@ class DataflowVulnWorkflow:
         result.vuln_summary = summary
         result.upstream_entry_metadata = dict(result.upstream_entry_metadata or {})
         result.upstream_entry_metadata["vuln_scan"] = {"sqlite_path": str(self.store.db_path), "vulnerabilities_dir": str(self.vuln_root), "graph_storage": "sqlite"}
-        # JSON 中间文件已导入 SQLite 后淘汰，避免最终输出/工作目录依赖 JSON 图谱。
-        for _json_path in [self.ws / "taint-graph.json", self.ws / "taintvars.json", self.out_dir / "taint-graph.validation.json"]:
+        # 兼容清理：旧版本/异常模型可能仍写文件，中间产物不再保留，SQLite 是唯一图谱来源。
+        for _json_path in [self.ws / "taint-graph.json", self.ws / "taintvars.json", self.ws / "tainted.list", self.out_dir / "taint-graph.validation.json", *self.ws.glob("dataflow-*.md"), *self.ws.glob("taint-flow-*.md")]:
             try:
                 if _json_path.exists():
                     _json_path.unlink()

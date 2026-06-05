@@ -124,17 +124,18 @@ def _extract_function_body_from_funcdb(
         try:
             conn = _sqlite3.connect(str(db_file))
             conn.row_factory = _sqlite3.Row
+            join_sql = "LEFT JOIN file_meta fm ON (fm.file_hash=f.file_hash OR fm.id=f.file_id)"
             if func_hash:
                 rows = conn.execute(
-                    """SELECT f.*, fm.rel_path AS file_path, fm.original_path AS original_path
-                       FROM functions f LEFT JOIN file_meta fm ON fm.file_hash=f.file_hash
+                    f"""SELECT f.*, COALESCE(f.file_path, f.rel_path, fm.rel_path, fm.original_path, '') AS file_path, fm.original_path AS original_path
+                       FROM functions f {join_sql}
                        WHERE f.func_hash=?""",
                     (func_hash,),
                 ).fetchall()
             else:
                 rows = conn.execute(
-                    """SELECT f.*, fm.rel_path AS file_path, fm.original_path AS original_path
-                       FROM functions f LEFT JOIN file_meta fm ON fm.file_hash=f.file_hash
+                    f"""SELECT f.*, COALESCE(f.file_path, f.rel_path, fm.rel_path, fm.original_path, '') AS file_path, fm.original_path AS original_path
+                       FROM functions f {join_sql}
                        WHERE f.name=? OR f.name LIKE ?""",
                     (short, f"%::{short}"),
                 ).fetchall()

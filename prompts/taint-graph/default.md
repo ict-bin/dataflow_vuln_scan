@@ -6,15 +6,11 @@
 - 文件名、函数名、源码目录
 - 污点信息：可能是函数入参，也可能是某行调用的返回值/参数/局部变量
 
-## 必须产物
-请使用 write 工具写出：
+## 必须输出
 
-1. `taint-graph.json`
-2. `taint-flow-<taint>.md`
-3. `taintvars.json`
-4. `tainted.list`
+不要写任何中间产物文件。不要调用 write/edit 创建 `taint-graph.json`、`tainted.list`、`taintvars.json`、`dataflow-*.md` 或 `taint-flow-*.md`。
 
-## taint-graph.json 格式
+请在最终回复中直接输出一个 JSON 对象，服务端会解析该 JSON 并写入 SQLite 图谱数据库：
 
 ```json
 {
@@ -60,11 +56,6 @@
 - 函数返回常量/错误码，污点未写入全局/堆对象/输出参数。
 - 遇到不可解析宏/标准库时，记录 conservative unknown，不要凭空终止。
 
-## tainted.list
-每行：
+## followups
 
-```text
-file###Class::Func###L_line###param1,param2
-```
-
-只记录需要跟入的函数。若无跟入点，写空文件。
+`followups` 是唯一的跟入点输出，不需要再写 `tainted.list`。每个元素必须包含：

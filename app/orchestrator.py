@@ -38,7 +38,7 @@ from .models import (
 )
 from .runner import run_agent, run_agents_parallel
 from .vuln_workflow import DataflowVulnWorkflow
-from .vuln_store import VulnScanStore
+from .vuln_store import VulnScanStore, FollowupRecord
 from .judge_runner import JudgeMixin
 from .parsers import (
     _extract_result,
@@ -50,7 +50,7 @@ from .parsers import (
     _STDLIB_SKIP,
     _get_best_output,
 )
-from .cpp_resolver import _function_has_definition, _resolve_cpp_name, _get_definition_line
+from .cpp_resolver import _function_has_definition, _resolve_cpp_name, _get_definition_line, _find_function_file
 from .prompt_builder import (
     _build_worker_prompt,
     _build_eval_prompt,
@@ -63,7 +63,34 @@ from .prompt_builder import (
 
 
 
-def _round_dir_name(round_num: int) -> str:
+def _is_external_followup(callee: CalleeRef) -> bool:
+    text = f"{callee.file} {callee.description} {callee.function_name}".lower()
+    return any(mark in text for mark in ["external", "extern", "lib", "dlsym", "export", "外部"])
+
+
+def _resolve_function_pointer_followup(target_dir: str, callee: CalleeRef, caller_func: str) -> tuple[str, str]:
+    """Best-effort resolver for function-pointer/dlsym followups such as engine_create_op -> lcr_create."""
+    raw = callee.function_name.strip()
+    hay = " ".join([raw, callee.file, callee.description])
+    m = re.search(r"(?:dlsym|→|->|=>)\s*([A-Za-z_]\w*)", hay)
+    if m:
+        candidate = m.group(1)
+    elif raw.startswith("engine_") and raw.endswith("_op"):
+        candidate = raw[len("engine_"):-len("_op")]
+        candidate = f"lcr_{candidate}" if not candidate.startswith("lcr_") else candidate
+    else:
+        candidate = raw
+    if candidate and candidate != raw and _function_has_definition(target_dir, candidate):
+        rel_file = _find_function_file(target_dir, candidate) or ""
+        if rel_file:
+            full = os.path.realpath(os.path.join(target_dir, rel_file))
+            root = os.path.realpath(target_dir)
+            if not (full == root or full.startswith(root + os.sep)):
+                return raw, ""
+        return candidate, rel_file
+    return raw, ""
+
+
     return f"round_{round_num:03d}"
 
 
@@ -718,25 +745,7 @@ class Orchestrator(JudgeMixin):
                 except OSError:
                     pass
 
-            # 强制生成 tainted.list：不依赖 LLM 自觉写文件
-            # 优先保留 LLM 已写的版本（文件路径/参数名更准确），否则由 Orchestrator 从 _parse_callees 生成
-            if result.final_output:
-                _callees_for_list = _parse_callees(result.final_output)
-                if _callees_for_list:
-                    for _ws in out_dir.glob("workspace-worker-*/"):
-                        _tainted_path = _ws / "tainted.list"
-                        if not _tainted_path.exists():
-                            _lines = []
-                            for _c in _callees_for_list:
-                                _f = _c.file or "-"
-                                _l = _c.line or "-"
-                                _p = _c.tainted_params or "*"
-                                _lines.append(f"{_f}###{_c.function_name}###{_l}###{_p}")
-                            try:
-                                _tainted_path.write_text(
-                                    "\n".join(_lines) + "\n", encoding="utf-8")
-                            except OSError:
-                                pass
+            # 编排器从 SQLite 图谱 followups 表读取结构化跟入点；不再生成/依赖 tainted.list 或 Markdown 中间文件。
 
             # 保存 dataflow/funcname.md(供 callee 解析 + merge)
             if result.final_output:
@@ -758,17 +767,27 @@ class Orchestrator(JudgeMixin):
 
             # ── 解析 callee 并加入队列 ─────────────────────────────────────
             if dep < max_depth and result.final_output:
-                # 优先读取 tainted.list，无则 fallback 到解析 dataflow 文件
-                worker_cwd = str(out_dir)
-                callees = _read_tainted_list(worker_cwd)
-                if not callees:
-                    callees = _parse_callees(result.final_output)
                 target_dir = os.path.abspath(task_cfg.cwd)
+                store = VulnScanStore(graph_db_path)
+                db_followups = store.list_followups(run_id=getattr(workflow, "run_id", "") if workflow is not None else None, status="pending")
+                callees: list[CalleeRef] = [
+                    CalleeRef(
+                        function_name=f.callee_function,
+                        file=f.callee_file,
+                        line=f.callee_line,
+                        tainted_params=",".join(json.loads(f.tainted_params_json or "[]")) if f.tainted_params_json else "",
+                        description=f.reason,
+                    )
+                    for f in db_followups
+                ]
+                if not callees:
+                    self._emit("trace_skip", tid, function=func_name, reason="no sqlite followups")
                 valid: list[CalleeRef] = []
                 for callee in callees:
-                    # 标准化 c_key:只用函数名(不含文件),避免路径差异导致误 dup
+                    resolved_name, resolved_file = _resolve_function_pointer_followup(target_dir, callee, func_name)
+                    if resolved_name != callee.function_name:
+                        callee = CalleeRef(function_name=resolved_name, file=resolved_file or callee.file, line=callee.line, tainted_params=callee.tainted_params, description=callee.description)
                     c_key = callee.function_name
-                    # 跳过自引用（完整名或短名匹配）
                     if callee.function_name == func_name:
                         continue
                     if callee.function_name.split("::")[-1] == func_name.split("::")[-1]:
@@ -780,38 +799,12 @@ class Orchestrator(JudgeMixin):
                     if callee.function_name in _STDLIB_SKIP:
                         continue
                     if not _function_has_definition(target_dir, callee.function_name):
+                        reason = "external followup" if _is_external_followup(callee) else "no definition found"
                         self._emit("trace_skip", tid, function=callee.function_name,
-                                   reason="no definition found")
+                                   reason=reason)
                         continue
                     analyzed.add(c_key)
                     valid.append(callee)
-
-                # Fallback: 若 tainted.list 全被过滤（如自引用），尝试解析 taint-flow-*.md
-                if not valid:
-                    _taint_flow_callees: list[CalleeRef] = []
-                    for _tf in out_dir.glob("workspace-worker-*/taint-flow-*.md"):
-                        try:
-                            _taint_flow_callees.extend(
-                                _parse_callees(_tf.read_text(encoding="utf-8")))
-                        except OSError:
-                            pass
-                    for callee in _taint_flow_callees:
-                        c_key = callee.function_name
-                        if callee.function_name == func_name:
-                            continue
-                        if callee.function_name.split("::")[-1] == func_name.split("::")[-1]:
-                            continue
-                        if c_key in analyzed:
-                            continue
-                        if callee.function_name in _STDLIB_SKIP:
-                            continue
-                        if not _function_has_definition(target_dir, callee.function_name):
-                            continue
-                        analyzed.add(c_key)
-                        valid.append(callee)
-                    if valid:
-                        self._emit("debug", tid,
-                                   message=f"taint-flow fallback: found {len(valid)} callees for {func_name}")
 
                 if valid:
                     self._emit("trace_callees", tid, function=func_name,
@@ -831,6 +824,12 @@ class Orchestrator(JudgeMixin):
                     if "# 调用者传入的脏数据" in ctx_base:
                         ctx_base = ctx_base.split("# 调用者传入的脏数据")[0].strip()
                     sub_cfg.context = ctx_base
+                    _callee_params = [x.strip() for x in (callee.tainted_params or "").split(",") if x.strip()]
+                    sub_cfg.taint_params = _callee_params or ["all"]
+                    sub_cfg.taint_details = [
+                        {"name": p, "description": f"由 {func_name} 在 {callee.line or 'unknown'} 调用传入", "source_kind": "call_argument"}
+                        for p in sub_cfg.taint_params
+                    ]
                     tainted_ctx_str = (
                         f"函数 {callee.function_name} 被 {func_name} 在 {callee.line} 调用。\n"
                         f"污染参数: {callee.tainted_params}\n说明: {callee.description}"
@@ -957,6 +956,7 @@ class Orchestrator(JudgeMixin):
             f"- 任务ID: `{result.task_id}`",
             f"- 状态: `{result.status.value}`",
             f"- 漏洞数量: {len(findings)}",
+            f"- 文件/函数/行号来源: `{ 'funcdb' if (getattr(self.cfg, 'funcdb_path', '') or getattr(self.cfg, 'func_hash', '')) else 'source-extractor' }`",
             f"- 图谱数据库: `output/vuln-scan.sqlite`",
             f"- 漏洞报告目录: `output/vulnerabilities/`",
             "",
