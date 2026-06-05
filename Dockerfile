@@ -70,8 +70,36 @@ RUN mkdir -p /root/.pi/agent/bin \
     && ln -sf /opt/dataflow_vuln_scan/skills/write-taint-graph /root/.pi/agent/skills/write-taint-graph \
     && ln -sf /opt/dataflow_vuln_scan/skills/mine-dataflow-vulnerability /root/.pi/agent/skills/mine-dataflow-vulnerability
 
-RUN ln -sf "$(which rg)" /root/.pi/agent/bin/rg \
-    && echo "ripgrep ready: $(rg --version | head -1)"
+RUN ln -sf "$(which rg)" "${PI_CODING_AGENT_DIR}/bin/rg" \
+    && echo "ripgrep ready: $(rg --version | head -1)" \
+    && for _cmd in \
+        grep find head tail cat less more sort uniq wc tee \
+        sed awk cut tr paste join \
+        ls ll la dir stat file \
+        which whereis type \
+        xargs yes true false \
+        basename dirname readlink realpath \
+        echo printf test \
+        touch mkdir rmdir rm cp mv ln \
+        chmod chown \
+        gzip gunzip bzip2 bunzip2 xz unxz zcat bzcat xzcat \
+        zip unzip tar \
+        diff patch \
+        wc md5sum sha1sum sha256sum \
+        date time sleep \
+        env printenv export \
+        ps top kill \
+        ldd nm strings objdump \
+        clang clang++ gcc g++ make cmake \
+        gdb strace ctags cscope \
+        jq python3 python \
+        git curl wget \
+        rg; \
+    do \
+        _target="$(command -v "$_cmd" 2>/dev/null)" && \
+        [ -x "$_target" ] && \
+        ln -sf "$_target" "${PI_CODING_AGENT_DIR}/bin/$_cmd" 2>/dev/null || true; \
+    done
 
 # ═══ 挂载点 ═══════════════════════════════════════════════════════════════════
 #
