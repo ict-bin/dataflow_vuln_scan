@@ -1139,11 +1139,7 @@ def get_task_stats(
     )
 
 
-@router.get("/workers/cluster-capacity", response_model=WorkerClusterCapacityResponse)
-def get_worker_cluster_capacity(
-    project_id: str | None = Query(None),
-    db: Session = Depends(get_db),
-):
+def _build_worker_cluster_capacity_response(db: Session, project_id: str | None = None) -> WorkerClusterCapacityResponse:
     snapshot = build_worker_cluster_snapshot(db, project_id=project_id)
     return WorkerClusterCapacityResponse(
         worker_count=snapshot.worker_count,
@@ -1192,6 +1188,24 @@ def get_worker_cluster_capacity(
             for worker in snapshot.workers
         ],
     )
+
+
+@router.get("/workers/cluster-capacity", response_model=WorkerClusterCapacityResponse)
+def get_worker_cluster_capacity(
+    project_id: str | None = Query(None),
+    db: Session = Depends(get_db),
+):
+    return _build_worker_cluster_capacity_response(db, project_id=project_id)
+
+
+@router.get("/workers/slot-cluster", response_model=WorkerClusterCapacityResponse)
+def get_global_slot_cluster_compat(db: Session = Depends(get_db)):
+    return _build_worker_cluster_capacity_response(db, project_id=None)
+
+
+@router.get("/projects/{project_id}/slot-cluster", response_model=WorkerClusterCapacityResponse)
+def get_project_slot_cluster_compat(project_id: str, db: Session = Depends(get_db)):
+    return _build_worker_cluster_capacity_response(db, project_id=project_id)
 
 
 @router.get("/agent-observability/summary", response_model=AgentObservabilitySummaryResponse)
