@@ -2316,32 +2316,24 @@ class TaskService:
                 task_root = _task_root(row)
                 _cleaned: list[str] = []
                 if task_root:
-                    output_root = task_root / "output"
-                    for _artifact in [
-                        output_root / "vuln-scan.sqlite",
-                        output_root / "vulnerabilities",
-                        output_root / "artifact-manifest.json",
-                        output_root / "final_report.md",
-                        output_root / "flag",
-                    ]:
+                    # 完全清除整个 run 目录（包括所有 epoch、session、workspace、SQLite 图谱）
+                    run_root = task_root / "run"
+                    if run_root.exists():
                         try:
-                            if _artifact.is_dir():
-                                shutil.rmtree(_artifact)
-                                _cleaned.append(str(_artifact))
-                            elif _artifact.exists():
-                                _artifact.unlink()
-                                _cleaned.append(str(_artifact))
-                        except OSError:
-                            pass
-                    run_root = task_root / "run" / "epochs"
-                    if run_root.is_dir():
-                        for _epoch_dir in sorted(run_root.iterdir()):
-                            if _epoch_dir.is_dir() and _epoch_dir.name != f"{int(epoch):04d}":
-                                try:
-                                    shutil.rmtree(_epoch_dir)
-                                    _cleaned.append(str(_epoch_dir))
-                                except OSError:
-                                    pass
+                            shutil.rmtree(run_root)
+                            _cleaned.append(str(run_root))
+                        except OSError as exc:
+                            logger.warning("clean restart: failed to remove run root %s: %s", run_root, exc)
+                    run_root.mkdir(parents=True, exist_ok=True)
+                    # 完全清除 output/（图谱、漏洞、报告、flag 全部清除）
+                    output_root = task_root / "output"
+                    if output_root.exists():
+                        try:
+                            shutil.rmtree(output_root)
+                            _cleaned.append(str(output_root))
+                        except OSError as exc:
+                            logger.warning("clean restart: failed to remove output root %s: %s", output_root, exc)
+                    output_root.mkdir(parents=True, exist_ok=True)
                 log_event(logger, logging.INFO, "clean restart applied for recovered task",
                           event="task_clean_restart", task_id=task_id, owner_id=WORKER_ID, epoch=epoch,
                           restart_reason=restart_reason, prev_owner=restart_prev_owner, prev_epoch=restart_prev_epoch,
