@@ -254,6 +254,47 @@ def _find_pi_command() -> list[str]:
     return find_pi_command()
 
 
+def _resolve_pi_model(model: str) -> str:
+    """Return a pi-compatible model name.
+
+    pi requires provider-qualified names when a model id is not owned by the
+    default provider, e.g. ``local_minimax/MiniMax/MiniMax-M2.5``.  Platform
+    config historically stores only the model id (``MiniMax/MiniMax-M2.5``),
+    which pi resolves through its default provider (openrouter) and then waits
+    for login/API key.  If the bare model id appears under exactly one provider
+    in models.json, qualify it automatically.
+    """
+    raw = str(model or "").strip()
+    if not raw:
+        return raw
+    models_path = Path(os.environ.get("PI_MODELS_JSON") or Path.home() / ".pi" / "agent" / "models.json")
+    try:
+        data = json.loads(models_path.read_text(encoding="utf-8"))
+        providers = data.get("providers") if isinstance(data, dict) else None
+        if not isinstance(providers, dict):
+            return raw
+        provider_keys = {str(k) for k in providers.keys()}
+        if any(raw == key or raw.startswith(f"{key}/") for key in provider_keys):
+            return raw
+        matches: list[str] = []
+        for provider_key, provider_cfg in providers.items():
+            if not isinstance(provider_cfg, dict):
+                continue
+            for item in provider_cfg.get("models") or []:
+                if not isinstance(item, dict):
+                    continue
+                model_id = str(item.get("id") or item.get("name") or "").strip()
+                if model_id == raw:
+                    matches.append(f"{provider_key}/{raw}")
+        if len(matches) == 1:
+            resolved = matches[0]
+            _log_info(f"resolved pi model {raw!r} -> {resolved!r}")
+            return resolved
+    except Exception as exc:
+        _log_warn(f"resolve pi model failed for {raw!r}: {exc}")
+    return raw
+
+
 def _proc_group_id(proc: asyncio.subprocess.Process) -> int | None:
     return process_group_id(proc)
 
@@ -647,6 +688,7 @@ async def run_agent(
         r.fatal = True
         return r
 
+    model = _resolve_pi_model(model)
     args = _build_args(pi_cmd, model, tools, thinking_level, session_file)
     cwd = os.path.abspath(cwd)
     env = _build_agent_env(env, task_context=task_context, cwd=cwd)
