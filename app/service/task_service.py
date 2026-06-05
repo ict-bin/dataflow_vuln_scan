@@ -2893,6 +2893,20 @@ class TaskService:
         task_root = str(Path(row.output_path) / row.task_id) if row.output_path else None
         run_root = str(Path(task_root) / "run") if task_root else None
         workspace_root = str(Path(run_root) / "epochs") if run_root else None
+        result_payload = _lightweight_result_json(row, row.result_json) if include_heavy else None
+        execution_duration_ms: float | None = None
+        if row.result_json and isinstance(row.result_json, dict):
+            _total = row.result_json.get("total_duration_ms")
+            if _total is not None:
+                try:
+                    execution_duration_ms = float(_total)
+                except (TypeError, ValueError):
+                    pass
+        if execution_duration_ms is None and row.started_at and row.finished_at:
+            try:
+                execution_duration_ms = (row.finished_at - row.started_at).total_seconds() * 1000
+            except Exception:
+                pass
         return {
             **_origin_payload(row),
             "task_id": row.task_id, "project_id": row.project_id,
@@ -2917,15 +2931,14 @@ class TaskService:
             "prompt_template_id": row.prompt_template_id,
             "prompt_content": row.prompt_content if include_heavy else None, "status": row.status,
             "error": row.error,
-            "result_json": _lightweight_result_json(row, row.result_json) if include_heavy else None,
+            "result_json": result_payload,
             "stages_json": row.stages_json if include_heavy else None,
             "task_config_json": row.task_config_json if include_heavy else None,
             "created_by": row.created_by,
             "created_at": fmt(row.created_at), "updated_at": fmt(row.updated_at),
             "started_at": fmt(row.started_at), "finished_at": fmt(row.finished_at),
-            "execution_owner_id": row.execution_owner_id,
-            "execution_lease_until": fmt(row.execution_lease_until),
-            "execution_heartbeat_at": fmt(row.execution_heartbeat_at),
+            "latest_started_at": fmt(row.started_at),
+            "execution_duration_ms": execution_duration_ms,
             "execution_epoch": int(row.execution_epoch or 0),
             "control_version": int(row.control_version or 0),
             "dispatch_status": row.dispatch_status,

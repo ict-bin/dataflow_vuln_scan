@@ -342,6 +342,8 @@ def begin_execution_if_owner(db: Session, task_id: str, owner_id: str, epoch: in
                 AppDvsTask.status: "running",
                 AppDvsTask.dispatch_status: "running",
                 AppDvsTask.started_at: started_at,
+                AppDvsTask.finished_at: None,
+                AppDvsTask.error: None,
             },
             synchronize_session=False,
         )
