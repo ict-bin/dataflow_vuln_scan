@@ -20,6 +20,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from app.api import router as api_router
 from app.api import tasks as tasks_api
 from app.db.models import AppDvsTask, AppDvsTaskEvent, Base
+from app.models import AgentInstanceConfig, RoleConfig, TaskConfig
+from app.orchestrator import Orchestrator
 from app.service import task_service as task_service_module
 from app.service.task_service import TaskService
 
@@ -85,6 +87,21 @@ class TaskTimelineTests(unittest.TestCase):
             return payload["task_id"]
         finally:
             db.close()
+
+    def _build_task_config(self) -> TaskConfig:
+        agent = AgentInstanceConfig(model="mock-model", tools=["read"])
+        return TaskConfig(
+            task="test task",
+            cwd=str(self.input_dir),
+            output_dir=str(self.output_dir),
+            function_name="demo::root",
+            source_file="demo.cpp",
+            line_hint="L1",
+            callee_concurrency=1,
+            max_trace_depth=0,
+            workers=RoleConfig(agents=[agent]),
+            judges=RoleConfig(agents=[agent]),
+        )
 
     def test_create_task_records_task_created_timeline_event(self):
         task_id = self._create_task()
@@ -282,6 +299,31 @@ class TaskTimelineTests(unittest.TestCase):
             task_service_module._running_tasks.pop(task_id, None)
             task_service_module._running_task_contexts.pop(task_id, None)
             db.close()
+
+    def test_recursive_orchestrator_abort_sets_cancel_event(self):
+        orchestrator = Orchestrator(config=self._build_task_config())
+
+        async def _fake_workflow_run(self):
+            for _ in range(200):
+                if self.cancel_event and self.cancel_event.is_set():
+                    raise asyncio.CancelledError("workflow cancelled")
+                await asyncio.sleep(0.01)
+            self.fail("workflow should have been cancelled before loop completed")
+
+        async def _run():
+            with patch("app.orchestrator.DataflowVulnWorkflow.run", new=_fake_workflow_run):
+                task = asyncio.create_task(orchestrator.execute_recursive(task_id="dvs_abort_probe"))
+                for _ in range(100):
+                    await asyncio.sleep(0.01)
+                    if orchestrator._cancel_event is not None:
+                        break
+                self.assertIsNotNone(orchestrator._cancel_event)
+                orchestrator.abort()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+                self.assertIsNone(orchestrator._cancel_event)
+
+        asyncio.run(_run())
 
     def test_delete_task_records_task_deleted_event_before_soft_delete(self):
         task_id = self._create_task()

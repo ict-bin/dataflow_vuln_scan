@@ -553,6 +553,8 @@ class Orchestrator(JudgeMixin):
         """
         cfg = self.cfg
         is_root = (depth == 0)
+        if self._cancel_event is None:
+            self._cancel_event = asyncio.Event()
 
         # ── 非根任务:直接执行 W+J 并返回,由根任务的工作池调度 ──────────────
         if not is_root:
@@ -883,62 +885,65 @@ class Orchestrator(JudgeMixin):
         # 启动工作池(n_workers 个并发 Worker+Judge 会话)
         workers = [asyncio.create_task(worker(i)) for i in range(n_workers)]
 
-        # 等待所有任务处理完毕
-        await queue.join()
-        if self._is_cancelled():
-            for task in workers:
-                task.cancel()
-            await asyncio.gather(*workers, return_exceptions=True)
-            raise asyncio.CancelledError("recursive orchestration cancelled")
+        try:
+            # 等待所有任务处理完毕
+            await queue.join()
+            if self._is_cancelled():
+                for task in workers:
+                    task.cancel()
+                await asyncio.gather(*workers, return_exceptions=True)
+                raise asyncio.CancelledError("recursive orchestration cancelled")
 
-        # 发送终止 sentinel
-        for _ in range(n_workers):
-            await queue.put(None)
-        await asyncio.gather(*workers)
+            # 发送终止 sentinel
+            for _ in range(n_workers):
+                await queue.put(None)
+            await asyncio.gather(*workers)
 
-        # ── 根函数结果 ────────────────────────────────────────────────────────
-        root_result = all_results.get(root_key)
-        if root_result is None:
-            root_result = TaskResult(task_id=root_task_id, task=cfg.task,
-                                     status=TaskStatus.ERROR,
-                                     error="root function analysis failed")
-        combined_rounds = []
-        combined_tokens = TokenUsage()
-        total_duration_ms = 0.0
-        for item in all_results.values():
-            combined_rounds.extend(item.rounds or [])
-            combined_tokens += item.total_tokens
-            total_duration_ms += float(item.total_duration_ms or 0.0)
-        root_result.rounds = combined_rounds
-        root_result.total_tokens = combined_tokens
-        if total_duration_ms > 0:
-            root_result.total_duration_ms = total_duration_ms
+            # ── 根函数结果 ────────────────────────────────────────────────────────
+            root_result = all_results.get(root_key)
+            if root_result is None:
+                root_result = TaskResult(task_id=root_task_id, task=cfg.task,
+                                         status=TaskStatus.ERROR,
+                                         error="root function analysis failed")
+            combined_rounds = []
+            combined_tokens = TokenUsage()
+            total_duration_ms = 0.0
+            for item in all_results.values():
+                combined_rounds.extend(item.rounds or [])
+                combined_tokens += item.total_tokens
+                total_duration_ms += float(item.total_duration_ms or 0.0)
+            root_result.rounds = combined_rounds
+            root_result.total_tokens = combined_tokens
+            if total_duration_ms > 0:
+                root_result.total_duration_ms = total_duration_ms
 
-        # ── 综合报告:程序化构建(主) + LLM 增强(可选) ────────────────────────
-        if sub_dataflow_files:
-            # 1. 程序化合并 — 始终成功，产出完整跨函数报告
-            root_result.final_output = _build_combined_report(
-                root_function=cfg.function_name,
-                dataflow_files=sub_dataflow_files,
-            )
-            # 2. 尝试 LLM merge 增强 — 失败时保留程序化报告，不阻断流程
-            try:
-                self._raise_if_cancelled()
-                merged = await self._run_merge_agent(
+            # ── 综合报告:程序化构建(主) + LLM 增强(可选) ────────────────────────
+            if sub_dataflow_files:
+                # 1. 程序化合并 — 始终成功，产出完整跨函数报告
+                root_result.final_output = _build_combined_report(
                     root_function=cfg.function_name,
                     dataflow_files=sub_dataflow_files,
-                    cwd=str(root_out_dir),
-                    result=root_result)
-                # 只在 LLM 产出明显更丰富时才替换（避免空输出或过短输出覆盖）
-                if merged and len(merged.strip()) > len(root_result.final_output) // 2:
-                    root_result.final_output = merged
-            except Exception as e:
-                self._emit("merge_skipped", root_task_id,
-                           error=f"LLM merge failed, keeping programmatic report: {e}")
+                )
+                # 2. 尝试 LLM merge 增强 — 失败时保留程序化报告，不阻断流程
+                try:
+                    self._raise_if_cancelled()
+                    merged = await self._run_merge_agent(
+                        root_function=cfg.function_name,
+                        dataflow_files=sub_dataflow_files,
+                        cwd=str(root_out_dir),
+                        result=root_result)
+                    # 只在 LLM 产出明显更丰富时才替换（避免空输出或过短输出覆盖）
+                    if merged and len(merged.strip()) > len(root_result.final_output) // 2:
+                        root_result.final_output = merged
+                except Exception as e:
+                    self._emit("merge_skipped", root_task_id,
+                               error=f"LLM merge failed, keeping programmatic report: {e}")
 
-        # ── 最终归档 ──────────────────────────────────────────────────────────
-        self._do_final_archive(root_result, root_out_dir, _root_output_dir)
-        return root_result
+            # ── 最终归档 ──────────────────────────────────────────────────────────
+            self._do_final_archive(root_result, root_out_dir, _root_output_dir)
+            return root_result
+        finally:
+            self._cancel_event = None
 
     def _do_final_archive(self, result: TaskResult, root_out_dir: Path | None, root_output_dir: Path | None = None):
         """统一归档:写报告 + 输出结果文件到 output/ 目录 + 写 flag。不创建压缩包,不清理工作目录。"""
