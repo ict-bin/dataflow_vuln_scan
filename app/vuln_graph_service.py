@@ -1,7 +1,6 @@
 """Read task-local vulnerability graph artifacts."""
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
@@ -10,16 +9,17 @@ from .vuln_store import VulnScanStore
 
 def load_vuln_scan_graph(run_root: str | Path) -> dict[str, Any]:
     root = Path(run_root)
-    db_path = root / "vuln-scan.sqlite"
-    graph_json = root / "vuln-scan-graph.json"
-    if db_path.exists():
-        return VulnScanStore(db_path).export_json()
-    if graph_json.exists():
-        try:
-            return json.loads(graph_json.read_text(encoding="utf-8"))
-        except Exception as exc:
-            return {"error": f"failed to read graph json: {exc}", "analysis_runs": [], "taint_nodes": [], "taint_edges": [], "followups": [], "vulnerability_findings": []}
-    return {"analysis_runs": [], "taint_nodes": [], "taint_edges": [], "followups": [], "vulnerability_findings": []}
+    # 新架构：任务最终图谱数据库位于 output/vuln-scan.sqlite；兼容旧 run/ 路径。
+    candidates = [
+        root / "vuln-scan.sqlite",
+        root.parent / "output" / "vuln-scan.sqlite",
+    ]
+    if root.name.startswith("epoch") or root.name == "run":
+        candidates.append(root.parent.parent / "output" / "vuln-scan.sqlite")
+    for db_path in candidates:
+        if db_path.exists():
+            return VulnScanStore(db_path).export_json()
+    return {"analysis_runs": [], "taint_nodes": [], "taint_edges": [], "followups": [], "vulnerability_findings": [], "context_forks": []}
 
 
 def summarize_graph(graph: dict[str, Any]) -> dict[str, int]:

@@ -59,7 +59,6 @@ from .prompt_builder import (
     _report,
     _format_final_output,
     _make_result_filename,
-    _build_combined_report,
 )
 
 
@@ -598,14 +597,13 @@ class Orchestrator(JudgeMixin):
         else:
             root_out_dir = Path(os.path.abspath(cfg.output_dir)) / root_task_id / "run"
         root_out_dir.mkdir(parents=True, exist_ok=True)
-        graph_db_path = root_out_dir / "vuln-scan.sqlite"
-        vuln_output_root = root_out_dir.parent / "output" / "vulnerabilities"
-        vuln_output_root.mkdir(parents=True, exist_ok=True)
-
-        # flag=0 写入 output/ 目录
+        # flag=0 写入 output/ 目录；漏洞图谱数据库和漏洞报告直接位于 output/。
         root_output_path = root_out_dir.parent / "output"
         root_output_path.mkdir(parents=True, exist_ok=True)
         (root_output_path / "flag").write_text("0", encoding="utf-8")
+        graph_db_path = root_output_path / "vuln-scan.sqlite"
+        vuln_output_root = root_output_path / "vulnerabilities"
+        vuln_output_root.mkdir(parents=True, exist_ok=True)
 
         # 所有 session 统一归档目录：run/sessions/
         root_sessions_dir = root_out_dir / "sessions"
@@ -917,33 +915,58 @@ class Orchestrator(JudgeMixin):
             if total_duration_ms > 0:
                 root_result.total_duration_ms = total_duration_ms
 
-            # ── 综合报告:程序化构建(主) + LLM 增强(可选) ────────────────────────
-            if sub_dataflow_files:
-                # 1. 程序化合并 — 始终成功，产出完整跨函数报告
-                root_result.final_output = _build_combined_report(
-                    root_function=cfg.function_name,
-                    dataflow_files=sub_dataflow_files,
-                )
-                # 2. 尝试 LLM merge 增强 — 失败时保留程序化报告，不阻断流程
-                try:
-                    self._raise_if_cancelled()
-                    merged = await self._run_merge_agent(
-                        root_function=cfg.function_name,
-                        dataflow_files=sub_dataflow_files,
-                        cwd=str(root_out_dir),
-                        result=root_result)
-                    # 只在 LLM 产出明显更丰富时才替换（避免空输出或过短输出覆盖）
-                    if merged and len(merged.strip()) > len(root_result.final_output) // 2:
-                        root_result.final_output = merged
-                except Exception as e:
-                    self._emit("merge_skipped", root_task_id,
-                               error=f"LLM merge failed, keeping programmatic report: {e}")
+            # 最终报告只展示漏洞简报列表；完整污点图谱/边/跟入点以 output/vuln-scan.sqlite 为准。
+            root_result.final_output = self._build_vulnerability_brief_report(root_result, root_out_dir.parent / "output")
 
             # ── 最终归档 ──────────────────────────────────────────────────────────
             self._do_final_archive(root_result, root_out_dir, _root_output_dir)
             return root_result
         finally:
             self._cancel_event = None
+
+    def _build_vulnerability_brief_report(self, result: TaskResult, output_path: Path) -> str:
+        """构建最终报告：只展示漏洞简报列表，不内嵌数据流全文。"""
+        graph_path = output_path / "vuln-scan.sqlite"
+        graph = {}
+        if graph_path.exists():
+            try:
+                graph = VulnScanStore(graph_path).export_json()
+            except Exception:
+                graph = {}
+        findings = graph.get("vulnerability_findings") or []
+        lines = [
+            f"# 数据流漏洞挖掘简报: {self.cfg.function_name}",
+            "",
+            "## 结果概览",
+            "",
+            f"- 任务ID: `{result.task_id}`",
+            f"- 状态: `{result.status.value}`",
+            f"- 漏洞数量: {len(findings)}",
+            f"- 图谱数据库: `output/vuln-scan.sqlite`",
+            f"- 漏洞报告目录: `output/vulnerabilities/`",
+            "",
+            "## 漏洞简报列表",
+            "",
+        ]
+        if not findings:
+            lines.append("未确认漏洞发现。")
+        else:
+            for idx, item in enumerate(findings, 1):
+                rel_dir = str(item.get("output_dir") or "").split("/output/", 1)[-1]
+                if rel_dir and not rel_dir.startswith("output/"):
+                    rel_dir = "output/" + rel_dir
+                lines += [
+                    f"### {idx}. {item.get('title') or item.get('finding_id')}",
+                    "",
+                    f"- ID: `{item.get('finding_id')}`",
+                    f"- 类型: `{item.get('vuln_type') or 'unknown'}`",
+                    f"- 严重性: `{item.get('severity') or 'unknown'}`",
+                    f"- 置信度: `{item.get('confidence')}`",
+                    f"- 摘要: {item.get('summary') or ''}",
+                    f"- 报告目录: `{rel_dir or item.get('output_dir') or ''}`",
+                    "",
+                ]
+        return "\n".join(lines).strip() + "\n"
 
     def _do_final_archive(self, result: TaskResult, root_out_dir: Path | None, root_output_dir: Path | None = None):
         """统一归档:写报告 + 输出结果文件到 output/ 目录 + 写 flag。不创建压缩包,不清理工作目录。"""
@@ -965,16 +988,8 @@ class Orchestrator(JudgeMixin):
         (output_path / result_filename).write_text(cleaned_output, encoding="utf-8")
         result.final_output = cleaned_output
 
-        # 将 dataflow/ 文件夹复制到 output/dataflow/
-        df_folder = root_out_dir / "dataflow"
-        if df_folder.exists():
-            dest_df = output_path / "dataflow"
-            if dest_df.exists():
-                shutil.rmtree(dest_df, ignore_errors=True)
-            try:
-                shutil.copytree(str(df_folder), str(dest_df))
-            except OSError:
-                pass
+        # 不再将 dataflow 全文复制到 output；完整污点传播信息以 SQLite 图谱为准，
+        # output/final_report.md 仅保留漏洞简报列表，output/vulnerabilities/ 保留漏洞报告。
 
         # 写 flag 文件(仅 PASSED 为 1,其他保持 0)
         if result.status == TaskStatus.PASSED:

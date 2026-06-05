@@ -99,6 +99,10 @@ def _read_prompt(path: str) -> str:
         return ""
 
 
+_EMBEDDED_TAINT_GRAPH_SKILL = _read_prompt("skills/write-taint-graph/SKILL.md")
+_EMBEDDED_VULN_MINING_SKILL = _read_prompt("skills/mine-dataflow-vulnerability/SKILL.md")
+
+
 class DataflowVulnWorkflow:
     def __init__(
         self,
@@ -140,8 +144,7 @@ class DataflowVulnWorkflow:
         self.session_label = session_label or _safe_name(func_name)
         self.run_id = f"{task_id}:{hashlib.sha1((src_file+'::'+func_name).encode()).hexdigest()[:12]}"
         self.store = VulnScanStore(graph_db_path or (self.out_dir / "vuln-scan.sqlite"))
-        self.graph_json_path = self.store.db_path.with_name("vuln-scan-graph.json")
-        self.vuln_root = Path(vuln_output_root) if vuln_output_root is not None else (self.out_dir / "output" / "vulnerabilities")
+        self.vuln_root = Path(vuln_output_root) if vuln_output_root is not None else (self.out_dir.parent / "output" / "vulnerabilities")
         self.vuln_root.mkdir(parents=True, exist_ok=True)
         self.ws = self.out_dir / "workspace-worker-0"
         self.ws.mkdir(parents=True, exist_ok=True)
@@ -197,13 +200,16 @@ class DataflowVulnWorkflow:
             "# 数据流污点跟踪 + 漏洞挖掘\n\n"
             f"目标函数: `{self.src_file}::{self.func_name}`\n"
             f"当前深度: {self.dep}/{self.max_depth}\n"
-            f"污点输入(JSON):\n```json\n{json.dumps(taints, ensure_ascii=False, indent=2)}\n```\n"
+            f"污点输入(JSON，仅作为本次输入描述，不需要写入输出目录):\n```json\n{json.dumps(taints, ensure_ascii=False, indent=2)}\n```\n"
             f"{upstream}\n\n"
             "## 函数源码（带绝对行号）\n```cpp\n"
             f"{func_body}\n```\n\n"
             "请一个 Worker 在当前函数内同时分析所有污点，不要按污点拆分 worker。\n"
-            "必须使用 write 工具写出：\n"
-            "1. `taint-graph.json`\n2. `dataflow-<function>.md`\n3. `tainted.list`（无跟入点则写空文件）\n4. `taintvars.json`\n"
+            "必须使用 write 工具在当前工作目录写出临时中间产物：\n"
+            "1. `taint-graph.json`（仅供服务端导入 SQLite，最终不会作为任务输出保留）\n"
+            "2. `dataflow-<function>.md`（仅供服务端解析/调试，最终报告不会直接展示数据流全文）\n"
+            "3. `tainted.list`（无跟入点则写空文件）\n"
+            "4. `taintvars.json`（可选，仅供服务端兼容解析，最终不会作为任务输出保留）\n"
             "`taint-graph.json` 必须包含 edges/followups/termination，并且每条边都有 line/evidence/sanitizer_effect；终止边必须有 termination_reason。\n"
             "同时在报告中判断当前函数内是否存在漏洞候选，漏洞判断会由后续 fork 上下文复核。\n"
         )
@@ -218,7 +224,13 @@ class DataflowVulnWorkflow:
         system_prompt = resolve_system_prompt(0, acfg, worker_prompts)
         graph_prompt = _read_prompt("prompts/taint-graph/default.md")
         follow_prompt = _read_prompt("prompts/followups/default.md") if self.dep > 0 else ""
-        system_prompt = "\n\n".join(x for x in [system_prompt, graph_prompt, follow_prompt] if x)
+        embedded_skill = (
+            "# 内嵌技能：write-taint-graph\n"
+            "以下技能内容已经完整嵌入系统提示词。禁止再通过 read/bash/cat/sed 等方式读取 skills/write-taint-graph/SKILL.md；"
+            "也不要调用 /skill 触发二次加载。\n\n"
+            f"{_EMBEDDED_TAINT_GRAPH_SKILL}"
+        )
+        system_prompt = "\n\n".join(x for x in [system_prompt, graph_prompt, follow_prompt, embedded_skill] if x)
         # 优先使用全局归档目录，否则退回本地 sessions/
         if self.sessions_archive_dir:
             self.sessions_archive_dir.mkdir(parents=True, exist_ok=True)
@@ -310,9 +322,16 @@ class DataflowVulnWorkflow:
             f"# 阶段：漏洞挖掘 Fork\n\n目标函数: `{self.src_file}::{self.func_name}`\n污点: {', '.join(self.taint_params)}\n\n"
             f"基于下面的单函数污点传播结果，判断是否存在漏洞。必须输出 JSON: {{\"findings\":[]}}。\n\n```markdown\n{dataflow_text[:30000]}\n```"
         )
+        miner_system_prompt = (
+            "# 内嵌技能：mine-dataflow-vulnerability\n"
+            "以下技能内容已经完整嵌入系统提示词。禁止再通过 read/bash/cat/sed 等方式读取 skills/mine-dataflow-vulnerability/SKILL.md；"
+            "漏洞报告由服务端写入 output/vulnerabilities 目录；不要自行创建 run/output 或其它 output 目录。\n\n"
+            f"{_EMBEDDED_VULN_MINING_SKILL}\n\n"
+            f"{_read_prompt('prompts/vuln-miners/default.md')}"
+        )
         output = await run_agent(
             prompt=prompt, model=acfg.model, tools=acfg.tools or self.cfg.workers.default_tools,
-            cwd=str(self.out_dir), session_file=str(fork_session), system_prompt=_read_prompt("prompts/vuln-miners/default.md"),
+            cwd=str(self.vuln_root.parent), session_file=str(fork_session), system_prompt=miner_system_prompt,
             cancel_event=self.cancel_event, run_timeout_seconds=self.cfg.agent_run_timeout_seconds,
             timeout_retry_enabled=self.cfg.agent_timeout_retry_enabled, timeout_max_retries=self.cfg.agent_timeout_max_retries,
             pi_max_retries=self.cfg.pi_max_retries, pi_retry_delay=self.cfg.pi_retry_delay,
@@ -375,12 +394,18 @@ class DataflowVulnWorkflow:
         except Exception as exc:
             self._emit("vuln_scan_error", function=self.func_name, error=str(exc), depth=self.dep)
         graph_export = self.store.export_json()
-        self.graph_json_path.write_text(json.dumps(graph_export, ensure_ascii=False, indent=2), encoding="utf-8")
         self.store.finish_run(self.run_id, result.status.value if hasattr(result.status, "value") else str(result.status))
         summary = {"runs": len(graph_export.get("analysis_runs") or []), "nodes": len(graph_export.get("taint_nodes") or []), "edges": len(graph_export.get("taint_edges") or []), "followups": len(graph_export.get("followups") or []), "findings": len(graph_export.get("vulnerability_findings") or [])}
         result.vuln_summary = summary
         result.upstream_entry_metadata = dict(result.upstream_entry_metadata or {})
-        result.upstream_entry_metadata["vuln_scan"] = {"sqlite_path": str(self.store.db_path), "graph_json_path": str(self.graph_json_path), "vulnerabilities_dir": str(self.vuln_root)}
+        result.upstream_entry_metadata["vuln_scan"] = {"sqlite_path": str(self.store.db_path), "vulnerabilities_dir": str(self.vuln_root), "graph_storage": "sqlite"}
+        # JSON 中间文件已导入 SQLite 后淘汰，避免最终输出/工作目录依赖 JSON 图谱。
+        for _json_path in [self.ws / "taint-graph.json", self.ws / "taintvars.json", self.out_dir / "taint-graph.validation.json"]:
+            try:
+                if _json_path.exists():
+                    _json_path.unlink()
+            except OSError:
+                pass
         return result
 
     def _make_result(self, final_output: str, agent_result: Any, passed: bool, completion_reason: str, *, rounds: list[RoundResult] | None = None, total_tokens: TokenUsage | None = None) -> TaskResult:
