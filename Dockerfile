@@ -5,7 +5,35 @@ ARG SECFLOW_BUILD_VERSION=""
 ENV PYTHONUNBUFFERED=1
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends zip \
+    && apt-get install -y --no-install-recommends \
+        zip \
+        unzip \
+        xz-utils \
+        file \
+        jq \
+        tree \
+        less \
+        vim-tiny \
+        findutils \
+        coreutils \
+        procps \
+        psmisc \
+        lsof \
+        net-tools \
+        iproute2 \
+        iputils-ping \
+        dnsutils \
+        build-essential \
+        make \
+        cmake \
+        pkg-config \
+        clang \
+        clang-tools \
+        llvm \
+        gdb \
+        cscope \
+        universal-ctags \
+        python3-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # ═══ 项目代码 ═════════════════════════════════════════════════════════════════

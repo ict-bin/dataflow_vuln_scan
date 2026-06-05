@@ -659,6 +659,7 @@ class Orchestrator(JudgeMixin):
 
             result: TaskResult | None = None
             completed_session_file: str = ""  # 完成后 worker session 路径，传递给 callee
+            workflow: DataflowVulnWorkflow | None = None
 
             if result is None:
                 self._raise_if_cancelled()
@@ -695,7 +696,7 @@ class Orchestrator(JudgeMixin):
                     sessions_archive_dir=root_sessions_dir,
                     session_label=session_label,
                 )
-                result = await workflow.run()
+                result = await workflow.run_taint_tracking_only()
                 self._raise_if_cancelled()
                 # 取完成后的 worker session 路径，用作各 callee 继承的 parent session
                 completed_session_file = str(
@@ -748,6 +749,12 @@ class Orchestrator(JudgeMixin):
 
             func_key = src_file + "::" + func_name
             all_results[func_key] = result
+
+            vuln_mining_task: asyncio.Task | None = None
+            if workflow is not None and result is not None:
+                # 漏洞挖掘只依赖当前函数污点跟踪结果；与后续 callee 污点分析互不依赖，
+                # 因此先 fork 后台任务，让漏洞挖掘与 BFS 后续跟入点并行运行。
+                vuln_mining_task = asyncio.create_task(workflow.run_vuln_mining_after_taint(result))
 
             # ── 解析 callee 并加入队列 ─────────────────────────────────────
             if dep < max_depth and result.final_output:
@@ -861,6 +868,14 @@ class Orchestrator(JudgeMixin):
                     await queue.put((callee.function_name, sub_file, sub_line_hint, sub_cfg,
                                      sub_tid, dep + 1, tainted_ctx_str,
                                      completed_session_file or None))
+
+            if vuln_mining_task is not None:
+                try:
+                    await vuln_mining_task
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    self._emit("vuln_scan_error", tid, function=func_name, error=str(exc), depth=dep)
 
         async def worker(wid: int) -> None:
             while True:

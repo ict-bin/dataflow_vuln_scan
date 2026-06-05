@@ -2398,6 +2398,8 @@ class TaskService:
                 epoch_run_root.mkdir(parents=True, exist_ok=True)
 
             cfg = build_task_config(svc, row.prompt_content, cwd=row.source_root_path or row.input_path)
+            cfg.project_id = str(row.project_id or "")
+            cfg.task_name = str(row.task_name or "")
             if tcfg.get("source_file"):
                 cfg.source_file = str(tcfg["source_file"])
             if tcfg.get("function_name"):

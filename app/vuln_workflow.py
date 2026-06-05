@@ -143,6 +143,8 @@ class DataflowVulnWorkflow:
         self.sessions_archive_dir = Path(sessions_archive_dir) if sessions_archive_dir else None
         self.session_label = session_label or _safe_name(func_name)
         self.run_id = f"{task_id}:{hashlib.sha1((src_file+'::'+func_name).encode()).hexdigest()[:12]}"
+        self.project_id = str(getattr(cfg, "project_id", "") or "").strip()
+        self.task_name = str(getattr(cfg, "task_name", "") or "").strip()
         self.store = VulnScanStore(graph_db_path or (self.out_dir / "vuln-scan.sqlite"))
         self.vuln_root = Path(vuln_output_root) if vuln_output_root is not None else (self.out_dir.parent / "output" / "vulnerabilities")
         self.vuln_root.mkdir(parents=True, exist_ok=True)
@@ -354,14 +356,40 @@ class DataflowVulnWorkflow:
                 continue
             finding_id = f"vuln_{hashlib.sha1((self.run_id+str(idx)+json.dumps(item, ensure_ascii=False)).encode()).hexdigest()[:16]}"
             fdir = self.vuln_root / finding_id; fdir.mkdir(parents=True, exist_ok=True)
-            (fdir / "vulnerability-report.md").write_text(f"# {item.get('title') or finding_id}\n\n## 位置\n- 文件: `{item.get('source_file') or item.get('file') or self.src_file}`\n- 行号: `{item.get('line') or item.get('line_hint') or item.get('vuln_line') or 'unknown'}`\n\n## 摘要\n{item.get('summary','')}\n\n## 证据\n{item.get('evidence','')}\n\n## 可利用性\n{item.get('exploitability','')}\n", encoding="utf-8")
-            (fdir / "taint-path-report.md").write_text(dataflow_text, encoding="utf-8")
+            report_path = fdir / "vulnerability-report.md"
+            taint_report_path = fdir / "taint-path-report.md"
+            report_path.write_text(f"# {item.get('title') or finding_id}\n\n## 位置\n- 文件: `{item.get('source_file') or item.get('file') or self.src_file}`\n- 行号: `{item.get('line') or item.get('line_hint') or item.get('vuln_line') or 'unknown'}`\n\n## 摘要\n{item.get('summary','')}\n\n## 证据\n{item.get('evidence','')}\n\n## 可利用性\n{item.get('exploitability','')}\n", encoding="utf-8")
+            taint_report_path.write_text(dataflow_text, encoding="utf-8")
             try:
                 if fork_session.exists(): shutil.copyfile(fork_session, fdir / "context.jsonl")
             except OSError:
                 (fdir / "context.jsonl").write_text("", encoding="utf-8")
             rec = VulnFindingRecord(finding_id=finding_id, run_id=self.run_id, node_id=node, source_file=str(item.get("source_file") or item.get("file") or self.src_file), line=str(item.get("line") or item.get("line_hint") or item.get("vuln_line") or ""), vuln_type=str(item.get("vuln_type") or "unknown"), severity=str(item.get("severity") or "unknown"), title=str(item.get("title") or finding_id), summary=str(item.get("summary") or ""), evidence=str(item.get("evidence") or ""), exploitability=str(item.get("exploitability") or ""), confidence=float(item.get("confidence") or 0), output_dir=str(fdir))
             self.store.add_finding(rec); findings.append(rec)
+            try:
+                from .vuln_intake_reporter import report_finding_to_intake
+                report_result = await report_finding_to_intake(
+                    project_id=self.project_id,
+                    task_id=self.task_id,
+                    task_name=self.task_name,
+                    finding=rec,
+                    source_root=str(self.cfg.cwd or ""),
+                    report_path=str(report_path),
+                    taint_path_report_path=str(taint_report_path),
+                )
+                self._emit(
+                    "vuln_intake_reported" if report_result.get("status") == "reported" else "vuln_intake_report_failed",
+                    finding_id=rec.finding_id,
+                    report_id=report_result.get("report_id"),
+                    case_id=report_result.get("case_id"),
+                    status=report_result.get("status"),
+                    duplicate=report_result.get("duplicate"),
+                    error=report_result.get("error"),
+                    source_file=rec.source_file,
+                    line=rec.line,
+                )
+            except Exception as exc:
+                self._emit("vuln_intake_report_failed", finding_id=rec.finding_id, status="failed", error=str(exc), source_file=rec.source_file, line=rec.line)
         return findings
 
     def _record_edges_from_result(self, result: TaskResult, node_ids: list[str]) -> None:
@@ -387,21 +415,7 @@ class DataflowVulnWorkflow:
             followups.append(FollowupRecord(followup_id="follow_" + hashlib.sha1((eid+c.function_name).encode()).hexdigest()[:16], edge_id=eid, parent_node_id=node_ids[0] if node_ids else "", callee_file=c.file or self.src_file, callee_function=c.function_name, callee_line=c.line, tainted_params_json=json.dumps([x.strip() for x in (c.tainted_params or "").split(',') if x.strip()], ensure_ascii=False), depth=self.dep + 1))
         self.store.add_taint_edges(edges); self.store.add_followups(followups)
 
-    async def run(self) -> TaskResult:
-        self._write_design_doc()
-        self.store.start_run(self.run_id, self.task_id, self.src_file, self.func_name, self.cfg.cwd, self.cfg.model_dump())
-        node_ids = self._seed_nodes()
-        self._emit("vuln_scan_graph_start", function=self.func_name, source_file=self.src_file, taints=self.taint_params, depth=self.dep)
-        result, base_session, dataflow_text = await self._run_single_worker()
-        # 将 worker session 路径写入元数据，供 Orchestrator 传递给 callee 作为 parent session
-        if base_session:
-            result.upstream_entry_metadata["worker_session_file"] = base_session
-        self._record_edges_from_result(result, node_ids)
-        try:
-            findings = await self._run_vuln_mining_fork(base_session, dataflow_text)
-            self._emit("vuln_scan_findings", function=self.func_name, count=len(findings), depth=self.dep)
-        except Exception as exc:
-            self._emit("vuln_scan_error", function=self.func_name, error=str(exc), depth=self.dep)
+    def _finalize_taint_result(self, result: TaskResult) -> TaskResult:
         graph_export = self.store.export_json()
         self.store.finish_run(self.run_id, result.status.value if hasattr(result.status, "value") else str(result.status))
         summary = {"runs": len(graph_export.get("analysis_runs") or []), "nodes": len(graph_export.get("taint_nodes") or []), "edges": len(graph_export.get("taint_edges") or []), "followups": len(graph_export.get("followups") or []), "findings": len(graph_export.get("vulnerability_findings") or [])}
@@ -415,6 +429,39 @@ class DataflowVulnWorkflow:
                     _json_path.unlink()
             except OSError:
                 pass
+        return result
+
+    async def run_taint_tracking_only(self) -> TaskResult:
+        self._write_design_doc()
+        self.store.start_run(self.run_id, self.task_id, self.src_file, self.func_name, self.cfg.cwd, self.cfg.model_dump())
+        node_ids = self._seed_nodes()
+        self._emit("vuln_scan_graph_start", function=self.func_name, source_file=self.src_file, taints=self.taint_params, depth=self.dep)
+        result, base_session, dataflow_text = await self._run_single_worker()
+        # 将 worker session 路径写入元数据，供 Orchestrator 传递给 callee 作为 parent session；
+        # 同时保留漏洞挖掘所需的 dataflow 文本，使漏洞挖掘可以与后续 callee 污点分析并行。
+        if base_session:
+            result.upstream_entry_metadata["worker_session_file"] = base_session
+        result.upstream_entry_metadata["vuln_mining_base_session"] = base_session
+        result.upstream_entry_metadata["vuln_mining_dataflow_text"] = dataflow_text
+        self._record_edges_from_result(result, node_ids)
+        return self._finalize_taint_result(result)
+
+    async def run_vuln_mining_after_taint(self, result: TaskResult) -> list[VulnFindingRecord]:
+        base_session = str((result.upstream_entry_metadata or {}).get("vuln_mining_base_session") or "")
+        dataflow_text = str((result.upstream_entry_metadata or {}).get("vuln_mining_dataflow_text") or result.final_output or "")
+        try:
+            findings = await self._run_vuln_mining_fork(base_session, dataflow_text)
+            self._emit("vuln_scan_findings", function=self.func_name, count=len(findings), depth=self.dep)
+            graph_export = self.store.export_json()
+            result.vuln_summary = {"runs": len(graph_export.get("analysis_runs") or []), "nodes": len(graph_export.get("taint_nodes") or []), "edges": len(graph_export.get("taint_edges") or []), "followups": len(graph_export.get("followups") or []), "findings": len(graph_export.get("vulnerability_findings") or [])}
+            return findings
+        except Exception as exc:
+            self._emit("vuln_scan_error", function=self.func_name, error=str(exc), depth=self.dep)
+            return []
+
+    async def run(self) -> TaskResult:
+        result = await self.run_taint_tracking_only()
+        await self.run_vuln_mining_after_taint(result)
         return result
 
     def _make_result(self, final_output: str, agent_result: Any, passed: bool, completion_reason: str, *, rounds: list[RoundResult] | None = None, total_tokens: TokenUsage | None = None) -> TaskResult:
