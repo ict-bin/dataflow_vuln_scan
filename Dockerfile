@@ -73,28 +73,9 @@ RUN mkdir -p /root/.pi/agent/bin \
 RUN ln -sf "$(which rg)" "${PI_CODING_AGENT_DIR}/bin/rg" \
     && echo "ripgrep ready: $(rg --version | head -1)" \
     && for _cmd in \
-        grep find head tail cat less more sort uniq wc tee \
-        sed awk cut tr paste join \
-        ls ll la dir stat file \
-        which whereis type \
-        xargs yes true false \
-        basename dirname readlink realpath \
-        echo printf test \
-        touch mkdir rmdir rm cp mv ln \
-        chmod chown \
-        gzip gunzip bzip2 bunzip2 xz unxz zcat bzcat xzcat \
-        zip unzip tar \
-        diff patch \
-        wc md5sum sha1sum sha256sum \
-        date time sleep \
-        env printenv export \
-        ps top kill \
-        ldd nm strings objdump \
-        clang clang++ gcc g++ make cmake \
-        gdb strace ctags cscope \
-        jq python3 python \
-        git curl wget \
-        rg; \
+        rg grep find head tail cat sed awk cut tr sort uniq wc xargs \
+        ls stat file basename dirname readlink realpath \
+        jq python3; \
     do \
         _target="$(command -v "$_cmd" 2>/dev/null)" && \
         [ -x "$_target" ] && \

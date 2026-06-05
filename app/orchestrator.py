@@ -914,8 +914,10 @@ class Orchestrator(JudgeMixin):
                 except asyncio.CancelledError:
                     return
                 except Exception as e:
-                    tid = item[3] if len(item) > 3 else "?"
-                    self._emit("error", tid, error=str(e))
+                    # item layout: (func_name, src_file, line_hint, task_cfg, tid, dep, ...)
+                    err_tid = item[4] if len(item) > 4 else "?"
+                    logger.exception("recursive process_item failed task_id=%s function=%s", err_tid, item[0] if item else "?")
+                    self._emit("error", err_tid, error=str(e), function=item[0] if item else "?")
                 finally:
                     queue.task_done()
 
@@ -938,6 +940,13 @@ class Orchestrator(JudgeMixin):
 
             # ── 根函数结果 ────────────────────────────────────────────────────────
             root_result = all_results.get(root_key)
+            if root_result is None:
+                # cfg.source_file/function_name may be parsed/normalized late by task_config_json.
+                # If the literal root_key misses, fall back to the first depth-0 result instead of
+                # overwriting a valid root worker result as "root function analysis failed".
+                root_result = next((r for r in all_results.values() if str(r.task_id) == str(root_task_id)), None)
+            if root_result is None:
+                root_result = next(iter(all_results.values()), None)
             if root_result is None:
                 root_result = TaskResult(task_id=root_task_id, task=cfg.task,
                                          status=TaskStatus.ERROR,
