@@ -72,6 +72,7 @@ def _stable_report_id(*, project_id: str, task_id: str, finding: VulnFindingReco
         task_id,
         finding.finding_id,
         finding.source_file,
+        finding.function_name,
         str(finding.line),
         finding.title,
     ])
@@ -94,12 +95,18 @@ def build_intake_payload(
     report_text = _read_text(report_path) if report_path else ""
     taint_text = _read_text(taint_path_report_path, limit=120_000) if taint_path_report_path else ""
     source_file = str(finding.source_file or "").strip()
+    function_name = str(finding.function_name or "").strip()
     line = str(finding.line or "").strip()
-    locator = f"{source_file}:{line}" if line else source_file or finding.finding_id
+    locator_parts = [source_file]
+    if function_name:
+        locator_parts.append(function_name)
+    if line:
+        locator_parts.append(line)
+    locator = ":".join([p for p in locator_parts if p]) or finding.finding_id
     summary = (finding.summary or report_text or finding.title or finding.finding_id).strip()
     evidence = (finding.evidence or "").strip()
     reproduction_hint = (finding.exploitability or "").strip()
-    fingerprint_raw = "|".join([project_id, source_file, line, finding.vuln_type, finding.title, evidence[:512]])
+    fingerprint_raw = "|".join([project_id, source_file, function_name, line, finding.vuln_type, finding.title, evidence[:512]])
     artifacts: list[dict[str, Any]] = []
     if report_text:
         artifacts.append({
@@ -159,7 +166,7 @@ def build_intake_payload(
             "summary": (evidence or summary or finding.title)[:2000],
             "reproduction_hint": reproduction_hint[:2000],
             "references": [
-                {"kind": "source_location", "source_file": source_file, "line": line},
+                {"kind": "source_location", "source_file": source_file, "function_name": function_name, "line": line},
                 *([{"kind": "report", "path": report_path}] if report_path else []),
                 *([{"kind": "taint_path", "path": taint_path_report_path}] if taint_path_report_path else []),
             ],
@@ -176,12 +183,14 @@ def build_intake_payload(
                 "finding_id": finding.finding_id,
                 "source_root": source_root,
                 "source_file": source_file,
+                "function_name": function_name,
                 "line": line,
                 "reported_severity": _normalize_severity(finding.severity),
             },
             "dataflow_vuln_scan": {
                 "graph_storage": "sqlite",
                 "finding_id": finding.finding_id,
+                "function_name": function_name,
                 "vuln_type": finding.vuln_type,
                 "output_dir": finding.output_dir,
                 "reporting_mode": "service_script",

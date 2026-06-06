@@ -1009,6 +1009,7 @@ class Orchestrator(JudgeMixin):
                     f"- ID: `{item.get('finding_id')}`",
                     f"- 类型: `{item.get('vuln_type') or 'unknown'}`",
                     f"- 严重性: `{item.get('severity') or 'unknown'}`",
+                    f"- 位置: `{item.get('source_file') or ''}` / `{item.get('function_name') or ''}` / `{item.get('line') or 'unknown'}`",
                     f"- 置信度: `{item.get('confidence')}`",
                     f"- 摘要: {item.get('summary') or ''}",
                     f"- 报告目录: `{rel_dir or item.get('output_dir') or ''}`",

@@ -346,7 +346,7 @@ class DataflowVulnWorkflow:
         prompt = (
             f"# 阶段：漏洞挖掘 Fork\n\n目标函数: `{self.src_file}::{self.func_name}`\n污点: {', '.join(self.taint_params)}\n\n"
             "基于下面的单函数污点传播结果，判断是否存在漏洞。必须输出 JSON: {\"findings\":[]}。\n"
-            "每个 finding 必须包含 `source_file`（漏洞所在文件，相对源码根目录优先）和 `line`（漏洞发生行号，如 L123 或 123）。\n\n"
+            "每个 finding 必须包含 `source_file`（漏洞所在文件，相对源码根目录优先）、`function_name`（漏洞所在函数名）、`line`（漏洞发生行号，如 L123 或 123）。\n\n"
             f"```markdown\n{dataflow_text[:30000]}\n```"
         )
         miner_system_prompt = (
@@ -374,13 +374,16 @@ class DataflowVulnWorkflow:
             fdir = self.vuln_root / finding_id; fdir.mkdir(parents=True, exist_ok=True)
             report_path = fdir / "vulnerability-report.md"
             taint_report_path = fdir / "taint-path-report.md"
-            report_path.write_text(f"# {item.get('title') or finding_id}\n\n## 位置\n- 文件: `{item.get('source_file') or item.get('file') or self.src_file}`\n- 行号: `{item.get('line') or item.get('line_hint') or item.get('vuln_line') or 'unknown'}`\n\n## 摘要\n{item.get('summary','')}\n\n## 证据\n{item.get('evidence','')}\n\n## 可利用性\n{item.get('exploitability','')}\n", encoding="utf-8")
+            finding_source_file = str(item.get('source_file') or item.get('file') or self.src_file)
+            finding_function_name = str(item.get('function_name') or item.get('function') or item.get('func') or self.func_name)
+            finding_line = str(item.get('line') or item.get('line_hint') or item.get('vuln_line') or '')
+            report_path.write_text(f"# {item.get('title') or finding_id}\n\n## 位置\n- 文件: `{finding_source_file}`\n- 函数: `{finding_function_name}`\n- 行号: `{finding_line or 'unknown'}`\n\n## 摘要\n{item.get('summary','')}\n\n## 证据\n{item.get('evidence','')}\n\n## 可利用性\n{item.get('exploitability','')}\n", encoding="utf-8")
             taint_report_path.write_text(dataflow_text, encoding="utf-8")
             try:
                 if fork_session.exists(): shutil.copyfile(fork_session, fdir / "context.jsonl")
             except OSError:
                 (fdir / "context.jsonl").write_text("", encoding="utf-8")
-            rec = VulnFindingRecord(finding_id=finding_id, run_id=self.run_id, node_id=node, source_file=str(item.get("source_file") or item.get("file") or self.src_file), line=str(item.get("line") or item.get("line_hint") or item.get("vuln_line") or ""), vuln_type=str(item.get("vuln_type") or "unknown"), severity=str(item.get("severity") or "unknown"), title=str(item.get("title") or finding_id), summary=str(item.get("summary") or ""), evidence=str(item.get("evidence") or ""), exploitability=str(item.get("exploitability") or ""), confidence=float(item.get("confidence") or 0), output_dir=str(fdir))
+            rec = VulnFindingRecord(finding_id=finding_id, run_id=self.run_id, node_id=node, source_file=finding_source_file, function_name=finding_function_name, line=finding_line, vuln_type=str(item.get("vuln_type") or "unknown"), severity=str(item.get("severity") or "unknown"), title=str(item.get("title") or finding_id), summary=str(item.get("summary") or ""), evidence=str(item.get("evidence") or ""), exploitability=str(item.get("exploitability") or ""), confidence=float(item.get("confidence") or 0), output_dir=str(fdir))
             self.store.add_finding(rec); findings.append(rec)
             self.store.append_artifact_manifest(
                 "vulnerability_mining",
@@ -414,10 +417,11 @@ class DataflowVulnWorkflow:
                     duplicate=report_result.get("duplicate"),
                     error=report_result.get("error"),
                     source_file=rec.source_file,
+                    function_name=rec.function_name,
                     line=rec.line,
                 )
             except Exception as exc:
-                self._emit("vuln_intake_report_failed", finding_id=rec.finding_id, status="failed", error=str(exc), source_file=rec.source_file, line=rec.line)
+                self._emit("vuln_intake_report_failed", finding_id=rec.finding_id, status="failed", error=str(exc), source_file=rec.source_file, function_name=rec.function_name, line=rec.line)
         return findings
 
     def _record_edges_from_result(self, result: TaskResult, node_ids: list[str]) -> None:

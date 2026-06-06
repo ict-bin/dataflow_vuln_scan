@@ -23,11 +23,12 @@ class VulnGraphStoreTests(unittest.TestCase):
             line="L10", operation="assignment", evidence="L10: len = buf->len"
         )])
         store.add_finding(VulnFindingRecord(
-            finding_id="v1", run_id="run1", node_id="n1", vuln_type="overflow", title="overflow"
+            finding_id="v1", run_id="run1", node_id="n1", source_file="a.c", function_name="foo", line="L10", vuln_type="overflow", title="overflow"
         ))
         graph = load_vuln_scan_graph(root)
         self.assertEqual({"runs": 1, "nodes": 1, "edges": 1, "followups": 0, "findings": 1}, summarize_graph(graph))
         self.assertEqual("buf", graph["taint_nodes"][0]["symbol"])
+        self.assertEqual("foo", graph["vulnerability_findings"][0]["function_name"])
 
     def test_validator_requires_edge_evidence(self):
         warnings = validate_taint_graph({

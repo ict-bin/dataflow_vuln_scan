@@ -79,6 +79,7 @@ class VulnFindingRecord:
     node_id: str
     edge_id: str = ""
     source_file: str = ""
+    function_name: str = ""
     line: str = ""
     vuln_type: str = "unknown"
     severity: str = "unknown"
@@ -187,6 +188,7 @@ class VulnScanStore:
                   node_id TEXT NOT NULL,
                   edge_id TEXT NOT NULL DEFAULT '',
                   source_file TEXT NOT NULL DEFAULT '',
+                  function_name TEXT NOT NULL DEFAULT '',
                   line TEXT NOT NULL DEFAULT '',
                   vuln_type TEXT NOT NULL DEFAULT 'unknown',
                   severity TEXT NOT NULL DEFAULT 'unknown',
@@ -219,6 +221,7 @@ class VulnScanStore:
             )
             for column, ddl in [
                 ("source_file", "ALTER TABLE vulnerability_findings ADD COLUMN source_file TEXT NOT NULL DEFAULT ''"),
+                ("function_name", "ALTER TABLE vulnerability_findings ADD COLUMN function_name TEXT NOT NULL DEFAULT ''"),
                 ("line", "ALTER TABLE vulnerability_findings ADD COLUMN line TEXT NOT NULL DEFAULT ''"),
             ]:
                 try:
