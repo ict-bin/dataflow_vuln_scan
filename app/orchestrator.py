@@ -53,7 +53,7 @@ from .parsers import (
     _STDLIB_SKIP,
     _get_best_output,
 )
-from .cpp_resolver import _function_has_definition, _resolve_cpp_name, _get_definition_line, _find_function_file, _resolve_virtual_override_if_stub
+from .cpp_resolver import _function_has_definition, _resolve_cpp_name, _get_definition_line, _find_function_file, _resolve_virtual_override_if_stub, _find_virtual_override_candidates_if_stub
 from .prompt_builder import (
     _build_worker_prompt,
     _build_eval_prompt,
@@ -667,6 +667,28 @@ class Orchestrator(JudgeMixin):
         async def process_item(item: tuple) -> None:
             self._raise_if_cancelled()
             func_name, src_file, line_hint, task_cfg, tid, dep, taint_ctx, parent_session_file, followup_id = item
+            try:
+                _override_candidates = _find_virtual_override_candidates_if_stub(os.path.abspath(task_cfg.cwd), func_name, src_file, line_hint)
+            except Exception:
+                _override_candidates = []
+            if len(_override_candidates) > 1:
+                self._emit("trace_redirect", tid, function=func_name, source_file=src_file,
+                           reason="base stub has multiple concrete overrides; fork all candidates",
+                           depth=dep, candidate_count=len(_override_candidates),
+                           candidates=[{"function": f, "source_file": s, "line": l} for f, s, l in _override_candidates])
+                if followup_id:
+                    try:
+                        VulnScanStore(graph_db_path).update_followup_status(followup_id, "forked", reason="multiple concrete overrides")
+                    except Exception:
+                        pass
+                for index, (_rf, _rs, _rl) in enumerate(_override_candidates):
+                    _sub_cfg = task_cfg.model_copy(deep=True)
+                    _sub_cfg.function_name = _rf
+                    _sub_cfg.source_file = _rs
+                    _sub_cfg.line_hint = _rl
+                    _sub_tid = tid + f"-override{index}-{_rf[:25]}"
+                    await queue.put((_rf, _rs, _rl, _sub_cfg, _sub_tid, dep, taint_ctx, parent_session_file, ""))
+                return
             try:
                 _rf, _rs, _rl, _rr = _resolve_virtual_override_if_stub(os.path.abspath(task_cfg.cwd), func_name, src_file, line_hint)
             except Exception:

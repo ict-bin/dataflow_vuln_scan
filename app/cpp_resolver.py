@@ -226,19 +226,25 @@ def _function_has_definition(target_dir: str, function_name: str) -> bool:
 
 
 
-def _resolve_virtual_override_if_stub(target_dir: str, function_name: str, source_file: str = "", line_hint: str = "") -> tuple[str, str, str, str]:
-    """If a C++ base-class method resolves to a trivial stub, redirect to a unique concrete override.
 
-    Returns (function_name, source_file, line_hint, reason). Empty reason means no redirect.
-    This handles common patterns such as Base::Method() { return 0; } with exactly one
-    Derived : public Base override in the source tree. It is intentionally conservative:
-    multiple concrete overrides are not auto-selected.
+def _find_virtual_override_candidates_if_stub(
+    target_dir: str,
+    function_name: str,
+    source_file: str = "",
+    line_hint: str = "",
+) -> list[tuple[str, str, str]]:
+    """Return concrete C++ override candidates when the selected base method is a trivial stub.
+
+    Candidates are (qualified_function_name, relative_file, line_hint). The function is
+    conservative: it only activates when the currently selected definition is a trivial
+    stub and candidate overrides have a compatible parameter count.
     """
     if "::" not in str(function_name or ""):
-        return function_name, source_file, line_hint, ""
-    base_cls, method = function_name.rsplit("::", 1)
+        return []
+    base_scope, method = function_name.rsplit("::", 1)
+    base_cls = base_scope.split("::")[-1]
     if not base_cls or not method:
-        return function_name, source_file, line_hint, ""
+        return []
 
     root = os.path.abspath(target_dir)
     exts = (".c", ".cc", ".cpp", ".cxx", ".h", ".hpp")
@@ -263,7 +269,7 @@ def _resolve_virtual_override_if_stub(target_dir: str, function_name: str, sourc
         chunk: list[str] = []
         depth = 0
         seen_open = False
-        for ln in lines[start_idx:min(len(lines), start_idx + 120)]:
+        for ln in lines[start_idx:min(len(lines), start_idx + 160)]:
             chunk.append(ln)
             depth += ln.count("{")
             if "{" in ln:
@@ -275,7 +281,6 @@ def _resolve_virtual_override_if_stub(target_dir: str, function_name: str, sourc
 
     def _is_trivial_stub(body: str) -> bool:
         b = re.sub(r"//.*|/\*.*?\*/", "", body, flags=re.S)
-        # Drop signature up to first brace and final closing brace.
         inner = b.split("{", 1)[1].rsplit("}", 1)[0] if "{" in b and "}" in b else b
         inner = re.sub(r"\s+", " ", inner).strip()
         return bool(re.fullmatch(r"(?:return\s+(?:0|false|nullptr|NULL)\s*;|return\s*;)?", inner))
@@ -299,26 +304,29 @@ def _resolve_virtual_override_if_stub(target_dir: str, function_name: str, sourc
                 count += 1
         return count
 
-    # Locate current selected definition and verify it is a trivial stub.
     cur_file, cur_lines = _read_rel(source_file)
     if not cur_lines:
-        return function_name, source_file, line_hint, ""
+        return []
     start = max(0, _line_num(line_hint) - 1)
     if start <= 0 or start >= len(cur_lines) or method not in cur_lines[start]:
-        # fallback: closest definition-like line in source_file
-        hits = [i for i, ln in enumerate(cur_lines) if (base_cls + "::" + method) in ln or (method in ln and "(" in ln)]
+        hits = [
+            i for i, ln in enumerate(cur_lines)
+            if (base_scope + "::" + method) in ln or (base_cls + "::" + method) in ln or (method in ln and "(" in ln)
+        ]
         if not hits:
-            return function_name, source_file, line_hint, ""
+            return []
         start = hits[0]
-    base_sig = "\n".join(cur_lines[start:min(len(cur_lines), start + 8)])
+    base_sig = "\n".join(cur_lines[start:min(len(cur_lines), start + 10)])
     base_param_count = _param_count(base_sig)
-    cur_body = _collect_body(cur_lines, start)
-    if not _is_trivial_stub(cur_body):
-        return function_name, source_file, line_hint, ""
+    if not _is_trivial_stub(_collect_body(cur_lines, start)):
+        return []
 
-    # Find direct subclasses: class Derived : public Base
+    # Find direct subclasses. Handles both `class D : public Base` and
+    # `class D : public ns::Base`; namespace is intentionally allowed around Base.
     subclasses: set[str] = set()
-    class_pat = re.compile(r"\bclass\s+(\w+)\s*:\s*(?:public|protected|private)?\s*" + re.escape(base_cls) + r"\b")
+    class_pat = re.compile(
+        r"\bclass\s+(\w+)\s*:\s*(?:public|protected|private)?\s*(?:[A-Za-z_]\w*::)*" + re.escape(base_cls) + r"\b"
+    )
     for dirpath, _, files in os.walk(root):
         for fn in files:
             if not fn.endswith(exts):
@@ -332,11 +340,12 @@ def _resolve_virtual_override_if_stub(target_dir: str, function_name: str, sourc
             for m in class_pat.finditer(text):
                 subclasses.add(m.group(1))
     if not subclasses:
-        return function_name, source_file, line_hint, ""
+        return []
 
     candidates: list[tuple[str, str, str]] = []
     for sub in sorted(subclasses):
-        pat = re.compile(r"\b(?:[A-Za-z_]\w*::)*" + re.escape(sub) + r"::" + re.escape(method) + r"\s*\(")
+        # Match Derived::Method and ns::Derived::Method definitions.
+        pat = re.compile(r"\b((?:[A-Za-z_]\w*::)*" + re.escape(sub) + r")::" + re.escape(method) + r"\s*\(")
         for dirpath, _, files in os.walk(root):
             for fn in files:
                 if not fn.endswith(exts):
@@ -348,24 +357,31 @@ def _resolve_virtual_override_if_stub(target_dir: str, function_name: str, sourc
                 except OSError:
                     continue
                 for i, ln in enumerate(lines):
-                    if not pat.search(ln):
+                    m = pat.search(ln)
+                    if not m:
                         continue
-                    sig = "\n".join(lines[i:min(len(lines), i + 8)])
+                    sig = "\n".join(lines[i:min(len(lines), i + 10)])
                     if base_param_count >= 0 and _param_count(sig) != base_param_count:
                         continue
                     body = _collect_body(lines, i)
                     if _is_trivial_stub(body):
                         continue
                     rel = os.path.relpath(p, root).replace(os.sep, "/")
-                    candidates.append((f"{sub}::{method}", rel, "L" + str(i + 1)))
-    # Conservative: redirect only when exactly one concrete override exists.
-    uniq = []
+                    candidates.append((f"{m.group(1)}::{method}", rel, "L" + str(i + 1)))
+    uniq: list[tuple[str, str, str]] = []
     seen = set()
     for c in candidates:
         key = (c[0], c[1], c[2])
         if key not in seen:
-            uniq.append(c); seen.add(key)
-    if len(uniq) == 1:
-        fn, rel, line = uniq[0]
+            uniq.append(c)
+            seen.add(key)
+    return uniq
+
+
+def _resolve_virtual_override_if_stub(target_dir: str, function_name: str, source_file: str = "", line_hint: str = "") -> tuple[str, str, str, str]:
+    """If a C++ base-class method resolves to a trivial stub, redirect to a unique concrete override."""
+    candidates = _find_virtual_override_candidates_if_stub(target_dir, function_name, source_file, line_hint)
+    if len(candidates) == 1:
+        fn, rel, line = candidates[0]
         return fn, rel, line, f"redirected from trivial base stub {function_name} to unique concrete override {fn}"
     return function_name, source_file, line_hint, ""

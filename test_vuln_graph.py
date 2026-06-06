@@ -5,7 +5,7 @@ from pathlib import Path
 from app.models import AgentInstanceConfig, RoleConfig, TaskConfig, TaskResult, TaskStatus
 from app.vuln_graph_service import load_vuln_scan_graph, summarize_graph
 from app.vuln_graph_validator import validate_taint_graph
-from app.cpp_resolver import _resolve_virtual_override_if_stub
+from app.cpp_resolver import _find_virtual_override_candidates_if_stub, _resolve_virtual_override_if_stub
 from app.vuln_store import FollowupRecord, TaintEdgeRecord, TaintSourceRecord, VulnFindingRecord, VulnScanStore
 from app.vuln_workflow import DataflowVulnWorkflow
 
@@ -138,6 +138,31 @@ class VulnGraphStoreTests(unittest.TestCase):
         self.assertEqual("SandboxerSandbox::PrepareExec", resolved[0])
         self.assertEqual("src/sandboxer_sandbox.cc", resolved[1])
         self.assertTrue(resolved[3])
+
+    def test_resolver_returns_multiple_overrides_for_forking(self):
+        root = Path(tempfile.mkdtemp())
+        src = root / "src"
+        src.mkdir()
+        (src / "base.h").write_text(
+            "namespace runtime { class Sandbox { public: virtual int Run(const char *id); }; }\n"
+            "class A : public runtime::Sandbox { public: int Run(const char *id) override; };\n"
+            "class B : public runtime::Sandbox { public: int Run(const char *id) override; };\n",
+            encoding="utf-8",
+        )
+        (src / "sandbox.cc").write_text(
+            "#include \"base.h\"\n"
+            "int runtime::Sandbox::Run(const char *id)\n"
+            "{\n    return 0;\n}\n",
+            encoding="utf-8",
+        )
+        (src / "a.cc").write_text("int A::Run(const char *id)\n{\n return run_a(id);\n}\n", encoding="utf-8")
+        (src / "b.cc").write_text("int B::Run(const char *id)\n{\n return run_b(id);\n}\n", encoding="utf-8")
+        candidates = _find_virtual_override_candidates_if_stub(str(root), "runtime::Sandbox::Run", "src/sandbox.cc", "L2")
+        self.assertEqual(["A::Run", "B::Run"], sorted(c[0] for c in candidates))
+        # Compatibility wrapper must not arbitrarily choose among multiple overrides.
+        resolved = _resolve_virtual_override_if_stub(str(root), "runtime::Sandbox::Run", "src/sandbox.cc", "L2")
+        self.assertEqual("runtime::Sandbox::Run", resolved[0])
+        self.assertEqual("", resolved[3])
 
 
 if __name__ == "__main__":
