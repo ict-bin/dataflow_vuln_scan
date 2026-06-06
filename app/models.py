@@ -192,6 +192,7 @@ class CalleeRef(BaseModel):
     line: str = ""
     tainted_params: str = ""
     description: str = ""
+    followup_id: str = ""
 
 
 class TraceNode(BaseModel):

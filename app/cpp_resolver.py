@@ -224,3 +224,148 @@ def _function_has_definition(target_dir: str, function_name: str) -> bool:
         return True  # 超时/出错时保守返回 True,不跳过
 
 
+
+
+def _resolve_virtual_override_if_stub(target_dir: str, function_name: str, source_file: str = "", line_hint: str = "") -> tuple[str, str, str, str]:
+    """If a C++ base-class method resolves to a trivial stub, redirect to a unique concrete override.
+
+    Returns (function_name, source_file, line_hint, reason). Empty reason means no redirect.
+    This handles common patterns such as Base::Method() { return 0; } with exactly one
+    Derived : public Base override in the source tree. It is intentionally conservative:
+    multiple concrete overrides are not auto-selected.
+    """
+    if "::" not in str(function_name or ""):
+        return function_name, source_file, line_hint, ""
+    base_cls, method = function_name.rsplit("::", 1)
+    if not base_cls or not method:
+        return function_name, source_file, line_hint, ""
+
+    root = os.path.abspath(target_dir)
+    exts = (".c", ".cc", ".cpp", ".cxx", ".h", ".hpp")
+
+    def _read_rel(rel: str) -> tuple[str, list[str]]:
+        p = os.path.join(root, rel) if rel else ""
+        if not p or not os.path.isfile(p):
+            return "", []
+        try:
+            with open(p, encoding="utf-8", errors="replace") as fh:
+                return p, fh.read().splitlines()
+        except OSError:
+            return "", []
+
+    def _line_num(raw: str) -> int:
+        try:
+            return int(str(raw or "").lstrip("Ll"))
+        except ValueError:
+            return 0
+
+    def _collect_body(lines: list[str], start_idx: int) -> str:
+        chunk: list[str] = []
+        depth = 0
+        seen_open = False
+        for ln in lines[start_idx:min(len(lines), start_idx + 120)]:
+            chunk.append(ln)
+            depth += ln.count("{")
+            if "{" in ln:
+                seen_open = True
+            depth -= ln.count("}")
+            if seen_open and depth <= 0:
+                break
+        return "\n".join(chunk)
+
+    def _is_trivial_stub(body: str) -> bool:
+        b = re.sub(r"//.*|/\*.*?\*/", "", body, flags=re.S)
+        # Drop signature up to first brace and final closing brace.
+        inner = b.split("{", 1)[1].rsplit("}", 1)[0] if "{" in b and "}" in b else b
+        inner = re.sub(r"\s+", " ", inner).strip()
+        return bool(re.fullmatch(r"(?:return\s+(?:0|false|nullptr|NULL)\s*;|return\s*;)?", inner))
+
+    def _param_count(signature_text: str) -> int:
+        signature_text = signature_text.split("{", 1)[0]
+        m = re.search(r"\((.*)\)", signature_text, flags=re.S)
+        if not m:
+            return -1
+        raw = m.group(1).strip()
+        if not raw or raw == "void":
+            return 0
+        depth = 0
+        count = 1
+        for ch in raw:
+            if ch in "(<[":
+                depth += 1
+            elif ch in ")>]" and depth > 0:
+                depth -= 1
+            elif ch == "," and depth == 0:
+                count += 1
+        return count
+
+    # Locate current selected definition and verify it is a trivial stub.
+    cur_file, cur_lines = _read_rel(source_file)
+    if not cur_lines:
+        return function_name, source_file, line_hint, ""
+    start = max(0, _line_num(line_hint) - 1)
+    if start <= 0 or start >= len(cur_lines) or method not in cur_lines[start]:
+        # fallback: closest definition-like line in source_file
+        hits = [i for i, ln in enumerate(cur_lines) if (base_cls + "::" + method) in ln or (method in ln and "(" in ln)]
+        if not hits:
+            return function_name, source_file, line_hint, ""
+        start = hits[0]
+    base_sig = "\n".join(cur_lines[start:min(len(cur_lines), start + 8)])
+    base_param_count = _param_count(base_sig)
+    cur_body = _collect_body(cur_lines, start)
+    if not _is_trivial_stub(cur_body):
+        return function_name, source_file, line_hint, ""
+
+    # Find direct subclasses: class Derived : public Base
+    subclasses: set[str] = set()
+    class_pat = re.compile(r"\bclass\s+(\w+)\s*:\s*(?:public|protected|private)?\s*" + re.escape(base_cls) + r"\b")
+    for dirpath, _, files in os.walk(root):
+        for fn in files:
+            if not fn.endswith(exts):
+                continue
+            p = os.path.join(dirpath, fn)
+            try:
+                with open(p, encoding="utf-8", errors="replace") as fh:
+                    text = fh.read()
+            except OSError:
+                continue
+            for m in class_pat.finditer(text):
+                subclasses.add(m.group(1))
+    if not subclasses:
+        return function_name, source_file, line_hint, ""
+
+    candidates: list[tuple[str, str, str]] = []
+    for sub in sorted(subclasses):
+        pat = re.compile(r"\b(?:[A-Za-z_]\w*::)*" + re.escape(sub) + r"::" + re.escape(method) + r"\s*\(")
+        for dirpath, _, files in os.walk(root):
+            for fn in files:
+                if not fn.endswith(exts):
+                    continue
+                p = os.path.join(dirpath, fn)
+                try:
+                    with open(p, encoding="utf-8", errors="replace") as fh:
+                        lines = fh.read().splitlines()
+                except OSError:
+                    continue
+                for i, ln in enumerate(lines):
+                    if not pat.search(ln):
+                        continue
+                    sig = "\n".join(lines[i:min(len(lines), i + 8)])
+                    if base_param_count >= 0 and _param_count(sig) != base_param_count:
+                        continue
+                    body = _collect_body(lines, i)
+                    if _is_trivial_stub(body):
+                        continue
+                    rel = os.path.relpath(p, root).replace(os.sep, "/")
+                    candidates.append((f"{sub}::{method}", rel, "L" + str(i + 1)))
+    # Conservative: redirect only when exactly one concrete override exists.
+    uniq = []
+    seen = set()
+    for c in candidates:
+        key = (c[0], c[1], c[2])
+        if key not in seen:
+            uniq.append(c); seen.add(key)
+    if len(uniq) == 1:
+        fn, rel, line = uniq[0]
+        return fn, rel, line, f"redirected from trivial base stub {function_name} to unique concrete override {fn}"
+    return function_name, source_file, line_hint, ""

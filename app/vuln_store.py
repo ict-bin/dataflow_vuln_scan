@@ -70,6 +70,7 @@ class FollowupRecord:
     reason: str = ""
     fork_session: str = ""
     depth: int = 0
+    created_at: float = 0.0
 
 
 @dataclass
@@ -281,6 +282,15 @@ class VulnScanStore:
                 f"INSERT OR REPLACE INTO vulnerability_findings ({','.join(cols)}) VALUES ({','.join('?' for _ in cols)})",
                 [data[c] for c in cols],
             )
+
+    def update_followup_status(self, followup_id: str, status: str, *, reason: str | None = None) -> None:
+        if not followup_id:
+            return
+        with self.connect() as conn:
+            if reason is None:
+                conn.execute("UPDATE followups SET status=? WHERE followup_id=?", (status, followup_id))
+            else:
+                conn.execute("UPDATE followups SET status=?, reason=? WHERE followup_id=?", (status, reason, followup_id))
 
     def list_followups(self, run_id: str | None = None, *, status: str | None = None) -> list[FollowupRecord]:
         where: list[str] = []

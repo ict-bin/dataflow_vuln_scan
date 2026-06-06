@@ -468,7 +468,7 @@ class DataflowVulnWorkflow:
         if followups:
             _meta = result.upstream_entry_metadata or {}
             _meta["followup_refs"] = [
-                {"callee_function": f.callee_function, "callee_file": f.callee_file,
+                {"followup_id": f.followup_id, "callee_function": f.callee_function, "callee_file": f.callee_file,
                  "callee_line": f.callee_line, "tainted_params_json": f.tainted_params_json, "reason": f.reason}
                 for f in followups
             ]

@@ -5,7 +5,8 @@ from pathlib import Path
 from app.models import AgentInstanceConfig, RoleConfig, TaskConfig, TaskResult, TaskStatus
 from app.vuln_graph_service import load_vuln_scan_graph, summarize_graph
 from app.vuln_graph_validator import validate_taint_graph
-from app.vuln_store import TaintEdgeRecord, TaintSourceRecord, VulnFindingRecord, VulnScanStore
+from app.cpp_resolver import _resolve_virtual_override_if_stub
+from app.vuln_store import FollowupRecord, TaintEdgeRecord, TaintSourceRecord, VulnFindingRecord, VulnScanStore
 from app.vuln_workflow import DataflowVulnWorkflow
 
 
@@ -89,7 +90,54 @@ class VulnGraphStoreTests(unittest.TestCase):
         self.assertEqual(2, len(graph["taint_edges"]))
         self.assertEqual(1, len(graph["followups"]))
         self.assertEqual("bar", result.upstream_entry_metadata["followup_refs"][0]["callee_function"])
+        self.assertTrue(result.upstream_entry_metadata["followup_refs"][0]["followup_id"])
         self.assertTrue((root / "artifact-manifest.json").exists())
+
+    def test_store_updates_followup_status(self):
+        root = Path(tempfile.mkdtemp())
+        store = VulnScanStore(root / "vuln-scan.sqlite")
+        store.start_run("run1", "task1", "a.c", "foo", "/src", {})
+        store.upsert_taint_node(TaintSourceRecord(
+            node_id="n1", source_file="a.c", function_name="foo", taint_kind="param", symbol="buf"
+        ))
+        store.add_taint_edges([TaintEdgeRecord(
+            edge_id="e1", run_id="run1", from_node_id="n1", to_node_id="n2",
+            source_file="a.c", function_name="foo", from_symbol="buf", to_symbol="arg",
+            line="L10", operation="call_arg", evidence="bar(arg)"
+        )])
+        store.add_followups([FollowupRecord(
+            followup_id="f1", edge_id="e1", parent_node_id="n1", callee_file="b.c",
+            callee_function="bar", callee_line="L3", tainted_params_json='["arg"]', status="pending", depth=1,
+        )])
+        store.update_followup_status("f1", "analyzed")
+        followups = store.list_followups()
+        self.assertEqual("analyzed", followups[0].status)
+
+    def test_resolver_redirects_trivial_base_stub_to_unique_override(self):
+        root = Path(tempfile.mkdtemp())
+        src = root / "src"
+        src.mkdir()
+        (src / "base.h").write_text(
+            "class Sandbox { public: virtual int PrepareExec(const char *containerId, const char *execId, int *processSpec, const char *consoleFifos[]); };\n"
+            "class SandboxerSandbox : public Sandbox { public: int PrepareExec(const char *containerId, const char *execId, int *processSpec, const char *consoleFifos[]) override; };\n",
+            encoding="utf-8",
+        )
+        (src / "sandbox.cc").write_text(
+            "#include \"base.h\"\n"
+            "int Sandbox::PrepareExec(const char *containerId, const char *execId, int *processSpec, const char *consoleFifos[])\n"
+            "{\n    return 0;\n}\n",
+            encoding="utf-8",
+        )
+        (src / "sandboxer_sandbox.cc").write_text(
+            "#include \"base.h\"\n"
+            "int SandboxerSandbox::PrepareExec(const char *containerId, const char *execId, int *processSpec, const char *consoleFifos[])\n"
+            "{\n    return do_exec(containerId, execId, processSpec, consoleFifos);\n}\n",
+            encoding="utf-8",
+        )
+        resolved = _resolve_virtual_override_if_stub(str(root), "Sandbox::PrepareExec", "src/sandbox.cc", "L2")
+        self.assertEqual("SandboxerSandbox::PrepareExec", resolved[0])
+        self.assertEqual("src/sandboxer_sandbox.cc", resolved[1])
+        self.assertTrue(resolved[3])
 
 
 if __name__ == "__main__":

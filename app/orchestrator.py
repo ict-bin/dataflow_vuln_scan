@@ -53,7 +53,7 @@ from .parsers import (
     _STDLIB_SKIP,
     _get_best_output,
 )
-from .cpp_resolver import _function_has_definition, _resolve_cpp_name, _get_definition_line, _find_function_file
+from .cpp_resolver import _function_has_definition, _resolve_cpp_name, _get_definition_line, _find_function_file, _resolve_virtual_override_if_stub
 from .prompt_builder import (
     _build_worker_prompt,
     _build_eval_prompt,
@@ -662,11 +662,28 @@ class Orchestrator(JudgeMixin):
 
         # 根任务入队
         await queue.put((cfg.function_name, cfg.source_file, cfg.line_hint,
-                         cfg.model_copy(deep=True), root_task_id, 0, tainted_context, None))
+                         cfg.model_copy(deep=True), root_task_id, 0, tainted_context, None, ""))
 
         async def process_item(item: tuple) -> None:
             self._raise_if_cancelled()
-            func_name, src_file, line_hint, task_cfg, tid, dep, taint_ctx, parent_session_file = item
+            func_name, src_file, line_hint, task_cfg, tid, dep, taint_ctx, parent_session_file, followup_id = item
+            try:
+                _rf, _rs, _rl, _rr = _resolve_virtual_override_if_stub(os.path.abspath(task_cfg.cwd), func_name, src_file, line_hint)
+            except Exception:
+                _rf, _rs, _rl, _rr = func_name, src_file, line_hint, ""
+            if _rr:
+                self._emit("trace_redirect", tid, function=func_name, source_file=src_file,
+                           redirected_function=_rf, redirected_source_file=_rs,
+                           redirected_line=_rl, reason=_rr, depth=dep)
+                func_name, src_file, line_hint = _rf, _rs, _rl
+                task_cfg.function_name = _rf
+                task_cfg.source_file = _rs
+                task_cfg.line_hint = _rl
+            if followup_id:
+                try:
+                    VulnScanStore(graph_db_path).update_followup_status(followup_id, "running")
+                except Exception:
+                    pass
 
             # 通知 CLI: 新函数开始
             self._emit("trace_start", tid,
@@ -745,6 +762,14 @@ class Orchestrator(JudgeMixin):
             self._emit("round_end", tid,
                        passed=(result.status.value == "passed"),
                        function=func_name, depth=dep)
+            if followup_id:
+                try:
+                    VulnScanStore(graph_db_path).update_followup_status(
+                        followup_id,
+                        "analyzed" if result.status.value == "passed" else "error",
+                    )
+                except Exception:
+                    pass
             df_path = _find_dataflow_file(out_dir, func_name)
             if df_path:
                 try:
@@ -787,6 +812,7 @@ class Orchestrator(JudgeMixin):
                             line=str(f.get("callee_line") or ""),
                             tainted_params=",".join(json.loads(f.get("tainted_params_json") or "[]")) if f.get("tainted_params_json") else "",
                             description=str(f.get("reason") or ""),
+                            followup_id=str(f.get("followup_id") or ""),
                         )
                         for f in _fup_refs if f.get("callee_function")
                     ]
@@ -799,6 +825,7 @@ class Orchestrator(JudgeMixin):
                                 function_name=f.callee_function, file=f.callee_file, line=f.callee_line,
                                 tainted_params=",".join(json.loads(f.tainted_params_json or "[]")) if f.tainted_params_json else "",
                                 description=f.reason,
+                                followup_id=f.followup_id,
                             )
                             for f in _db_fups
                         ]
@@ -811,7 +838,7 @@ class Orchestrator(JudgeMixin):
                 for callee in callees:
                     resolved_name, resolved_file = _resolve_function_pointer_followup(target_dir, callee, func_name)
                     if resolved_name != callee.function_name:
-                        callee = CalleeRef(function_name=resolved_name, file=resolved_file or callee.file, line=callee.line, tainted_params=callee.tainted_params, description=callee.description)
+                        callee = CalleeRef(function_name=resolved_name, file=resolved_file or callee.file, line=callee.line, tainted_params=callee.tainted_params, description=callee.description, followup_id=callee.followup_id)
                     c_key = callee.function_name
                     if callee.function_name == func_name:
                         continue
@@ -820,15 +847,35 @@ class Orchestrator(JudgeMixin):
                     if c_key in analyzed:
                         self._emit("trace_skip", tid, function=callee.function_name,
                                    reason="already analyzed")
+                        if callee.followup_id:
+                            try:
+                                VulnScanStore(graph_db_path).update_followup_status(callee.followup_id, "skipped", reason="already analyzed")
+                            except Exception:
+                                pass
                         continue
                     if callee.function_name in _STDLIB_SKIP:
+                        if callee.followup_id:
+                            try:
+                                VulnScanStore(graph_db_path).update_followup_status(callee.followup_id, "skipped", reason="stdlib skip")
+                            except Exception:
+                                pass
                         continue
                     if not _function_has_definition(target_dir, callee.function_name):
                         reason = "external followup" if _is_external_followup(callee) else "no definition found"
                         self._emit("trace_skip", tid, function=callee.function_name,
                                    reason=reason)
+                        if callee.followup_id:
+                            try:
+                                VulnScanStore(graph_db_path).update_followup_status(callee.followup_id, "skipped", reason=reason)
+                            except Exception:
+                                pass
                         continue
                     analyzed.add(c_key)
+                    if callee.followup_id:
+                        try:
+                            VulnScanStore(graph_db_path).update_followup_status(callee.followup_id, "queued")
+                        except Exception:
+                            pass
                     valid.append(callee)
 
                 if valid:
@@ -891,7 +938,7 @@ class Orchestrator(JudgeMixin):
                     # 多个 callee 并发读取同一源文件是安全的；各自写入独立目标文件无冲突
                     await queue.put((callee.function_name, sub_file, sub_line_hint, sub_cfg,
                                      sub_tid, dep + 1, tainted_ctx_str,
-                                     completed_session_file or None))
+                                     completed_session_file or None, callee.followup_id))
 
             if vuln_mining_task is not None:
                 try:
@@ -914,8 +961,14 @@ class Orchestrator(JudgeMixin):
                 except asyncio.CancelledError:
                     return
                 except Exception as e:
-                    # item layout: (func_name, src_file, line_hint, task_cfg, tid, dep, ...)
+                    # item layout: (func_name, src_file, line_hint, task_cfg, tid, dep, ..., followup_id)
                     err_tid = item[4] if len(item) > 4 else "?"
+                    err_followup_id = item[8] if len(item) > 8 else ""
+                    if err_followup_id:
+                        try:
+                            VulnScanStore(graph_db_path).update_followup_status(err_followup_id, "error", reason=str(e))
+                        except Exception:
+                            pass
                     logger.exception("recursive process_item failed task_id=%s function=%s", err_tid, item[0] if item else "?")
                     self._emit("error", err_tid, error=str(e), function=item[0] if item else "?")
                 finally:
