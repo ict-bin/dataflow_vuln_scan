@@ -154,7 +154,19 @@ class AgentProcessInfo:
     started_at: float | None = None
 
 
-def _iter_agent_processes() -> list[AgentProcessInfo]:
+def _is_runtime_process(info: AgentProcessInfo) -> bool:
+    comm = (info.comm or "").lower()
+    exe = (info.exe or "").lower()
+    cmdline = (info.cmdline or "").lower()
+    if comm == "pi" or exe in {"node", "pi", "npm", "npx"}:
+        return True
+    if comm.startswith("python") or exe.startswith("python"):
+        return True
+    # pi may be launched through npx/node; keep this conservative but catch common wrappers.
+    return "pi-coding-agent" in cmdline or " npx pi" in cmdline or cmdline.startswith("npx pi")
+
+
+def _iter_runtime_processes() -> list[AgentProcessInfo]:
     candidates: list[AgentProcessInfo] = []
     proc_root = pathlib.Path("/proc")
     for proc_dir in proc_root.iterdir():
@@ -163,29 +175,39 @@ def _iter_agent_processes() -> list[AgentProcessInfo]:
         pid = int(proc_dir.name)
         try:
             status = (proc_dir / "status").read_text(encoding="utf-8", errors="replace")
+            if "\nState:\tZ" in status or "\nState: Z" in status:
+                continue
             comm = (proc_dir / "comm").read_text(encoding="utf-8", errors="replace").strip()
             exe = os.path.basename(_safe_readlink(proc_dir / "exe"))
         except Exception:
-            continue
-        if comm != "pi" and exe != "node":
             continue
         try:
             started_at = os.stat(proc_dir).st_ctime
         except Exception:
             started_at = None
-        candidates.append(
-            AgentProcessInfo(
-                pid=pid,
-                ppid=_read_ppid(status),
-                pgid=_read_pgid(pid),
-                comm=comm,
-                exe=exe,
-                cwd=_safe_readlink(proc_dir / "cwd"),
-                cmdline=_read_proc_cmdline(pid),
-                environ=_read_proc_environ(pid),
-                started_at=started_at,
-            )
+        info = AgentProcessInfo(
+            pid=pid,
+            ppid=_read_ppid(status),
+            pgid=_read_pgid(pid),
+            comm=comm,
+            exe=exe,
+            cwd=_safe_readlink(proc_dir / "cwd"),
+            cmdline=_read_proc_cmdline(pid),
+            environ=_read_proc_environ(pid),
+            started_at=started_at,
         )
+        if _is_runtime_process(info):
+            candidates.append(info)
+    return candidates
+
+
+def _iter_agent_processes() -> list[AgentProcessInfo]:
+    candidates: list[AgentProcessInfo] = []
+    for info in _iter_runtime_processes():
+        comm = (info.comm or "").lower()
+        exe = (info.exe or "").lower()
+        if comm == "pi" or exe == "node" or "pi-coding-agent" in (info.cmdline or "").lower():
+            candidates.append(info)
     return candidates
 
 
@@ -313,6 +335,37 @@ def cleanup_orphan_pi_processes(
             continue
         seen_pgids.add(key)
         if _kill_process_group(logger, label=label, info=info, reason="orphan_cleanup"):
+            killed += 1
+    return killed
+
+
+def cleanup_worker_runtime_processes(
+    logger: Callable[[str], None],
+    *,
+    label: str,
+) -> int:
+    """Clean all pi/node/python helper processes owned by this worker container.
+
+    This service is deployed with one task slot per worker.  Before taking a new
+    task and after every terminal/cancel path, it is safer to remove any stale
+    agent/runtime processes.  The current service process, PID 1, and the current
+    process group are always excluded so the worker itself is not killed.
+    """
+    current_pid = os.getpid()
+    current_pgid = _read_pgid(current_pid)
+    protected_pids = {0, 1, current_pid, os.getppid()}
+    killed = 0
+    seen_pgids: set[tuple[str, int]] = set()
+    for info in _iter_runtime_processes():
+        if info.pid in protected_pids:
+            continue
+        if info.pgid is not None and current_pgid is not None and info.pgid == current_pgid:
+            continue
+        key = ("pg", info.pgid) if info.pgid is not None else ("pid", info.pid)
+        if key in seen_pgids:
+            continue
+        seen_pgids.add(key)
+        if _kill_process_group(logger, label=label, info=info, reason="worker_full_runtime_cleanup"):
             killed += 1
     return killed
 
