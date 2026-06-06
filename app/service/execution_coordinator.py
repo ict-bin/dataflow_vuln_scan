@@ -138,11 +138,12 @@ def claim_one_runnable_task(db: Session, owner_id: str) -> ClaimedTask | None:
         return None
 
     expected_status = str(candidate.status or "pending")
+    new_epoch = int(candidate.execution_epoch or 0) + 1
     update_fields = {
         AppDvsTask.execution_owner_id: owner_id,
         AppDvsTask.execution_lease_until: _lease_deadline(),
         AppDvsTask.execution_heartbeat_at: now,
-        AppDvsTask.execution_epoch: int(candidate.execution_epoch or 0) + 1,
+        AppDvsTask.execution_epoch: new_epoch,
         AppDvsTask.dispatch_status: "leased",
     }
     if expected_status == "running":
@@ -166,14 +167,14 @@ def claim_one_runnable_task(db: Session, owner_id: str) -> ClaimedTask | None:
     db.commit()
     if not updated:
         return None
-    refreshed = db.query(AppDvsTask).filter(AppDvsTask.id == candidate.id).first()
-    if refreshed is None:
-        return None
+    # expire_on_commit=False is required for long-running task result materialization, so do not
+    # rely on the identity map to reload candidate here: it would return the pre-update epoch and
+    # make the executor immediately fail still_owner() with task_not_owner_pre_execute.
     return ClaimedTask(
-        task_id=refreshed.task_id,
-        epoch=int(refreshed.execution_epoch or 0),
-        control_version=int(refreshed.control_version or 0),
-        dispatch_status=refreshed.dispatch_status,
+        task_id=str(candidate.task_id),
+        epoch=new_epoch,
+        control_version=int(candidate.control_version or 0),
+        dispatch_status="leased",
     )
 
 
