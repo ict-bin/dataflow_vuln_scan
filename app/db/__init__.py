@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Generator, Literal
 
 from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
 from .models import Base
@@ -274,7 +275,10 @@ def init_db(db_url: str, pool_size: int = 5, max_overflow: int = 10) -> None:
         pool_pre_ping=True,
         pool_recycle=3600,
     )
-    _SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=_engine)
+    # Long-running DVS tasks keep Python objects alive for tens of minutes while LLMs run.
+    # Keep ORM instances usable after commit and avoid accidental lazy refresh on a stale MySQL
+    # connection during terminal result materialization.
+    _SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=_engine, expire_on_commit=False)
     logger.info("Database metadata create_all begin")
     Base.metadata.create_all(bind=_engine)
     logger.info("Database metadata create_all done")
@@ -282,6 +286,22 @@ def init_db(db_url: str, pool_size: int = 5, max_overflow: int = 10) -> None:
     _run_migrations(_engine)
     logger.info("Database migrations done")
     logger.info("Database initialized")
+
+
+def is_retryable_db_error(exc: BaseException) -> bool:
+    """Return True for transient MySQL/DBAPI disconnect/deadlock errors."""
+    if isinstance(exc, (OperationalError, InterfaceError, DBAPIError)):
+        text = str(exc).lower()
+        # MySQL: 2006 server has gone away, 2013 lost connection, 2014 commands out of sync,
+        # 1205 lock wait timeout, 1213 deadlock. Also match common disconnect wording.
+        return any(token in text for token in (
+            "2006", "2013", "2014", "1205", "1213",
+            "lost connection", "server has gone away", "connection reset",
+            "connection refused", "broken pipe", "commands out of sync",
+            "deadlock", "lock wait timeout",
+        ))
+    text = str(exc).lower()
+    return any(token in text for token in ("lost connection", "server has gone away", "connection reset", "broken pipe"))
 
 
 def get_db() -> Generator[Session, None, None]:

@@ -27,6 +27,7 @@ from sqlalchemy.orm import Session, load_only
 from sqlalchemy.orm.attributes import flag_modified
 
 from app.config import build_task_config, load_service_config
+from app.db import is_retryable_db_error
 from app.db.models import AppDvsTask, AppDvsTaskEvent
 from app.logging_utils import log_event
 from app.models import SwarmEvent, TaskStatus
@@ -58,8 +59,55 @@ TASK_EVENT_RENEW_INTERVAL_SECONDS = max(60, HEARTBEAT_INTERVAL_SECONDS * 6)
 EXECUTION_SUPERVISOR_INTERVAL_SECONDS = float(os.environ.get("DVS_EXECUTION_SUPERVISOR_INTERVAL_SECONDS", "5"))
 EXECUTION_NO_PROGRESS_SECONDS = float(os.environ.get("DVS_EXECUTION_NO_PROGRESS_SECONDS", "120"))
 
+DB_RETRY_ATTEMPTS = max(3, int(os.environ.get("DVS_DB_RETRY_ATTEMPTS", "3")))
+DB_RETRY_BASE_DELAY_SECONDS = float(os.environ.get("DVS_DB_RETRY_BASE_DELAY_SECONDS", "1"))
+
 _RUNNING_TASK_LOCK = threading.RLock()
 _running_tasks: dict[str, "_RunningTaskContext"] = {}
+
+
+def _run_db_write_with_retries(label: str, operation, *, attempts: int | None = None):
+    """Run a DB write operation with fresh sessions on transient MySQL disconnects.
+
+    The operation receives a newly-created SQLAlchemy Session and must commit/rollback as needed.
+    At least three attempts are made for retryable DBAPI errors (MySQL 2006/2013/etc.).
+    """
+    from app.db import get_db as _get_db
+
+    max_attempts = max(3, int(attempts or DB_RETRY_ATTEMPTS))
+    last_exc: BaseException | None = None
+    for attempt in range(1, max_attempts + 1):
+        gen = _get_db()
+        db: Session = next(gen)
+        try:
+            return operation(db, attempt)
+        except Exception as exc:
+            last_exc = exc
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            retryable = is_retryable_db_error(exc)
+            logger.warning(
+                "%s DB operation failed attempt=%s/%s retryable=%s error=%s",
+                label,
+                attempt,
+                max_attempts,
+                retryable,
+                exc,
+                exc_info=True,
+            )
+            if not retryable or attempt >= max_attempts:
+                raise
+            _time.sleep(DB_RETRY_BASE_DELAY_SECONDS * attempt)
+        finally:
+            try:
+                next(gen)
+            except StopIteration:
+                pass
+    if last_exc is not None:
+        raise last_exc
+    return None
 
 
 @dataclass
@@ -1323,11 +1371,7 @@ def generate_prompt_from_path(input_path: str) -> str:
 def _flush_stages(task_id: str, events: list[dict], owner_id: str | None = None, epoch: int | None = None, control_version: int | None = None) -> None:
     """将实时事件缓冲写入 DB，供前端轮询展示进度。"""
     try:
-        from sqlalchemy.orm.attributes import flag_modified
-        from app.db import get_db as _get_db
-        _gen = _get_db()
-        _db = next(_gen)
-        try:
+        def _op(_db: Session, _attempt: int):
             _r = _db.query(AppDvsTask).filter_by(task_id=task_id).first()
             if _r:
                 if owner_id is not None and epoch is not None and control_version is not None:
@@ -1336,17 +1380,14 @@ def _flush_stages(task_id: str, events: list[dict], owner_id: str | None = None,
                         and int(_r.execution_epoch or 0) == int(epoch)
                         and int(_r.control_version or 0) == int(control_version)
                     ):
-                        return
+                        return None
                 _r.stages_json = {"events": [dict(e) for e in events]}
                 flag_modified(_r, "stages_json")
                 _db.commit()
-        finally:
-            try:
-                next(_gen)
-            except StopIteration:
-                pass
+            return None
+        _run_db_write_with_retries("flush_stages", _op)
     except Exception as _exc:
-        logger.warning("_flush_stages failed: %s", _exc, exc_info=True)
+        logger.warning("_flush_stages failed after retries: %s", _exc, exc_info=True)
 
 
 class TaskService:
@@ -2519,29 +2560,46 @@ class TaskService:
                 ctx.lease_stop_requested.set()
 
             _flush_stages(task_id, _baseline_events + event_buffer, WORKER_ID, epoch, control_version)
-            db.expire(row); db.refresh(row)
-            if row.status == "cancelled":
-                log_event(logger, logging.INFO, "task stopped after control-plane cancel", event="task_cancelled_during_execution",
-                          task_id=task_id, owner_id=WORKER_ID, epoch=epoch, control_version=control_version, status=row.status)
-                return
-            if not still_owner(db, task_id, WORKER_ID, epoch, control_version):
-                log_event(logger, logging.INFO, "task lost ownership before terminal commit", event="task_not_owner_pre_commit",
-                          task_id=task_id, owner_id=WORKER_ID, epoch=epoch, control_version=control_version)
-                _record_task_event(
-                    db,
-                    row=row,
-                    event_type="task_not_owner_pre_commit",
-                    message="任务在写入终态前失去执行权",
-                    level="warning",
-                    status=row.status,
-                    worker_id=WORKER_ID,
-                    execution_owner_id=WORKER_ID,
-                    execution_epoch=epoch,
-                    control_version=control_version,
-                    dispatch_status=row.dispatch_status,
-                    payload={"owner_id": WORKER_ID, "epoch": epoch, "control_version": control_version},
+
+            def _pre_terminal_check(_db: Session, _attempt: int):
+                _row = _db.query(AppDvsTask).filter_by(task_id=task_id).first()
+                if _row is None:
+                    return "missing"
+                if _row.status == "cancelled":
+                    return "cancelled"
+                owned = (
+                    _row.execution_owner_id == WORKER_ID
+                    and int(_row.execution_epoch or 0) == int(epoch)
+                    and int(_row.control_version or 0) == int(control_version)
+                    and _row.status in {"pending", "running"}
                 )
-                db.commit()
+                if not owned:
+                    _record_task_event(
+                        _db,
+                        row=_row,
+                        event_type="task_not_owner_pre_commit",
+                        message="任务在写入终态前失去执行权",
+                        level="warning",
+                        status=_row.status,
+                        worker_id=WORKER_ID,
+                        execution_owner_id=WORKER_ID,
+                        execution_epoch=epoch,
+                        control_version=control_version,
+                        dispatch_status=_row.dispatch_status,
+                        payload={"owner_id": WORKER_ID, "epoch": epoch, "control_version": control_version},
+                    )
+                    _db.commit()
+                    return "lost"
+                return "ok"
+
+            _pre_state = _run_db_write_with_retries("pre_terminal_check", _pre_terminal_check)
+            if _pre_state == "cancelled":
+                log_event(logger, logging.INFO, "task stopped after control-plane cancel", event="task_cancelled_during_execution",
+                          task_id=task_id, owner_id=WORKER_ID, epoch=epoch, control_version=control_version, status="cancelled")
+                return
+            if _pre_state != "ok":
+                log_event(logger, logging.INFO, "task lost ownership before terminal commit", event="task_not_owner_pre_commit",
+                          task_id=task_id, owner_id=WORKER_ID, epoch=epoch, control_version=control_version, pre_state=_pre_state)
                 return
 
             finished_at = now_local()
@@ -2555,71 +2613,80 @@ class TaskService:
                 lightweight_result = _lightweight_result_json(row, result_payload, result_file)
                 if result.error:
                     terminal_error = result.error
-            if not commit_terminal_state_if_owner(
-                db,
-                task_id,
-                WORKER_ID,
-                epoch,
-                control_version,
-                status=result.status.value if result else "error",
-                finished_at=finished_at,
-                stages_json=stages_json,
-                result_json=lightweight_result,
-                error=terminal_error,
-            ):
+            def _commit_terminal(_db: Session, _attempt: int):
+                return commit_terminal_state_if_owner(
+                    _db,
+                    task_id,
+                    WORKER_ID,
+                    epoch,
+                    control_version,
+                    status=result.status.value if result else "error",
+                    finished_at=finished_at,
+                    stages_json=stages_json,
+                    result_json=lightweight_result,
+                    error=terminal_error,
+                )
+
+            if not _run_db_write_with_retries("commit_terminal_state", _commit_terminal):
                 from app.metrics import observe_local_event
 
                 observe_local_event("task_finished", "commit_rejected")
                 log_event(logger, logging.WARNING, "terminal commit rejected for stale owner", event="task_terminal_commit_rejected",
                           task_id=task_id, owner_id=WORKER_ID, epoch=epoch, control_version=control_version)
-                rejected_row = db.query(AppDvsTask).filter_by(task_id=task_id).first()
-                if rejected_row is not None:
+                def _record_rejected(_db: Session, _attempt: int):
+                    rejected_row = _db.query(AppDvsTask).filter_by(task_id=task_id).first()
+                    if rejected_row is not None:
+                        _record_task_event(
+                            _db,
+                            row=rejected_row,
+                            event_type="task_terminal_commit_rejected",
+                            message="任务终态提交被拒绝，执行权已过期",
+                            level="warning",
+                            status=rejected_row.status,
+                            worker_id=WORKER_ID,
+                            execution_owner_id=WORKER_ID,
+                            execution_epoch=epoch,
+                            control_version=control_version,
+                            dispatch_status=rejected_row.dispatch_status,
+                            payload={"owner_id": WORKER_ID, "epoch": epoch, "control_version": control_version},
+                        )
+                        _db.commit()
+                    return None
+                _run_db_write_with_retries("record_terminal_rejected", _record_rejected)
+                return
+            def _record_terminal_event(_db: Session, _attempt: int):
+                refreshed = _db.query(AppDvsTask).filter_by(task_id=task_id).first()
+                if refreshed is not None:
+                    reason, changed = _sync_task_abnormal_reason(refreshed)
+                    _record_abnormal_reason(refreshed, reason, changed=changed)
+                    _record_abnormal_reason_timeline(_db, refreshed, reason, changed=changed)
+                    terminal_status = result.status.value if result else "error"
                     _record_task_event(
-                        db,
-                        row=rejected_row,
-                        event_type="task_terminal_commit_rejected",
-                        message="任务终态提交被拒绝，执行权已过期",
-                        level="warning",
-                        status=rejected_row.status,
+                        _db,
+                        row=refreshed,
+                        event_type={
+                            "passed": "task_passed",
+                            "failed": "task_failed",
+                            "error": "task_error",
+                            "completed_limited": "task_completed_limited",
+                            "cancelled": "task_cancelled",
+                        }.get(terminal_status, "task_finished"),
+                        message=f"任务执行结束，状态={terminal_status}",
+                        level="error" if terminal_status in {"failed", "error"} else "info",
+                        status=terminal_status,
                         worker_id=WORKER_ID,
                         execution_owner_id=WORKER_ID,
                         execution_epoch=epoch,
                         control_version=control_version,
-                        dispatch_status=rejected_row.dispatch_status,
-                        payload={"owner_id": WORKER_ID, "epoch": epoch, "control_version": control_version},
+                        payload={
+                            "completion_reason": result.completion_reason if result else None,
+                            "round_count": len(result.rounds) if result else 0,
+                            "error": result.error if result else None,
+                        },
                     )
-                    db.commit()
-                return
-            refreshed = db.query(AppDvsTask).filter_by(task_id=task_id).first()
-            if refreshed is not None:
-                reason, changed = _sync_task_abnormal_reason(refreshed)
-                _record_abnormal_reason(refreshed, reason, changed=changed)
-                _record_abnormal_reason_timeline(db, refreshed, reason, changed=changed)
-                terminal_status = result.status.value if result else "error"
-                _record_task_event(
-                    db,
-                    row=refreshed,
-                    event_type={
-                        "passed": "task_passed",
-                        "failed": "task_failed",
-                        "error": "task_error",
-                        "completed_limited": "task_completed_limited",
-                        "cancelled": "task_cancelled",
-                    }.get(terminal_status, "task_finished"),
-                    message=f"任务执行结束，状态={terminal_status}",
-                    level="error" if terminal_status in {"failed", "error"} else "info",
-                    status=terminal_status,
-                    worker_id=WORKER_ID,
-                    execution_owner_id=WORKER_ID,
-                    execution_epoch=epoch,
-                    control_version=control_version,
-                    payload={
-                        "completion_reason": result.completion_reason if result else None,
-                        "round_count": len(result.rounds) if result else 0,
-                        "error": result.error if result else None,
-                    },
-                )
-                db.commit()
+                    _db.commit()
+                return None
+            _run_db_write_with_retries("record_terminal_event", _record_terminal_event)
             from app.metrics import observe_local_event
 
             terminal_status = result.status.value if result else "error"
@@ -2679,12 +2746,21 @@ class TaskService:
             log_event(logger, logging.ERROR, "task execution failed",
                       event="task_error", task_id=task_id, owner_id=WORKER_ID, epoch=epoch, control_version=control_version, error=str(exc))
             try:
-                db.rollback()
-                r = db.query(AppDvsTask).filter_by(task_id=task_id).first()
-                if r and r.status == "running" and still_owner(db, task_id, WORKER_ID, epoch, control_version):
+                def _commit_error_terminal(_db: Session, _attempt: int):
+                    r = _db.query(AppDvsTask).filter_by(task_id=task_id).first()
+                    owned = bool(
+                        r
+                        and r.status == "running"
+                        and r.execution_owner_id == WORKER_ID
+                        and int(r.execution_epoch or 0) == int(epoch)
+                        and int(r.control_version or 0) == int(control_version)
+                    )
+                    if not owned or r is None:
+                        return False
                     _persist_terminal_failure(r, str(exc), status="error")
-                    commit_terminal_state_if_owner(
-                        db,
+                    result_json = r.result_json
+                    ok = commit_terminal_state_if_owner(
+                        _db,
                         task_id,
                         WORKER_ID,
                         epoch,
@@ -2692,16 +2768,18 @@ class TaskService:
                         status="error",
                         finished_at=now_local(),
                         stages_json={"events": _baseline_events + event_buffer, "final": True},
-                        result_json=r.result_json,
+                        result_json=result_json,
                         error=str(exc),
                     )
-                    refreshed = db.query(AppDvsTask).filter_by(task_id=task_id).first()
+                    if not ok:
+                        return False
+                    refreshed = _db.query(AppDvsTask).filter_by(task_id=task_id).first()
                     if refreshed is not None:
                         reason, changed = _sync_task_abnormal_reason(refreshed)
                         _record_abnormal_reason(refreshed, reason, changed=changed)
-                        _record_abnormal_reason_timeline(db, refreshed, reason, changed=changed)
+                        _record_abnormal_reason_timeline(_db, refreshed, reason, changed=changed)
                         _record_task_event(
-                            db,
+                            _db,
                             row=refreshed,
                             event_type="task_error",
                             message="任务因异常退出并已写入错误终态",
@@ -2713,11 +2791,14 @@ class TaskService:
                             control_version=control_version,
                             payload={"error": str(exc)},
                         )
-                        db.commit()
+                        _db.commit()
+                    return True
+
+                if _run_db_write_with_retries("commit_error_terminal", _commit_error_terminal):
                     log_event(logger, logging.ERROR, "error terminal state committed", event="task_error_committed",
                               task_id=task_id, owner_id=WORKER_ID, epoch=epoch, control_version=control_version, status="error")
             except Exception:
-                pass
+                logger.warning("failed to commit error terminal state after retries", exc_info=True)
         finally:
             ctx = _get_running_task_context(task_id)
             if ctx is not None:
