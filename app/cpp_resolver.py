@@ -249,6 +249,18 @@ def _find_virtual_override_candidates_if_stub(
     root = os.path.abspath(target_dir)
     exts = (".c", ".cc", ".cpp", ".cxx", ".h", ".hpp")
 
+    def _is_nonprod_path(path: str) -> bool:
+        norm = path.replace("\\", "/").lower()
+        parts = [p for p in norm.split("/") if p]
+        return any(
+            p in {"test", "tests", "mock", "mocks", "third_party", "vendor", "build", "out", "cmake-build-debug", "cmake-build-release"}
+            or p.endswith("_test")
+            or p.endswith("_tests")
+            or p.endswith("_mock")
+            or p.endswith("_mocks")
+            for p in parts
+        )
+
     def _read_rel(rel: str) -> tuple[str, list[str]]:
         p = os.path.join(root, rel) if rel else ""
         if not p or not os.path.isfile(p):
@@ -332,6 +344,9 @@ def _find_virtual_override_candidates_if_stub(
             if not fn.endswith(exts):
                 continue
             p = os.path.join(dirpath, fn)
+            relp = os.path.relpath(p, root).replace(os.sep, "/")
+            if _is_nonprod_path(relp):
+                continue
             try:
                 with open(p, encoding="utf-8", errors="replace") as fh:
                     text = fh.read()
@@ -351,6 +366,9 @@ def _find_virtual_override_candidates_if_stub(
                 if not fn.endswith(exts):
                     continue
                 p = os.path.join(dirpath, fn)
+                relp = os.path.relpath(p, root).replace(os.sep, "/")
+                if _is_nonprod_path(relp):
+                    continue
                 try:
                     with open(p, encoding="utf-8", errors="replace") as fh:
                         lines = fh.read().splitlines()
@@ -368,13 +386,14 @@ def _find_virtual_override_candidates_if_stub(
                         continue
                     rel = os.path.relpath(p, root).replace(os.sep, "/")
                     candidates.append((f"{m.group(1)}::{method}", rel, "L" + str(i + 1)))
+    # De-duplicate by qualified function. If duplicate definitions remain in production
+    # files, keep the first deterministic filesystem hit; test/mock paths were excluded.
     uniq: list[tuple[str, str, str]] = []
-    seen = set()
+    seen_functions = set()
     for c in candidates:
-        key = (c[0], c[1], c[2])
-        if key not in seen:
+        if c[0] not in seen_functions:
             uniq.append(c)
-            seen.add(key)
+            seen_functions.add(c[0])
     return uniq
 
 

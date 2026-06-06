@@ -128,6 +128,13 @@ class VulnGraphStoreTests(unittest.TestCase):
             "{\n    return 0;\n}\n",
             encoding="utf-8",
         )
+        mocks = src / "test" / "mocks"
+        mocks.mkdir(parents=True)
+        (mocks / "sandboxer_sandbox_mock.cc").write_text(
+            "int SandboxerSandbox::PrepareExec(const char *containerId, const char *execId, int *processSpec, const char *consoleFifos[])\n"
+            "{\n    return mock_exec(containerId);\n}\n",
+            encoding="utf-8",
+        )
         (src / "sandboxer_sandbox.cc").write_text(
             "#include \"base.h\"\n"
             "int SandboxerSandbox::PrepareExec(const char *containerId, const char *execId, int *processSpec, const char *consoleFifos[])\n"
