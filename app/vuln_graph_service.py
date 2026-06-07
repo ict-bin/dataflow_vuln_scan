@@ -1,6 +1,7 @@
 """Read task-local vulnerability graph artifacts."""
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -9,30 +10,45 @@ from .vuln_store import VulnScanStore
 
 def load_vuln_scan_graph(run_root: str | Path) -> dict[str, Any]:
     root = Path(run_root)
-    # 搜索顺序：
-    #  1. output/vuln-scan.sqlite  (最终归档后)
-    #  2. run/vuln-scan.sqlite     (执行期间共享工作区)
-    #  3. 其它兼容路径
     candidates: list[Path] = []
-    # 如果传入的是 epoch 运行目录 (run/epochs/<N>)
     if root.parts and "epochs" in root.parts:
         epoch_idx = list(root.parts).index("epochs")
-        run_dir = Path(*root.parts[:epoch_idx])  # run/
-        task_root = run_dir.parent               # task_id/
-        candidates = [
-            task_root / "output" / "vuln-scan.sqlite",
-            run_dir / "vuln-scan.sqlite",
-        ]
-    else:
-        # root = run/ 或其他
-        candidates = [
-            root.parent / "output" / "vuln-scan.sqlite",
-            root / "vuln-scan.sqlite",
+        run_dir = Path(*root.parts[:epoch_idx])
+        task_root = run_dir.parent
+        candidates.extend([
+            task_root / "output",
+            run_dir,
             root,
-        ]
-    for db_path in candidates:
-        if db_path.exists() and db_path.suffix == ".sqlite":
+        ])
+    else:
+        candidates.extend([
+            root,
+            root / "output",
+            root.parent / "output",
+        ])
+    seen: set[Path] = set()
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        db_path = resolved / "vuln-scan.sqlite"
+        graph_json = resolved / "vuln-scan-graph.json"
+        if db_path.exists():
             return VulnScanStore(db_path).export_json()
+        if graph_json.exists():
+            try:
+                return json.loads(graph_json.read_text(encoding="utf-8"))
+            except Exception as exc:
+                return {
+                    "error": f"failed to read graph json: {exc}",
+                    "analysis_runs": [],
+                    "taint_nodes": [],
+                    "taint_edges": [],
+                    "followups": [],
+                    "vulnerability_findings": [],
+                    "context_forks": [],
+                }
     return {"analysis_runs": [], "taint_nodes": [], "taint_edges": [], "followups": [], "vulnerability_findings": [], "context_forks": []}
 
 
