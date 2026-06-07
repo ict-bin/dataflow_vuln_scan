@@ -14,12 +14,21 @@ def load_vuln_scan_graph(run_root: str | Path) -> dict[str, Any]:
     if root.parts and "epochs" in root.parts:
         epoch_idx = list(root.parts).index("epochs")
         run_dir = Path(*root.parts[:epoch_idx])
-        task_root = run_dir.parent
         candidates.extend([
-            task_root / "output",
-            run_dir,
             root,
+            run_dir,
         ])
+        epochs_dir = run_dir / "epochs"
+        if root.name == "output" and root.parent == epochs_dir and epochs_dir.exists():
+            epoch_dirs = sorted(
+                [
+                    path for path in epochs_dir.iterdir()
+                    if path.is_dir() and path.name.isdigit()
+                ],
+                reverse=True,
+            )
+            candidates.extend(epoch_dirs)
+        candidates.append(run_dir.parent / "output")
     else:
         candidates.extend([
             root,
