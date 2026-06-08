@@ -2553,11 +2553,18 @@ class TaskService:
             if tcfg.get("start_stage"):
                 svc.start_stage = tcfg["start_stage"]
 
-            # Use row.output_path as the working root
-            if row.output_path:
-                svc.output_dir = row.output_path
-                svc.archive_dir = row.output_path
-                svc.result_dir = row.output_path
+            # When output_path is unset (EA-created or clean-restarted tasks),
+            # persist the fileserver output base so _task_root() & the sessions
+            # API can discover session files without guessing paths.
+            if not row.output_path or not Path(row.output_path).is_dir():
+                _fs_root = os.environ.get("FILESERVER_ROOT", "/data/files")
+                row.output_path = str(Path(_fs_root) / row.project_id / "app" / "secflow-app-dataflow-vuln-scan")
+                db.add(row)
+                db.commit()
+                db.refresh(row)
+            svc.output_dir = row.output_path
+            svc.archive_dir = row.output_path
+            svc.result_dir = row.output_path
 
             epoch_run_root = _task_epoch_run_root(row, epoch)
             root_output_dir = (_task_root(row) / "output") if _task_root(row) else None

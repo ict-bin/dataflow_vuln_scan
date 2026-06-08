@@ -55,3 +55,19 @@ def summarize_graph(graph: dict[str, Any]) -> dict[str, int]:
         "followups": len(graph.get("followups") or []),
         "findings": len(graph.get("vulnerability_findings") or []),
     }
+
+
+def build_trace_tree(graph: dict[str, Any]) -> dict[str, Any] | None:
+    """Minimal trace tree stub — SQLite is the source of truth for followup DAG."""
+    runs = graph.get("analysis_runs") or []
+    if not runs:
+        return None
+    root = min(runs, key=lambda r: float(r.get("started_at") or 0))
+    return {
+        "run_id": root.get("run_id", ""),
+        "function_name": root.get("root_function", ""),
+        "source_file": root.get("root_file", ""),
+        "depth": 0,
+        "status": root.get("status", "pending"),
+        "children": [],
+    }
