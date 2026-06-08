@@ -2243,6 +2243,7 @@ class TaskService:
         event_buffer: list[dict] = []
         guard_counter = 0
         orch_holder: dict[str, Orchestrator] = {}
+        ctx = None
         task_root_path: str | None = None
         epoch_run_root_path: str | None = None
 
@@ -2633,6 +2634,28 @@ class TaskService:
             if ctx is not None:
                 ctx.lease_stop_requested.set()
 
+            if ctx is not None and ctx.termination_reason == "lease_lost":
+                recovered = _recover_running_task_for_cleanup(
+                    db,
+                    task_id=task_id,
+                    owner_id=WORKER_ID,
+                    epoch=epoch,
+                    control_version=control_version,
+                    reason="lease_lost",
+                )
+                log_event(
+                    logger,
+                    logging.WARNING,
+                    "task lease lost; requeued instead of terminal error",
+                    event="task_requeued_after_lease_lost",
+                    task_id=task_id,
+                    owner_id=WORKER_ID,
+                    epoch=epoch,
+                    control_version=control_version,
+                    recovered=recovered,
+                )
+                return
+
             _flush_stages(task_id, _baseline_events + event_buffer, WORKER_ID, epoch, control_version)
 
             def _pre_terminal_check(_db: Session, _attempt: int):
@@ -2789,6 +2812,20 @@ class TaskService:
                       task_id=task_id, owner_id=WORKER_ID, epoch=epoch, control_version=control_version,
                       cleaned_groups=cleaned)
             try:
+                if ctx is not None and ctx.termination_reason == "lease_lost":
+                    recovered = _recover_running_task_for_cleanup(
+                        db,
+                        task_id=task_id,
+                        owner_id=WORKER_ID,
+                        epoch=epoch,
+                        control_version=control_version,
+                        reason="lease_lost_cancelled",
+                    )
+                    log_event(logger, logging.WARNING, "cancelled task requeued after lease loss",
+                              event="task_requeued_after_lease_lost", task_id=task_id,
+                              owner_id=WORKER_ID, epoch=epoch, control_version=control_version,
+                              recovered=recovered)
+                    return
                 cancelled_row = db.query(AppDvsTask).filter_by(task_id=task_id).first()
                 if cancelled_row is not None:
                     _record_task_event(
@@ -2821,6 +2858,22 @@ class TaskService:
             log_event(logger, logging.ERROR, "task execution failed",
                       event="task_error", task_id=task_id, owner_id=WORKER_ID, epoch=epoch, control_version=control_version, error=str(exc))
             try:
+                ctx_for_error = _get_running_task_context(task_id)
+                if ctx_for_error is not None and ctx_for_error.termination_reason == "lease_lost":
+                    recovered = _recover_running_task_for_cleanup(
+                        db,
+                        task_id=task_id,
+                        owner_id=WORKER_ID,
+                        epoch=epoch,
+                        control_version=control_version,
+                        reason="lease_lost_exception",
+                    )
+                    log_event(logger, logging.WARNING, "exception after lease loss requeued instead of terminal error",
+                              event="task_requeued_after_lease_lost", task_id=task_id,
+                              owner_id=WORKER_ID, epoch=epoch, control_version=control_version,
+                              recovered=recovered, error=str(exc))
+                    return
+
                 def _commit_error_terminal(_db: Session, _attempt: int):
                     r = _db.query(AppDvsTask).filter_by(task_id=task_id).first()
                     owned = bool(
