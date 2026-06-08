@@ -885,6 +885,7 @@ class Orchestrator(JudgeMixin):
                     resolved_name, resolved_file = _resolve_function_pointer_followup(target_dir, callee, func_name)
                     if resolved_name != callee.function_name:
                         callee = CalleeRef(function_name=resolved_name, file=resolved_file or callee.file, line=callee.line, tainted_params=callee.tainted_params, description=callee.description, followup_id=callee.followup_id)
+                    callsite_line = callee.line
                     resolved = resolver.resolve(callee.function_name, source_file_hint=callee.file or src_file, line_hint=callee.line)
                     if not resolved.resolved:
                         reason = "external followup" if _is_external_followup(callee) else resolved.reason or "not_in_source_root_funcdb"
@@ -898,7 +899,7 @@ class Orchestrator(JudgeMixin):
                         continue
                     callee = CalleeRef(function_name=resolved.function_name, file=resolved.source_file or callee.file, line=(f"L{resolved.line}" if resolved.line else callee.line), tainted_params=callee.tainted_params, description=callee.description, followup_id=callee.followup_id)
                     raw_params = [x.strip() for x in (callee.tainted_params or "").split(",") if x.strip()]
-                    callsite = analyze_callsite(target_dir, callee.file or src_file, callee.line, callee.function_name)
+                    callsite = analyze_callsite(target_dir, callee.file or src_file, callsite_line, callee.function_name)
                     norm_params, taint_sig = map_taint_signature(raw_params, callsite.actual_args) if callsite.actual_args else normalize_taint_params(callee.tainted_params)
                     meta = fup_meta.get(callee.followup_id, {})
                     try:
@@ -996,15 +997,15 @@ class Orchestrator(JudgeMixin):
                     if "# 调用者传入的脏数据" in ctx_base:
                         ctx_base = ctx_base.split("# 调用者传入的脏数据")[0].strip()
                     sub_cfg.context = ctx_base
-                    _callsite_for_params = analyze_callsite(target_dir, callee.file or src_file, callee.line, callee.function_name)
+                    _callsite_for_params = analyze_callsite(target_dir, callee.file or src_file, callsite_line, callee.function_name)
                     _callee_params = map_taint_signature([x.strip() for x in (callee.tainted_params or "").split(",") if x.strip()], _callsite_for_params.actual_args)[0] or normalize_taint_params(callee.tainted_params)[0] or [x.strip() for x in (callee.tainted_params or "").split(",") if x.strip()]
                     sub_cfg.taint_params = _callee_params or ["all"]
                     sub_cfg.taint_details = [
-                        {"name": p, "description": f"由 {func_name} 在 {callee.line or 'unknown'} 调用传入", "source_kind": "call_argument"}
+                        {"name": p, "description": f"由 {func_name} 在 {callsite_line or callee.line or 'unknown'} 调用传入", "source_kind": "call_argument"}
                         for p in sub_cfg.taint_params
                     ]
                     tainted_ctx_str = (
-                        f"函数 {callee.function_name} 被 {func_name} 在 {callee.line} 调用。\n"
+                        f"函数 {callee.function_name} 被 {func_name} 在 {callsite_line or callee.line} 调用。\n"
                         f"污染参数: {callee.tainted_params}\n说明: {callee.description}"
                     )
                     suffix = (callee.followup_id or hashlib.sha1((callee.function_name + callee.tainted_params + callee.line).encode()).hexdigest())[-6:]
