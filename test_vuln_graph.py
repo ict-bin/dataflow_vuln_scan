@@ -1,10 +1,12 @@
 import asyncio
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from app.cpp_resolver import _find_virtual_override_candidates_if_stub, _resolve_virtual_override_if_stub
+from app.function_resolver import FunctionResolver, normalize_taint_params
 from app.models import AgentInstanceConfig, RoleConfig, TaskConfig, TokenUsage
 from app.orchestrator import _normalize_followup_taint_params
 from app.vuln_graph_service import build_trace_tree, load_vuln_scan_graph, summarize_graph
@@ -14,6 +16,56 @@ from app.vuln_workflow import DataflowVulnWorkflow, parse_taint_inputs
 
 
 class VulnGraphStoreTests(unittest.TestCase):
+    def test_function_resolver_uses_ea_funcdb_and_source_root_boundary(self):
+        root = Path(tempfile.mkdtemp())
+        src = root / "src"
+        src.mkdir()
+        (src / "libipsec.c").write_text("int IPSEC_LIBI_Create(int a1) { return a1; }\n", encoding="utf-8")
+        outside = Path(tempfile.mkdtemp()) / "outside.c"
+        outside.write_text("int Out(void) { return 0; }\n", encoding="utf-8")
+        db_path = root / "funcdb" / "ea_functions.db"
+        db_path.parent.mkdir()
+        conn = sqlite3.connect(db_path)
+        conn.execute("CREATE TABLE functions(name TEXT, file_path TEXT, start_line INTEGER, func_hash TEXT)")
+        conn.executemany(
+            "INSERT INTO functions(name,file_path,start_line,func_hash) VALUES(?,?,?,?)",
+            [
+                ("IPSEC_LIBI_Create", str(src / "libipsec.c"), 1, "h1"),
+                ("Out", str(outside), 1, "h2"),
+            ],
+        )
+        conn.commit(); conn.close()
+        resolver = FunctionResolver(str(src), funcdb_path=str(db_path), cache_root=str(root / "app" / "secflow-app-dataflow-vuln-scan" / "funcdb"))
+        hit = resolver.resolve("IPSEC_LIBI_Create")
+        self.assertTrue(hit.resolved)
+        self.assertEqual("h1", hit.func_hash)
+        self.assertEqual("ea_funcdb", hit.source)
+        miss = resolver.resolve("Out")
+        self.assertFalse(miss.resolved)
+        self.assertEqual("out_of_source_root", miss.reason)
+
+    def test_function_resolver_builds_fallback_under_app_output_path(self):
+        root = Path(tempfile.mkdtemp())
+        src = root / "src"
+        src.mkdir()
+        (src / "mod.c").write_text("int local_func(int a1)\n{\n return a1;\n}\n", encoding="utf-8")
+        (src / "mod.cpp").write_text("namespace ns { int Klass::method(int x) { return x; } }\n", encoding="utf-8")
+        cache = root / "app" / "secflow-app-dataflow-vuln-scan" / "funcdb" / "dvs-fallback"
+        resolver = FunctionResolver(str(src), cache_root=str(cache))
+        hit = resolver.resolve("local_func")
+        self.assertTrue(hit.resolved)
+        cpp_hit = resolver.resolve("Klass::method")
+        self.assertTrue(cpp_hit.resolved)
+        self.assertEqual("dvs_fallback_funcdb", hit.source)
+        self.assertTrue(str(resolver.ensure_fallback_funcdb()).startswith(str(cache)))
+
+    def test_normalize_taint_params_supports_arg_signature_merge(self):
+        params, sig = normalize_taint_params(["*vr_id (arg1, uint32_t)", "第2参数: context", "&v21"])
+        self.assertIn("arg1", params)
+        self.assertIn("arg2", params)
+        self.assertIn("unknown", params)
+        self.assertNotEqual(normalize_taint_params(["arg1"])[1], normalize_taint_params(["arg2"])[1])
+
     def test_store_records_tree_and_findings(self):
         root = Path(tempfile.mkdtemp())
         store = VulnScanStore(root / "vuln-scan.sqlite")

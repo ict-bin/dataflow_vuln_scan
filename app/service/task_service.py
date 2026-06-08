@@ -2591,6 +2591,13 @@ class TaskService:
                 cfg.funcdb_path = str(tcfg["funcdb_path"]).strip()
             if tcfg.get("func_hash"):
                 cfg.func_hash = str(tcfg["func_hash"]).strip()
+            if "deep_trace_enabled" in tcfg:
+                cfg.deep_trace_enabled = bool(tcfg.get("deep_trace_enabled"))
+            if tcfg.get("max_trace_depth"):
+                try:
+                    cfg.max_trace_depth = int(tcfg.get("max_trace_depth") or cfg.max_trace_depth)
+                except (TypeError, ValueError):
+                    pass
             if isinstance(tcfg.get("taint_params"), list):
                 cfg.taint_params = [str(value).strip() for value in tcfg["taint_params"] if str(value).strip()]
             if tcfg.get("function_description"):

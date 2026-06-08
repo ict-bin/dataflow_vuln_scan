@@ -8,3 +8,6 @@ python-dotenv
 sqlalchemy
 pymysql
 cryptography
+tree-sitter
+tree-sitter-c
+tree-sitter-cpp

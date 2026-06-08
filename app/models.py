@@ -81,7 +81,8 @@ class ServiceConfig(BaseModel):
     agent_timeout_max_retries: int = Field(default=3, description="超时后最大自动重试次数，-1=无限")
     pi_max_retries: int = Field(default=3, ge=-1, description="pi 进程拉起失败时最大重试次数，-1 为无限重试")
     pi_retry_delay: float = Field(default=10.0, description="pi 进程重试首次等待秒数，指数退避")
-    max_trace_depth: int = Field(default=3, ge=1, le=10, description="函数调用递归追踪最大深度")
+    max_trace_depth: int = Field(default=3, ge=1, le=1000, description="函数调用递归追踪最大深度")
+    deep_trace_enabled: bool = Field(default=False, description="深度探索模式：不按 max_trace_depth 截断，依赖污点收敛去重")
     callee_concurrency: int = Field(default=4, ge=-1, description="callee 并行分析数：-1=自动/不限, 1=串行, N=最多 N 个并发 BFS 工作池")
 
     workers: RoleConfig = Field(default_factory=RoleConfig)
@@ -126,6 +127,7 @@ class TaskConfig(BaseModel):
     pi_max_retries: int = Field(default=3)
     pi_retry_delay: float = Field(default=10.0)
     max_trace_depth: int = Field(default=3)
+    deep_trace_enabled: bool = Field(default=False)
     callee_concurrency: int = Field(default=4)
     workers: RoleConfig = Field(default_factory=RoleConfig)
     judges: RoleConfig = Field(default_factory=RoleConfig)

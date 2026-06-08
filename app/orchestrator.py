@@ -40,6 +40,7 @@ from .models import (
 from .runner import run_agent, run_agents_parallel
 from .vuln_workflow import DataflowVulnWorkflow
 from .vuln_store import VulnScanStore, FollowupRecord
+from .function_resolver import FunctionResolver, normalize_taint_params
 
 logger = logging.getLogger("dvs.orchestrator")
 from .judge_runner import JudgeMixin
@@ -66,7 +67,8 @@ from .prompt_builder import (
 
 def _is_external_followup(callee: CalleeRef) -> bool:
     text = f"{callee.file} {callee.description} {callee.function_name}".lower()
-    return any(mark in text for mark in ["external", "extern", "lib", "dlsym", "export", "外部"])
+    # External classification is definition-driven; this helper only detects explicit markers.
+    return any(mark in text for mark in ["dlsym", "external symbol", "extern symbol", "system library", "third-party", "外部库", "外部符号"])
 
 def _normalize_followup_taint_params(raw: str | None) -> list[str]:
     text = str(raw or "").strip()
@@ -624,7 +626,7 @@ class Orchestrator(JudgeMixin):
             return result
 
         # ── 根任务:BFS 队列 + 工作池 ────────────────────────────────────────
-        max_depth = cfg.max_trace_depth
+        max_depth = 10**9 if getattr(cfg, "deep_trace_enabled", False) else cfg.max_trace_depth
         # BFS 并发度：直接使用 callee_concurrency（1-64，1=串行，-1=自动）
         # 控制同时进行 W+J 分析的 BFS 工作池大小，与 taint 内部并行正交
         # callee_concurrency=-1 表示自动（默认 4）
@@ -837,6 +839,8 @@ class Orchestrator(JudgeMixin):
             # ── 解析 callee 并加入队列 ─────
             if dep < max_depth and result.final_output:
                 target_dir = os.path.abspath(task_cfg.cwd)
+                cache_root = str(root_output_path.parent.parent / "funcdb" / "dvs-fallback")
+                resolver = FunctionResolver(target_dir, funcdb_path=getattr(task_cfg, "funcdb_path", ""), cache_root=cache_root)
                 # 优先从 result 元数据直接获取 followup，避免 SQLite JOIN 复杂性
                 _fup_refs: list[dict] = (result.upstream_entry_metadata or {}).get("followup_refs") or []
                 if _fup_refs:
@@ -874,10 +878,23 @@ class Orchestrator(JudgeMixin):
                     resolved_name, resolved_file = _resolve_function_pointer_followup(target_dir, callee, func_name)
                     if resolved_name != callee.function_name:
                         callee = CalleeRef(function_name=resolved_name, file=resolved_file or callee.file, line=callee.line, tainted_params=callee.tainted_params, description=callee.description, followup_id=callee.followup_id)
-                    c_key = callee.function_name
-                    if callee.function_name == func_name:
+                    resolved = resolver.resolve(callee.function_name, source_file_hint=callee.file or src_file, line_hint=callee.line)
+                    if not resolved.resolved:
+                        reason = "external followup" if _is_external_followup(callee) else resolved.reason or "not_in_source_root_funcdb"
+                        self._emit("trace_skip", tid, function=callee.function_name,
+                                   reason=reason)
+                        if callee.followup_id:
+                            try:
+                                VulnScanStore(graph_db_path).update_followup_status(callee.followup_id, "skipped", reason=reason)
+                            except Exception:
+                                pass
                         continue
-                    if callee.function_name.split("::")[-1] == func_name.split("::")[-1]:
+                    callee = CalleeRef(function_name=resolved.function_name, file=resolved.source_file or callee.file, line=(f"L{resolved.line}" if resolved.line else callee.line), tainted_params=callee.tainted_params, description=callee.description, followup_id=callee.followup_id)
+                    norm_params, taint_sig = normalize_taint_params(callee.tainted_params)
+                    c_key = f"{resolved.func_hash or resolved.source_file + ':' + resolved.function_name}:{taint_sig}"
+                    if callee.function_name == func_name and taint_sig == normalize_taint_params(task_cfg.taint_params)[1]:
+                        continue
+                    if callee.function_name.split("::")[-1] == func_name.split("::")[-1] and taint_sig == normalize_taint_params(task_cfg.taint_params)[1]:
                         continue
                     if c_key in analyzed:
                         self._emit("trace_skip", tid, function=callee.function_name,
@@ -892,16 +909,6 @@ class Orchestrator(JudgeMixin):
                         if callee.followup_id:
                             try:
                                 VulnScanStore(graph_db_path).update_followup_status(callee.followup_id, "skipped", reason="stdlib skip")
-                            except Exception:
-                                pass
-                        continue
-                    if not _function_has_definition(target_dir, callee.function_name):
-                        reason = "external followup" if _is_external_followup(callee) else "no definition found"
-                        self._emit("trace_skip", tid, function=callee.function_name,
-                                   reason=reason)
-                        if callee.followup_id:
-                            try:
-                                VulnScanStore(graph_db_path).update_followup_status(callee.followup_id, "skipped", reason=reason)
                             except Exception:
                                 pass
                         continue
@@ -931,7 +938,7 @@ class Orchestrator(JudgeMixin):
                     if "# 调用者传入的脏数据" in ctx_base:
                         ctx_base = ctx_base.split("# 调用者传入的脏数据")[0].strip()
                     sub_cfg.context = ctx_base
-                    _callee_params = [x.strip() for x in (callee.tainted_params or "").split(",") if x.strip()]
+                    _callee_params = norm_params or [x.strip() for x in (callee.tainted_params or "").split(",") if x.strip()]
                     sub_cfg.taint_params = _callee_params or ["all"]
                     sub_cfg.taint_details = [
                         {"name": p, "description": f"由 {func_name} 在 {callee.line or 'unknown'} 调用传入", "source_kind": "call_argument"}
