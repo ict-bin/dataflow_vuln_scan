@@ -6,6 +6,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.db.models import AppDvsTask, AppDvsWorkerSlot
+from app.service.pod_metrics import fetch_pod_resource_map
 from app.runtime_context import (
     MAX_LOCAL_RUNNING_TASKS,
     WORKER_SLOT_HEARTBEAT_SECONDS,
@@ -49,6 +50,15 @@ class DfaWorkerSnapshot:
     available_slots: int
     source: str
     last_heartbeat_at: Any
+    pod_created_at: str | None = None
+    pod_started_at: str | None = None
+    pod_metrics_at: str | None = None
+    pod_cpu_usage_millicores: int | None = None
+    pod_memory_usage_bytes: int | None = None
+    pod_cpu_request_millicores: int | None = None
+    pod_memory_request_bytes: int | None = None
+    pod_cpu_limit_millicores: int | None = None
+    pod_memory_limit_bytes: int | None = None
     active_jobs: list[DfaWorkerActiveJobSnapshot] = field(default_factory=list)
     error: str | None = None
 
@@ -166,11 +176,15 @@ class WorkerSlotService:
                 )
             )
 
+        pod_resource_map = fetch_pod_resource_map(
+            pod_names=[str(getattr(row, "pod_name", "") or "").strip() for row in worker_rows],
+        )
         workers: list[DfaWorkerSnapshot] = []
         for row in worker_rows:
             active_jobs = sorted(active_by_owner.pop(row.worker_id, []), key=_active_job_sort_key)
             running_jobs = sum(1 for job in active_jobs if job.status == "running")
             healthy = row.last_heartbeat_at >= stale_cutoff
+            pod_metrics = pod_resource_map.get(str(row.pod_name or "").strip(), {})
             workers.append(
                 DfaWorkerSnapshot(
                     worker_id=row.worker_id,
@@ -184,6 +198,15 @@ class WorkerSlotService:
                     available_slots=max(0, int(row.max_concurrent_tasks or 0) - running_jobs) if healthy else 0,
                     source="worker_registry" if healthy else "stale_worker_registry",
                     last_heartbeat_at=row.last_heartbeat_at,
+                    pod_created_at=pod_metrics.get("pod_created_at"),
+                    pod_started_at=pod_metrics.get("pod_started_at"),
+                    pod_metrics_at=pod_metrics.get("pod_metrics_at"),
+                    pod_cpu_usage_millicores=pod_metrics.get("pod_cpu_usage_millicores"),
+                    pod_memory_usage_bytes=pod_metrics.get("pod_memory_usage_bytes"),
+                    pod_cpu_request_millicores=pod_metrics.get("pod_cpu_request_millicores"),
+                    pod_memory_request_bytes=pod_metrics.get("pod_memory_request_bytes"),
+                    pod_cpu_limit_millicores=pod_metrics.get("pod_cpu_limit_millicores"),
+                    pod_memory_limit_bytes=pod_metrics.get("pod_memory_limit_bytes"),
                     active_jobs=active_jobs,
                     error=None if healthy else "worker heartbeat stale",
                 )
@@ -204,6 +227,15 @@ class WorkerSlotService:
                     available_slots=0,
                     source="stale_owner",
                     last_heartbeat_at=None,
+                    pod_created_at=None,
+                    pod_started_at=None,
+                    pod_metrics_at=None,
+                    pod_cpu_usage_millicores=None,
+                    pod_memory_usage_bytes=None,
+                    pod_cpu_request_millicores=None,
+                    pod_memory_request_bytes=None,
+                    pod_cpu_limit_millicores=None,
+                    pod_memory_limit_bytes=None,
                     active_jobs=sorted(active_jobs, key=_active_job_sort_key),
                     error="owner pod has running tasks but no live worker heartbeat",
                 )

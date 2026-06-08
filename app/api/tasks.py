@@ -186,6 +186,15 @@ class WorkerCapacityResponse(BaseModel):
     available_slots: int = 0
     source: str = "lease_registry"
     last_heartbeat_at: str | None = None
+    pod_created_at: str | None = None
+    pod_started_at: str | None = None
+    pod_metrics_at: str | None = None
+    pod_cpu_usage_millicores: int | None = None
+    pod_memory_usage_bytes: int | None = None
+    pod_cpu_request_millicores: int | None = None
+    pod_memory_request_bytes: int | None = None
+    pod_cpu_limit_millicores: int | None = None
+    pod_memory_limit_bytes: int | None = None
     active_jobs: list[WorkerActiveJobResponse] = Field(default_factory=list)
     error: str | None = None
 
@@ -1175,6 +1184,15 @@ def _build_worker_cluster_capacity_response(db: Session, project_id: str | None 
                 available_slots=worker.available_slots,
                 source=worker.source,
                 last_heartbeat_at=isoformat_local(worker.last_heartbeat_at),
+                pod_created_at=worker.pod_created_at,
+                pod_started_at=worker.pod_started_at,
+                pod_metrics_at=worker.pod_metrics_at,
+                pod_cpu_usage_millicores=worker.pod_cpu_usage_millicores,
+                pod_memory_usage_bytes=worker.pod_memory_usage_bytes,
+                pod_cpu_request_millicores=worker.pod_cpu_request_millicores,
+                pod_memory_request_bytes=worker.pod_memory_request_bytes,
+                pod_cpu_limit_millicores=worker.pod_cpu_limit_millicores,
+                pod_memory_limit_bytes=worker.pod_memory_limit_bytes,
                 error=worker.error,
                 active_jobs=[
                     WorkerActiveJobResponse(
