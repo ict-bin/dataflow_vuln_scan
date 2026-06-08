@@ -837,9 +837,15 @@ def _get_task_row(db: Session, task_id: str):
 
 def _task_root(row) -> Path:
     output_path = row.output_path or ""
-    if not output_path:
-        return Path()
-    return Path(output_path).expanduser().resolve() / row.task_id
+    if output_path:
+        return Path(output_path).expanduser().resolve() / row.task_id
+    # Fallback for tasks where output_path was never persisted (EA-created / pre-fix).
+    project_id = str(getattr(row, "project_id", "") or "").strip()
+    if project_id:
+        import os as _os
+        _fs = _os.environ.get("FILESERVER_ROOT", "/data/files")
+        return Path(_fs) / project_id / "app" / "secflow-app-dataflow-vuln-scan" / row.task_id
+    return Path()
 
 
 def _latest_epoch_run_root(root: Path) -> Path:
