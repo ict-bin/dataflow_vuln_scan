@@ -29,6 +29,31 @@ class TaintInput:
     description: str = ""
 
 
+_CONTEXT_TAINT_EXCLUDES = {
+    "a1",
+    "a3",
+    "context",
+    "ctx",
+    "runtime",
+    "params",
+    "param",
+    "state",
+}
+
+
+def _is_likely_external_taint_symbol(symbol: str) -> bool:
+    normalized = str(symbol or "").strip()
+    if not normalized:
+        return False
+    if normalized in _CONTEXT_TAINT_EXCLUDES:
+        return False
+    if normalized.startswith("&"):
+        return False
+    if normalized.startswith("v") and normalized[1:].isdigit():
+        return False
+    return True
+
+
 def _safe_name(value: str, *, max_len: int = 96) -> str:
     safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("._-") or "item"
     if len(safe) <= max_len:
@@ -54,6 +79,8 @@ def parse_taint_inputs(cfg: TaskConfig, fallback: Iterable[str] | None = None) -
         symbol = str(detail.get("name") or detail.get("taint") or detail.get("param") or detail.get("symbol") or "").strip()
         if not symbol:
             continue
+        if not _is_likely_external_taint_symbol(symbol):
+            continue
         items.append(TaintInput(
             symbol=symbol,
             kind=str(detail.get("source_kind") or detail.get("kind") or "param").strip() or "param",
@@ -63,11 +90,11 @@ def parse_taint_inputs(cfg: TaskConfig, fallback: Iterable[str] | None = None) -
         ))
     for param in cfg.taint_params or []:
         symbol = str(param).strip()
-        if symbol and all(x.symbol != symbol for x in items):
+        if symbol and _is_likely_external_taint_symbol(symbol) and all(x.symbol != symbol for x in items):
             items.append(TaintInput(symbol=symbol, kind="param"))
     for param in fallback or []:
         symbol = str(param).strip()
-        if symbol and all(x.symbol != symbol for x in items):
+        if symbol and _is_likely_external_taint_symbol(symbol) and all(x.symbol != symbol for x in items):
             items.append(TaintInput(symbol=symbol, kind="param"))
     return items or [TaintInput(symbol="all", kind="unknown")]
 

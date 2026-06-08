@@ -64,11 +64,24 @@ from .prompt_builder import (
     _make_result_filename,
 )
 
-
-
 def _is_external_followup(callee: CalleeRef) -> bool:
     text = f"{callee.file} {callee.description} {callee.function_name}".lower()
     return any(mark in text for mark in ["external", "extern", "lib", "dlsym", "export", "外部"])
+
+def _normalize_followup_taint_params(raw: str | None) -> list[str]:
+    text = str(raw or "").strip()
+    if not text:
+        return []
+    normalized: list[str] = []
+    for item in text.split(","):
+        symbol = item.strip()
+        if not symbol or symbol == "*":
+            continue
+        symbol = symbol.lstrip("&").strip()
+        if symbol.startswith("v") and symbol[1:].isdigit():
+            continue
+        normalized.append(symbol)
+    return normalized
 
 
 def _resolve_function_pointer_followup(target_dir: str, callee: CalleeRef, caller_func: str) -> tuple[str, str]:
