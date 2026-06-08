@@ -17,6 +17,7 @@ from .models import AgentInstanceConfig, RoundResult, SwarmEvent, TaskConfig, Ta
 from .runner import run_agent
 from .taint_workflow import _extract_function_body, _prepend_upstream_hint_section, _build_upstream_entry_metadata, _build_taint_hint_summary
 from .vuln_graph_validator import normalize_taint_graph, validate_taint_graph
+from .validation_state import normalize_validation_state
 from .vuln_store import FollowupRecord, TaintEdgeRecord, TaintSourceRecord, VulnFindingRecord, VulnScanStore
 
 
@@ -464,7 +465,10 @@ class DataflowVulnWorkflow:
                 if not isinstance(item, dict): continue
                 src = str(item.get("from") or item.get("from_symbol") or "").strip() or (self.taint_params[0] if self.taint_params else "unknown")
                 dst = str(item.get("to") or item.get("to_symbol") or "").strip() or "unknown"
-                edges.append(TaintEdgeRecord(edge_id=_edge_id(self.run_id, self.func_name, src, dst, str(item.get("line") or "")), run_id=self.run_id, from_node_id=node_ids[0] if node_ids else "", to_node_id=_node_id(self.src_file, self.func_name, dst, self.dep), source_file=self.src_file, function_name=self.func_name, from_symbol=src, to_symbol=dst, line=str(item.get("line") or ""), operation=str(item.get("operation") or ""), evidence=str(item.get("evidence") or ""), sanitizer=str(item.get("sanitizer") or ""), sanitizer_effect=str(item.get("sanitizer_effect") or "none"), validation=str(item.get("validation") or ""), termination_reason=str(item.get("termination_reason") or ""), confidence=float(item.get("confidence") or 0)))
+                validation_state = normalize_validation_state(item.get("validations") or item.get("validation"), sanitizer_effect=str(item.get("sanitizer_effect") or "none"), default_target=dst)
+                edge_rec = TaintEdgeRecord(edge_id=_edge_id(self.run_id, self.func_name, src, dst, str(item.get("line") or "")), run_id=self.run_id, from_node_id=node_ids[0] if node_ids else "", to_node_id=_node_id(self.src_file, self.func_name, dst, self.dep), source_file=self.src_file, function_name=self.func_name, from_symbol=src, to_symbol=dst, line=str(item.get("line") or ""), operation=str(item.get("operation") or ""), evidence=str(item.get("evidence") or ""), sanitizer=str(item.get("sanitizer") or ""), sanitizer_effect=str(item.get("sanitizer_effect") or "none"), validation=str(item.get("validation") or ""), termination_reason=str(item.get("termination_reason") or ""), confidence=float(item.get("confidence") or 0), validation_facts_json=json.dumps(validation_state.facts, ensure_ascii=False), validation_signature=validation_state.signature, validation_risk_rank=validation_state.risk_rank)
+                edges.append(edge_rec)
+                self.store.record_constraints(run_id=self.run_id, edge_id=edge_rec.edge_id, source_file=self.src_file, function_name=self.func_name, line=edge_rec.line, facts=validation_state.facts)
             for item in graph.get("followups") or []:
                 if not isinstance(item, dict):
                     continue
@@ -482,8 +486,11 @@ class DataflowVulnWorkflow:
                 src_symbol = self.taint_params[0] if self.taint_params else "taint"
                 dst_symbol = ",".join(param_list) or "*"
                 eid = _edge_id(self.run_id, self.func_name, src_symbol, fname, fline)
-                edges.append(TaintEdgeRecord(edge_id=eid, run_id=self.run_id, from_node_id=node_ids[0] if node_ids else "", to_node_id=_node_id(str(item.get("file") or self.src_file), fname, dst_symbol, self.dep + 1), source_file=self.src_file, function_name=self.func_name, from_symbol=src_symbol, to_symbol=dst_symbol, line=fline, operation="call_arg", evidence=str(item.get("reason") or item.get("evidence") or "")))
-                followups.append(FollowupRecord(followup_id="follow_" + hashlib.sha1((eid+fname).encode()).hexdigest()[:16], edge_id=eid, parent_node_id=node_ids[0] if node_ids else "", callee_file=str(item.get("file") or self.src_file), callee_function=fname, callee_line=fline, tainted_params_json=json.dumps(param_list, ensure_ascii=False), depth=self.dep + 1, reason=str(item.get("reason") or "")))
+                validation_state = normalize_validation_state(item.get("validations") or item.get("validation"), default_target=dst_symbol)
+                edges.append(TaintEdgeRecord(edge_id=eid, run_id=self.run_id, from_node_id=node_ids[0] if node_ids else "", to_node_id=_node_id(str(item.get("file") or self.src_file), fname, dst_symbol, self.dep + 1), source_file=self.src_file, function_name=self.func_name, from_symbol=src_symbol, to_symbol=dst_symbol, line=fline, operation="call_arg", evidence=str(item.get("reason") or item.get("evidence") or ""), validation=str(item.get("validation") or ""), validation_facts_json=json.dumps(validation_state.facts, ensure_ascii=False), validation_signature=validation_state.signature, validation_risk_rank=validation_state.risk_rank))
+                followup_id = "follow_" + hashlib.sha1((eid+fname).encode()).hexdigest()[:16]
+                followups.append(FollowupRecord(followup_id=followup_id, edge_id=eid, parent_node_id=node_ids[0] if node_ids else "", callee_file=str(item.get("file") or self.src_file), callee_function=fname, callee_line=fline, tainted_params_json=json.dumps(param_list, ensure_ascii=False), depth=self.dep + 1, reason=str(item.get("reason") or "")))
+                self.store.record_constraints(run_id=self.run_id, edge_id=eid, followup_id=followup_id, source_file=self.src_file, function_name=self.func_name, line=fline, facts=validation_state.facts)
         callees = []
         for c in callees:
             eid = _edge_id(self.run_id, self.func_name, self.taint_params[0] if self.taint_params else "taint", c.function_name, c.line)
@@ -495,7 +502,10 @@ class DataflowVulnWorkflow:
             _meta = result.upstream_entry_metadata or {}
             _meta["followup_refs"] = [
                 {"followup_id": f.followup_id, "callee_function": f.callee_function, "callee_file": f.callee_file,
-                 "callee_line": f.callee_line, "tainted_params_json": f.tainted_params_json, "reason": f.reason}
+                 "callee_line": f.callee_line, "tainted_params_json": f.tainted_params_json, "reason": f.reason,
+                 "validation_signature": next((e.validation_signature for e in edges if e.edge_id == f.edge_id), "none"),
+                 "validation_risk_rank": next((e.validation_risk_rank for e in edges if e.edge_id == f.edge_id), 100),
+                 "validation_facts_json": next((e.validation_facts_json for e in edges if e.edge_id == f.edge_id), "[]")}
                 for f in followups
             ]
             result.upstream_entry_metadata = _meta

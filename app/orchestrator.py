@@ -41,6 +41,7 @@ from .runner import run_agent, run_agents_parallel
 from .vuln_workflow import DataflowVulnWorkflow
 from .vuln_store import VulnScanStore, FollowupRecord
 from .function_resolver import FunctionResolver, normalize_taint_params
+from .validation_state import normalize_validation_state
 
 logger = logging.getLogger("dvs.orchestrator")
 from .judge_runner import JudgeMixin
@@ -843,6 +844,7 @@ class Orchestrator(JudgeMixin):
                 resolver = FunctionResolver(target_dir, funcdb_path=getattr(task_cfg, "funcdb_path", ""), cache_root=cache_root)
                 # 优先从 result 元数据直接获取 followup，避免 SQLite JOIN 复杂性
                 _fup_refs: list[dict] = (result.upstream_entry_metadata or {}).get("followup_refs") or []
+                fup_meta: dict[str, dict] = {str(f.get("followup_id") or ""): f for f in _fup_refs if f.get("followup_id")}
                 if _fup_refs:
                     callees: list[CalleeRef] = [
                         CalleeRef(
@@ -891,10 +893,40 @@ class Orchestrator(JudgeMixin):
                         continue
                     callee = CalleeRef(function_name=resolved.function_name, file=resolved.source_file or callee.file, line=(f"L{resolved.line}" if resolved.line else callee.line), tainted_params=callee.tainted_params, description=callee.description, followup_id=callee.followup_id)
                     norm_params, taint_sig = normalize_taint_params(callee.tainted_params)
-                    c_key = f"{resolved.func_hash or resolved.source_file + ':' + resolved.function_name}:{taint_sig}"
+                    meta = fup_meta.get(callee.followup_id, {})
+                    try:
+                        validation_facts = json.loads(str(meta.get("validation_facts_json") or "[]"))
+                    except Exception:
+                        validation_facts = []
+                    validation_state = normalize_validation_state(validation_facts)
+                    if meta.get("validation_signature"):
+                        validation_state = validation_state.__class__(
+                            facts=validation_state.facts,
+                            signature=str(meta.get("validation_signature") or validation_state.signature),
+                            risk_rank=int(meta.get("validation_risk_rank") or validation_state.risk_rank),
+                            risk_class=validation_state.risk_class,
+                        )
+                    function_identity = resolved.func_hash or resolved.source_file + ":" + resolved.function_name
+                    c_key = f"{function_identity}:{taint_sig}:{validation_state.signature}"
                     if callee.function_name == func_name and taint_sig == normalize_taint_params(task_cfg.taint_params)[1]:
                         continue
                     if callee.function_name.split("::")[-1] == func_name.split("::")[-1] and taint_sig == normalize_taint_params(task_cfg.taint_params)[1]:
+                        continue
+                    _store_for_context = VulnScanStore(graph_db_path)
+                    covering = _store_for_context.find_covering_context(
+                        function_identity=function_identity,
+                        taint_signature=taint_sig,
+                        validation_signature=validation_state.signature,
+                        validation_risk_rank=validation_state.risk_rank,
+                    )
+                    if covering:
+                        self._emit("trace_skip", tid, function=callee.function_name,
+                                   reason="merged_equivalent_taint_validation", covered_by=covering.get("context_id"))
+                        if callee.followup_id:
+                            try:
+                                VulnScanStore(graph_db_path).update_followup_status(callee.followup_id, "skipped", reason="merged_equivalent_taint_validation")
+                            except Exception:
+                                pass
                         continue
                     if c_key in analyzed:
                         self._emit("trace_skip", tid, function=callee.function_name,
@@ -913,6 +945,22 @@ class Orchestrator(JudgeMixin):
                                 pass
                         continue
                     analyzed.add(c_key)
+                    context_id = "ctx_" + hashlib.sha1(c_key.encode()).hexdigest()[:16]
+                    try:
+                        VulnScanStore(graph_db_path).upsert_analysis_context(
+                            context_id=context_id,
+                            function_identity=function_identity,
+                            source_file=callee.file,
+                            function_name=callee.function_name,
+                            taint_signature=taint_sig,
+                            validation_signature=validation_state.signature,
+                            validation_risk_rank=validation_state.risk_rank,
+                            risk_class=validation_state.risk_class,
+                            status="queued",
+                            created_from_followup_id=callee.followup_id,
+                        )
+                    except Exception:
+                        pass
                     if callee.followup_id:
                         try:
                             VulnScanStore(graph_db_path).update_followup_status(callee.followup_id, "queued")
@@ -938,7 +986,7 @@ class Orchestrator(JudgeMixin):
                     if "# 调用者传入的脏数据" in ctx_base:
                         ctx_base = ctx_base.split("# 调用者传入的脏数据")[0].strip()
                     sub_cfg.context = ctx_base
-                    _callee_params = norm_params or [x.strip() for x in (callee.tainted_params or "").split(",") if x.strip()]
+                    _callee_params = normalize_taint_params(callee.tainted_params)[0] or [x.strip() for x in (callee.tainted_params or "").split(",") if x.strip()]
                     sub_cfg.taint_params = _callee_params or ["all"]
                     sub_cfg.taint_details = [
                         {"name": p, "description": f"由 {func_name} 在 {callee.line or 'unknown'} 调用传入", "source_kind": "call_argument"}

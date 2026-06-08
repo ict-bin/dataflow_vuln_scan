@@ -19,7 +19,9 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Iterator, Iterable, Any
 
-SCHEMA_VERSION = 1
+from .validation_state import normalize_validation_state
+
+SCHEMA_VERSION = 2
 
 
 @dataclass
@@ -55,6 +57,9 @@ class TaintEdgeRecord:
     validation: str = ""
     termination_reason: str = ""
     confidence: float = 0.0
+    validation_facts_json: str = "[]"
+    validation_signature: str = "none"
+    validation_risk_rank: int = 100
 
 
 @dataclass
@@ -164,6 +169,9 @@ class VulnScanStore:
                   validation TEXT NOT NULL DEFAULT '',
                   termination_reason TEXT NOT NULL DEFAULT '',
                   confidence REAL NOT NULL DEFAULT 0,
+                  validation_facts_json TEXT NOT NULL DEFAULT '[]',
+                  validation_signature TEXT NOT NULL DEFAULT 'none',
+                  validation_risk_rank INTEGER NOT NULL DEFAULT 100,
                   created_at REAL NOT NULL DEFAULT (strftime('%s','now')),
                   FOREIGN KEY(run_id) REFERENCES analysis_runs(run_id)
                 );
@@ -214,16 +222,58 @@ class VulnScanStore:
                   created_at REAL NOT NULL DEFAULT (strftime('%s','now'))
                 );
 
+                CREATE TABLE IF NOT EXISTS analysis_contexts (
+                  context_id TEXT PRIMARY KEY,
+                  function_identity TEXT NOT NULL,
+                  source_file TEXT NOT NULL DEFAULT '',
+                  function_name TEXT NOT NULL,
+                  taint_signature TEXT NOT NULL,
+                  validation_signature TEXT NOT NULL DEFAULT 'none',
+                  validation_risk_rank INTEGER NOT NULL DEFAULT 100,
+                  risk_class TEXT NOT NULL DEFAULT 'no_validation',
+                  status TEXT NOT NULL DEFAULT 'created',
+                  covered_by_context_id TEXT NOT NULL DEFAULT '',
+                  created_from_followup_id TEXT NOT NULL DEFAULT '',
+                  merged_followups_json TEXT NOT NULL DEFAULT '[]',
+                  created_at REAL NOT NULL DEFAULT (strftime('%s','now'))
+                );
+
+                CREATE TABLE IF NOT EXISTS taint_constraints (
+                  constraint_id TEXT PRIMARY KEY,
+                  run_id TEXT NOT NULL,
+                  edge_id TEXT NOT NULL DEFAULT '',
+                  followup_id TEXT NOT NULL DEFAULT '',
+                  source_file TEXT NOT NULL DEFAULT '',
+                  function_name TEXT NOT NULL DEFAULT '',
+                  line TEXT NOT NULL DEFAULT '',
+                  target_arg_index INTEGER NOT NULL DEFAULT 0,
+                  target_symbol TEXT NOT NULL DEFAULT '',
+                  access_path_json TEXT NOT NULL DEFAULT '[]',
+                  kind TEXT NOT NULL,
+                  predicate_json TEXT NOT NULL DEFAULT '{}',
+                  effect TEXT NOT NULL DEFAULT 'constrains',
+                  confidence TEXT NOT NULL DEFAULT 'medium',
+                  dominates_call INTEGER NOT NULL DEFAULT 1,
+                  evidence TEXT NOT NULL DEFAULT '',
+                  normalized_key TEXT NOT NULL,
+                  created_at REAL NOT NULL DEFAULT (strftime('%s','now'))
+                );
+
                 CREATE INDEX IF NOT EXISTS ix_taint_edges_run ON taint_edges(run_id);
                 CREATE INDEX IF NOT EXISTS ix_taint_edges_function ON taint_edges(source_file, function_name);
                 CREATE INDEX IF NOT EXISTS ix_followups_status ON followups(status, depth);
                 CREATE INDEX IF NOT EXISTS ix_findings_run ON vulnerability_findings(run_id);
+                CREATE INDEX IF NOT EXISTS ix_contexts_lookup ON analysis_contexts(function_identity, taint_signature, validation_signature);
+                CREATE INDEX IF NOT EXISTS ix_constraints_run ON taint_constraints(run_id, edge_id, followup_id);
                 """
             )
-            for column, ddl in [
-                ("source_file", "ALTER TABLE vulnerability_findings ADD COLUMN source_file TEXT NOT NULL DEFAULT ''"),
-                ("function_name", "ALTER TABLE vulnerability_findings ADD COLUMN function_name TEXT NOT NULL DEFAULT ''"),
-                ("line", "ALTER TABLE vulnerability_findings ADD COLUMN line TEXT NOT NULL DEFAULT ''"),
+            for table, column, ddl in [
+                ("vulnerability_findings", "source_file", "ALTER TABLE vulnerability_findings ADD COLUMN source_file TEXT NOT NULL DEFAULT ''"),
+                ("vulnerability_findings", "function_name", "ALTER TABLE vulnerability_findings ADD COLUMN function_name TEXT NOT NULL DEFAULT ''"),
+                ("vulnerability_findings", "line", "ALTER TABLE vulnerability_findings ADD COLUMN line TEXT NOT NULL DEFAULT ''"),
+                ("taint_edges", "validation_facts_json", "ALTER TABLE taint_edges ADD COLUMN validation_facts_json TEXT NOT NULL DEFAULT '[]'"),
+                ("taint_edges", "validation_signature", "ALTER TABLE taint_edges ADD COLUMN validation_signature TEXT NOT NULL DEFAULT 'none'"),
+                ("taint_edges", "validation_risk_rank", "ALTER TABLE taint_edges ADD COLUMN validation_risk_rank INTEGER NOT NULL DEFAULT 100"),
             ]:
                 try:
                     conn.execute(ddl)
@@ -347,6 +397,68 @@ class VulnScanStore:
                 except OSError:
                     pass
 
+    def record_constraints(self, *, run_id: str, edge_id: str = "", followup_id: str = "", source_file: str = "", function_name: str = "", line: str = "", facts: list[dict[str, Any]] | None = None) -> None:
+        rows = []
+        for idx, fact in enumerate(facts or []):
+            target = fact.get("target") if isinstance(fact.get("target"), dict) else {}
+            predicate = fact.get("predicate") if isinstance(fact.get("predicate"), dict) else {}
+            access_path = target.get("access_path") if isinstance(target.get("access_path"), list) else []
+            key_obj = {"kind": fact.get("kind"), "target": target, "predicate": predicate}
+            normalized_key = json.dumps(key_obj, sort_keys=True, ensure_ascii=False)
+            rows.append((
+                "constraint_" + str(abs(hash((run_id, edge_id, followup_id, idx, normalized_key)))),
+                run_id, edge_id, followup_id, source_file, function_name, line,
+                int(target.get("arg_index") or 0), str(target.get("symbol") or ""),
+                json.dumps(access_path, ensure_ascii=False), str(fact.get("kind") or "unknown"),
+                json.dumps(predicate, ensure_ascii=False), str(fact.get("effect") or "constrains"),
+                str(fact.get("confidence") or "medium"),
+                1 if (fact.get("scope") or {}).get("dominates_call", True) else 0,
+                str(fact.get("evidence") or ""), normalized_key,
+            ))
+        if not rows:
+            return
+        with self.connect() as conn:
+            conn.executemany(
+                """INSERT OR REPLACE INTO taint_constraints
+                   (constraint_id, run_id, edge_id, followup_id, source_file, function_name, line,
+                    target_arg_index, target_symbol, access_path_json, kind, predicate_json, effect,
+                    confidence, dominates_call, evidence, normalized_key)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                rows,
+            )
+
+    def find_covering_context(self, *, function_identity: str, taint_signature: str, validation_signature: str, validation_risk_rank: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            rows = [dict(r) for r in conn.execute(
+                """SELECT * FROM analysis_contexts
+                   WHERE function_identity=? AND taint_signature=? AND status IN ('created','queued','running','analyzed')""",
+                (function_identity, taint_signature),
+            ).fetchall()]
+        rows.sort(key=lambda r: int(r.get("validation_risk_rank") or 0), reverse=True)
+        for row in rows:
+            if row.get("validation_signature") == validation_signature or row.get("validation_signature") == "none":
+                return row
+            if row.get("validation_signature") == "unknown" and validation_signature != "none":
+                return row
+        return None
+
+    def upsert_analysis_context(self, *, context_id: str, function_identity: str, source_file: str, function_name: str, taint_signature: str, validation_signature: str, validation_risk_rank: int, risk_class: str, status: str, created_from_followup_id: str = "", covered_by_context_id: str = "") -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """INSERT OR REPLACE INTO analysis_contexts
+                   (context_id, function_identity, source_file, function_name, taint_signature, validation_signature,
+                    validation_risk_rank, risk_class, status, covered_by_context_id, created_from_followup_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (context_id, function_identity, source_file, function_name, taint_signature, validation_signature,
+                 validation_risk_rank, risk_class, status, covered_by_context_id, created_from_followup_id),
+            )
+
+    def update_analysis_context_status(self, context_id: str, status: str) -> None:
+        if not context_id:
+            return
+        with self.connect() as conn:
+            conn.execute("UPDATE analysis_contexts SET status=? WHERE context_id=?", (status, context_id))
+
     def add_context_fork(
         self,
         *,
@@ -378,6 +490,6 @@ class VulnScanStore:
     def export_json(self) -> dict[str, Any]:
         with self.connect() as conn:
             result: dict[str, Any] = {}
-            for table in ["analysis_runs", "taint_nodes", "taint_edges", "followups", "vulnerability_findings", "context_forks"]:
+            for table in ["analysis_runs", "taint_nodes", "taint_edges", "followups", "vulnerability_findings", "context_forks", "analysis_contexts", "taint_constraints"]:
                 result[table] = [dict(r) for r in conn.execute(f"SELECT * FROM {table}").fetchall()]
             return result

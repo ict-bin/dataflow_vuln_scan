@@ -39,7 +39,18 @@
       "function": "Callee",
       "line": "L30",
       "tainted_params": ["arg1"],
-      "reason": "污点作为第1参数传入"
+      "reason": "污点作为第1参数传入",
+      "validations": [
+        {
+          "kind": "range|null_check|bounds|enum|auth|sanitizer|unknown",
+          "target": {"arg_index": 1, "symbol": "arg1", "access_path": []},
+          "predicate": {"op": "<=", "rhs": {"type": "const", "value": 1024}},
+          "scope": {"line": "L25", "dominates_call": true},
+          "effect": "constrains",
+          "confidence": "high|medium|low",
+          "evidence": "if (len <= 1024) Callee(buf);"
+        }
+      ]
     }
   ],
   "termination": {
@@ -59,3 +70,35 @@
 ## followups
 
 `followups` 是唯一的跟入点输出，不需要再写 `tainted.list`。每个元素必须包含：
+- `file` / `function` / `line` / `tainted_params` / `reason`
+- `validations`: 调用该 callee 前对这些污点参数已经生效且支配 callsite 的校验事实。没有校验时输出 `[]`，不要省略字段。
+
+`validations` 必须使用统一 JSON 语言，不要只写中文描述：
+- `kind`: `null_check`、`range`、`bounds`、`enum`、`auth`、`sanitizer`、`unknown`
+- `target.arg_index`: callee 的第几个参数（1-based）；无法判断时为 0
+- `target.symbol`: `arg1`/`arg2` 或形参名
+- `predicate`: 归一化谓词，如 `{ "op": "<=", "rhs": {"type":"const", "value":1024} }`
+- `scope.dominates_call`: 该校验是否支配 followup 调用点；不支配则不要记录为有效校验
+- `evidence`: 原始代码证据
+
+示例：
+```json
+{
+  "file": "x.c",
+  "function": "C",
+  "line": "L42",
+  "tainted_params": ["arg1"],
+  "reason": "污点 len 作为第1参数传入",
+  "validations": [
+    {
+      "kind": "range",
+      "target": {"arg_index": 1, "symbol": "arg1", "access_path": []},
+      "predicate": {"op": "<=", "rhs": {"type": "const", "value": 1024}},
+      "scope": {"line": "L40", "dominates_call": true},
+      "effect": "constrains",
+      "confidence": "high",
+      "evidence": "if (len <= 1024) C(len);"
+    }
+  ]
+}
+```

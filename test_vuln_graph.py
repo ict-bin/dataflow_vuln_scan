@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from app.cpp_resolver import _find_virtual_override_candidates_if_stub, _resolve_virtual_override_if_stub
 from app.function_resolver import FunctionResolver, normalize_taint_params
+from app.validation_state import normalize_validation_state
 from app.models import AgentInstanceConfig, RoleConfig, TaskConfig, TokenUsage
 from app.orchestrator import _normalize_followup_taint_params
 from app.vuln_graph_service import build_trace_tree, load_vuln_scan_graph, summarize_graph
@@ -407,7 +408,46 @@ class VulnGraphStoreTests(unittest.TestCase):
         self.assertEqual("queued", child["children"][0]["followup_status"])
         self.assertEqual(["v9"], [item["symbol"] for item in child["children"][0]["taint_inputs"]])
 
-    def test_resolver_redirects_trivial_base_stub_to_unique_override(self):
+    def test_validation_state_prevents_unsafe_merge(self):
+        root = Path(tempfile.mkdtemp())
+        store = VulnScanStore(root / "vuln-scan.sqlite")
+        unsafe = normalize_validation_state([])
+        safe = normalize_validation_state([{
+            "kind": "range",
+            "target": {"arg_index": 1, "symbol": "arg1", "access_path": []},
+            "predicate": {"op": "<=", "rhs": {"type": "const", "value": 1024}},
+            "evidence": "if (x <= 1024) C(x);",
+        }])
+        store.upsert_analysis_context(
+            context_id="ctx_safe", function_identity="C#hash", source_file="a.c", function_name="C",
+            taint_signature="arg1", validation_signature=safe.signature,
+            validation_risk_rank=safe.risk_rank, risk_class=safe.risk_class, status="queued",
+            created_from_followup_id="f_safe",
+        )
+        self.assertIsNone(store.find_covering_context(
+            function_identity="C#hash", taint_signature="arg1",
+            validation_signature=unsafe.signature, validation_risk_rank=unsafe.risk_rank,
+        ))
+        store.upsert_analysis_context(
+            context_id="ctx_unsafe", function_identity="C#hash", source_file="b.c", function_name="C",
+            taint_signature="arg1", validation_signature=unsafe.signature,
+            validation_risk_rank=unsafe.risk_rank, risk_class=unsafe.risk_class, status="queued",
+            created_from_followup_id="f_unsafe",
+        )
+        self.assertEqual("ctx_unsafe", store.find_covering_context(
+            function_identity="C#hash", taint_signature="arg1",
+            validation_signature=safe.signature, validation_risk_rank=safe.risk_rank,
+        )["context_id"])
+
+    def test_constraints_are_exported(self):
+        root = Path(tempfile.mkdtemp())
+        store = VulnScanStore(root / "vuln-scan.sqlite")
+        state = normalize_validation_state("arg1 <= 8")
+        store.record_constraints(run_id="r", edge_id="e", followup_id="f", source_file="a.c", function_name="A", line="L1", facts=state.facts)
+        graph = store.export_json()
+        self.assertEqual(1, len(graph["taint_constraints"]))
+        self.assertEqual("range", graph["taint_constraints"][0]["kind"])
+
         root = Path(tempfile.mkdtemp())
         src = root / "src"
         src.mkdir()
