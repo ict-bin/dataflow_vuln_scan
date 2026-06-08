@@ -65,6 +65,7 @@ class TaskCreateRequest(BaseModel):
     line_hint: Optional[str] = None
     definition_kind: Optional[str] = None
     taint_params: list[str] = []
+    taint_details: list[Dict[str, Any]] = []
     function_description: Optional[str] = None
     function_description_source: Optional[str] = None
     entry_reason: Optional[str] = None
