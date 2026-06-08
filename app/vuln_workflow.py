@@ -152,6 +152,7 @@ class DataflowVulnWorkflow:
         self.ws.mkdir(parents=True, exist_ok=True)
         self.sessions = self.out_dir / "sessions"
         self.sessions.mkdir(parents=True, exist_ok=True)
+        self.graph_json_path = self.out_dir / "vuln-scan-graph.json"
 
     def _emit(self, etype: str, **data: Any) -> None:
         try:
@@ -495,6 +496,10 @@ class DataflowVulnWorkflow:
         final_graph_json_path = final_output_root / "vuln-scan-graph.json"
         try:
             shutil.copyfile(self.store.db_path, final_sqlite_path)
+        except OSError:
+            pass
+        try:
+            self.graph_json_path.write_text(json.dumps(graph_export, ensure_ascii=False, indent=2), encoding="utf-8")
         except OSError:
             pass
         try:

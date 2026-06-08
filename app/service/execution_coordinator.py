@@ -244,6 +244,10 @@ def recover_running_task_if_owner(
         .update(
             {
                 AppDvsTask.status: "pending",
+                AppDvsTask.error: None,
+                AppDvsTask.result_json: None,
+                AppDvsTask.finished_at: None,
+                AppDvsTask.latest_abnormal_reason_json: None,
                 AppDvsTask.execution_owner_id: None,
                 AppDvsTask.execution_lease_until: None,
                 AppDvsTask.execution_heartbeat_at: None,
@@ -287,6 +291,10 @@ def reclaim_orphaned_running_tasks(db: Session, *, limit: int = 100) -> list[Rec
             reason = "expired_lease"
         fields = {
             AppDvsTask.status: "pending",
+            AppDvsTask.error: None,
+            AppDvsTask.result_json: None,
+            AppDvsTask.finished_at: None,
+            AppDvsTask.latest_abnormal_reason_json: None,
             AppDvsTask.execution_owner_id: None,
             AppDvsTask.execution_lease_until: None,
             AppDvsTask.execution_heartbeat_at: None,
