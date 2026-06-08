@@ -19,7 +19,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Iterator, Iterable, Any
 
-from .validation_state import normalize_validation_state
+from .validation_state import normalize_validation_state, validation_covers
 
 SCHEMA_VERSION = 2
 
@@ -230,6 +230,7 @@ class VulnScanStore:
                   taint_signature TEXT NOT NULL,
                   validation_signature TEXT NOT NULL DEFAULT 'none',
                   validation_risk_rank INTEGER NOT NULL DEFAULT 100,
+                  validation_facts_json TEXT NOT NULL DEFAULT '[]',
                   risk_class TEXT NOT NULL DEFAULT 'no_validation',
                   status TEXT NOT NULL DEFAULT 'created',
                   covered_by_context_id TEXT NOT NULL DEFAULT '',
@@ -274,6 +275,7 @@ class VulnScanStore:
                 ("taint_edges", "validation_facts_json", "ALTER TABLE taint_edges ADD COLUMN validation_facts_json TEXT NOT NULL DEFAULT '[]'"),
                 ("taint_edges", "validation_signature", "ALTER TABLE taint_edges ADD COLUMN validation_signature TEXT NOT NULL DEFAULT 'none'"),
                 ("taint_edges", "validation_risk_rank", "ALTER TABLE taint_edges ADD COLUMN validation_risk_rank INTEGER NOT NULL DEFAULT 100"),
+                ("analysis_contexts", "validation_facts_json", "ALTER TABLE analysis_contexts ADD COLUMN validation_facts_json TEXT NOT NULL DEFAULT '[]'"),
             ]:
                 try:
                     conn.execute(ddl)
@@ -427,7 +429,7 @@ class VulnScanStore:
                 rows,
             )
 
-    def find_covering_context(self, *, function_identity: str, taint_signature: str, validation_signature: str, validation_risk_rank: int) -> dict[str, Any] | None:
+    def find_covering_context(self, *, function_identity: str, taint_signature: str, validation_signature: str, validation_risk_rank: int, validation_facts: list[dict[str, Any]] | None = None) -> dict[str, Any] | None:
         with self.connect() as conn:
             rows = [dict(r) for r in conn.execute(
                 """SELECT * FROM analysis_contexts
@@ -436,21 +438,23 @@ class VulnScanStore:
             ).fetchall()]
         rows.sort(key=lambda r: int(r.get("validation_risk_rank") or 0), reverse=True)
         for row in rows:
-            if row.get("validation_signature") == validation_signature or row.get("validation_signature") == "none":
-                return row
-            if row.get("validation_signature") == "unknown" and validation_signature != "none":
+            try:
+                existing_facts = json.loads(str(row.get("validation_facts_json") or "[]"))
+            except Exception:
+                existing_facts = []
+            if validation_covers(str(row.get("validation_signature") or "none"), int(row.get("validation_risk_rank") or 100), validation_signature, validation_risk_rank, existing_facts, validation_facts or []):
                 return row
         return None
 
-    def upsert_analysis_context(self, *, context_id: str, function_identity: str, source_file: str, function_name: str, taint_signature: str, validation_signature: str, validation_risk_rank: int, risk_class: str, status: str, created_from_followup_id: str = "", covered_by_context_id: str = "") -> None:
+    def upsert_analysis_context(self, *, context_id: str, function_identity: str, source_file: str, function_name: str, taint_signature: str, validation_signature: str, validation_risk_rank: int, risk_class: str, status: str, created_from_followup_id: str = "", covered_by_context_id: str = "", validation_facts: list[dict[str, Any]] | None = None) -> None:
         with self.connect() as conn:
             conn.execute(
                 """INSERT OR REPLACE INTO analysis_contexts
                    (context_id, function_identity, source_file, function_name, taint_signature, validation_signature,
-                    validation_risk_rank, risk_class, status, covered_by_context_id, created_from_followup_id)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    validation_risk_rank, validation_facts_json, risk_class, status, covered_by_context_id, created_from_followup_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (context_id, function_identity, source_file, function_name, taint_signature, validation_signature,
-                 validation_risk_rank, risk_class, status, covered_by_context_id, created_from_followup_id),
+                 validation_risk_rank, json.dumps(validation_facts or [], ensure_ascii=False), risk_class, status, covered_by_context_id, created_from_followup_id),
             )
 
     def update_analysis_context_status(self, context_id: str, status: str) -> None:

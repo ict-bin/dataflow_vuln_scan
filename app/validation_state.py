@@ -120,7 +120,50 @@ def normalize_validation_state(raw: Any = None, *, sanitizer_effect: str = "", d
     return ValidationState(facts, sig, risk, cls)
 
 
-def validation_covers(existing_signature: str, existing_risk_rank: int, incoming_signature: str, incoming_risk_rank: int) -> bool:
+def _range_bound(fact: dict[str, Any]) -> tuple[str, int] | None:
+    pred = fact.get("predicate") if isinstance(fact.get("predicate"), dict) else {}
+    rhs = pred.get("rhs") if isinstance(pred.get("rhs"), dict) else {}
+    op = str(pred.get("op") or "")
+    val = rhs.get("value")
+    if op not in {"<", "<=", ">", ">="} or not isinstance(val, int):
+        return None
+    return op, val
+
+
+def _fact_target_key(fact: dict[str, Any]) -> str:
+    target = fact.get("target") if isinstance(fact.get("target"), dict) else {}
+    return json.dumps({"arg_index": target.get("arg_index") or 0, "symbol": target.get("symbol") or "", "access_path": target.get("access_path") or []}, sort_keys=True, ensure_ascii=False)
+
+
+def _fact_covers(existing: dict[str, Any], incoming: dict[str, Any]) -> bool:
+    if str(existing.get("kind")) != str(incoming.get("kind")):
+        return False
+    if _fact_target_key(existing) != _fact_target_key(incoming):
+        return False
+    if existing.get("kind") != "range":
+        return json.dumps(existing.get("predicate") or {}, sort_keys=True, ensure_ascii=False) == json.dumps(incoming.get("predicate") or {}, sort_keys=True, ensure_ascii=False)
+    eb = _range_bound(existing); ib = _range_bound(incoming)
+    if not eb or not ib:
+        return False
+    eop, eval_ = eb; iop, ival = ib
+    # Wider ranges are more dangerous and cover narrower ranges.
+    if eop in {"<", "<="} and iop in {"<", "<="}:
+        return eval_ >= ival
+    if eop in {">", ">="} and iop in {">", ">="}:
+        return eval_ <= ival
+    return False
+
+
+def facts_cover(existing_facts: list[dict[str, Any]], incoming_facts: list[dict[str, Any]]) -> bool:
+    if not existing_facts:
+        return True
+    if not incoming_facts:
+        return False
+    return all(any(_fact_covers(e, i) for e in existing_facts) for i in incoming_facts)
+
+
+def validation_covers(existing_signature: str, existing_risk_rank: int, incoming_signature: str, incoming_risk_rank: int,
+                      existing_facts: list[dict[str, Any]] | None = None, incoming_facts: list[dict[str, Any]] | None = None) -> bool:
     """Return True if an existing context is conservative enough to cover incoming.
 
     Only same validation signatures, no-validation, or unknown high-risk contexts
@@ -133,4 +176,4 @@ def validation_covers(existing_signature: str, existing_risk_rank: int, incoming
         return True
     if existing_signature == "unknown" and incoming_signature != "none":
         return True
-    return False
+    return facts_cover(existing_facts or [], incoming_facts or [])

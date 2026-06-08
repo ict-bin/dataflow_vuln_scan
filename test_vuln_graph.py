@@ -422,22 +422,30 @@ class VulnGraphStoreTests(unittest.TestCase):
             context_id="ctx_safe", function_identity="C#hash", source_file="a.c", function_name="C",
             taint_signature="arg1", validation_signature=safe.signature,
             validation_risk_rank=safe.risk_rank, risk_class=safe.risk_class, status="queued",
-            created_from_followup_id="f_safe",
+            created_from_followup_id="f_safe", validation_facts=safe.facts,
         )
         self.assertIsNone(store.find_covering_context(
             function_identity="C#hash", taint_signature="arg1",
-            validation_signature=unsafe.signature, validation_risk_rank=unsafe.risk_rank,
+            validation_signature=unsafe.signature, validation_risk_rank=unsafe.risk_rank, validation_facts=unsafe.facts,
         ))
         store.upsert_analysis_context(
             context_id="ctx_unsafe", function_identity="C#hash", source_file="b.c", function_name="C",
             taint_signature="arg1", validation_signature=unsafe.signature,
             validation_risk_rank=unsafe.risk_rank, risk_class=unsafe.risk_class, status="queued",
-            created_from_followup_id="f_unsafe",
+            created_from_followup_id="f_unsafe", validation_facts=unsafe.facts,
         )
         self.assertEqual("ctx_unsafe", store.find_covering_context(
             function_identity="C#hash", taint_signature="arg1",
-            validation_signature=safe.signature, validation_risk_rank=safe.risk_rank,
+            validation_signature=safe.signature, validation_risk_rank=safe.risk_rank, validation_facts=safe.facts,
         )["context_id"])
+
+    def test_range_wider_validation_covers_narrower(self):
+        root = Path(tempfile.mkdtemp())
+        store = VulnScanStore(root / "vuln-scan.sqlite")
+        wide = normalize_validation_state([{"kind": "range", "target": {"arg_index": 1, "symbol": "arg1"}, "predicate": {"op": "<=", "rhs": {"type": "const", "value": 2048}}}])
+        narrow = normalize_validation_state([{"kind": "range", "target": {"arg_index": 1, "symbol": "arg1"}, "predicate": {"op": "<=", "rhs": {"type": "const", "value": 1024}}}])
+        store.upsert_analysis_context(context_id="ctx_wide", function_identity="C#hash", source_file="a.c", function_name="C", taint_signature="arg1", validation_signature=wide.signature, validation_risk_rank=wide.risk_rank, risk_class=wide.risk_class, status="queued", validation_facts=wide.facts)
+        self.assertEqual("ctx_wide", store.find_covering_context(function_identity="C#hash", taint_signature="arg1", validation_signature=narrow.signature, validation_risk_rank=narrow.risk_rank, validation_facts=narrow.facts)["context_id"])
 
     def test_constraints_are_exported(self):
         root = Path(tempfile.mkdtemp())
@@ -448,6 +456,7 @@ class VulnGraphStoreTests(unittest.TestCase):
         self.assertEqual(1, len(graph["taint_constraints"]))
         self.assertEqual("range", graph["taint_constraints"][0]["kind"])
 
+    def test_resolver_redirects_trivial_base_stub_to_unique_override(self):
         root = Path(tempfile.mkdtemp())
         src = root / "src"
         src.mkdir()

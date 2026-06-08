@@ -41,6 +41,7 @@ from .runner import run_agent, run_agents_parallel
 from .vuln_workflow import DataflowVulnWorkflow
 from .vuln_store import VulnScanStore, FollowupRecord
 from .function_resolver import FunctionResolver, normalize_taint_params
+from .callsite_analysis import analyze_callsite, map_taint_signature
 from .validation_state import normalize_validation_state
 
 logger = logging.getLogger("dvs.orchestrator")
@@ -678,11 +679,11 @@ class Orchestrator(JudgeMixin):
 
         # 根任务入队
         await queue.put((cfg.function_name, cfg.source_file, cfg.line_hint,
-                         cfg.model_copy(deep=True), root_task_id, 0, tainted_context, None, ""))
+                         cfg.model_copy(deep=True), root_task_id, 0, tainted_context, None, "", ""))
 
         async def process_item(item: tuple) -> None:
             self._raise_if_cancelled()
-            func_name, src_file, line_hint, task_cfg, tid, dep, taint_ctx, parent_session_file, followup_id = item
+            func_name, src_file, line_hint, task_cfg, tid, dep, taint_ctx, parent_session_file, followup_id, context_id = item
             try:
                 _override_candidates = _find_virtual_override_candidates_if_stub(os.path.abspath(task_cfg.cwd), func_name, src_file, line_hint)
             except Exception:
@@ -703,7 +704,7 @@ class Orchestrator(JudgeMixin):
                     _sub_cfg.source_file = _rs
                     _sub_cfg.line_hint = _rl
                     _sub_tid = tid + f"-override{index}-{_rf[:25]}"
-                    await queue.put((_rf, _rs, _rl, _sub_cfg, _sub_tid, dep, taint_ctx, parent_session_file, ""))
+                    await queue.put((_rf, _rs, _rl, _sub_cfg, _sub_tid, dep, taint_ctx, parent_session_file, "", ""))
                 return
             try:
                 _rf, _rs, _rl, _rr = _resolve_virtual_override_if_stub(os.path.abspath(task_cfg.cwd), func_name, src_file, line_hint)
@@ -720,6 +721,8 @@ class Orchestrator(JudgeMixin):
             if followup_id:
                 try:
                     VulnScanStore(graph_db_path).update_followup_status(followup_id, "running")
+                    if context_id:
+                        VulnScanStore(graph_db_path).update_analysis_context_status(context_id, "running")
                 except Exception:
                     pass
 
@@ -806,6 +809,8 @@ class Orchestrator(JudgeMixin):
                         followup_id,
                         "analyzed" if result.status.value == "passed" else "error",
                     )
+                    if context_id:
+                        VulnScanStore(graph_db_path).update_analysis_context_status(context_id, "analyzed" if result.status.value == "passed" else "error")
                 except Exception:
                     pass
             df_path = _find_dataflow_file(out_dir, func_name)
@@ -892,12 +897,15 @@ class Orchestrator(JudgeMixin):
                                 pass
                         continue
                     callee = CalleeRef(function_name=resolved.function_name, file=resolved.source_file or callee.file, line=(f"L{resolved.line}" if resolved.line else callee.line), tainted_params=callee.tainted_params, description=callee.description, followup_id=callee.followup_id)
-                    norm_params, taint_sig = normalize_taint_params(callee.tainted_params)
+                    raw_params = [x.strip() for x in (callee.tainted_params or "").split(",") if x.strip()]
+                    callsite = analyze_callsite(target_dir, callee.file or src_file, callee.line, callee.function_name)
+                    norm_params, taint_sig = map_taint_signature(raw_params, callsite.actual_args) if callsite.actual_args else normalize_taint_params(callee.tainted_params)
                     meta = fup_meta.get(callee.followup_id, {})
                     try:
                         validation_facts = json.loads(str(meta.get("validation_facts_json") or "[]"))
                     except Exception:
                         validation_facts = []
+                    validation_facts = list(validation_facts or []) + list(callsite.derived_validations or [])
                     validation_state = normalize_validation_state(validation_facts)
                     if meta.get("validation_signature"):
                         validation_state = validation_state.__class__(
@@ -918,6 +926,7 @@ class Orchestrator(JudgeMixin):
                         taint_signature=taint_sig,
                         validation_signature=validation_state.signature,
                         validation_risk_rank=validation_state.risk_rank,
+                        validation_facts=validation_state.facts,
                     )
                     if covering:
                         self._emit("trace_skip", tid, function=callee.function_name,
@@ -958,6 +967,7 @@ class Orchestrator(JudgeMixin):
                             risk_class=validation_state.risk_class,
                             status="queued",
                             created_from_followup_id=callee.followup_id,
+                            validation_facts=validation_state.facts,
                         )
                     except Exception:
                         pass
@@ -986,7 +996,8 @@ class Orchestrator(JudgeMixin):
                     if "# 调用者传入的脏数据" in ctx_base:
                         ctx_base = ctx_base.split("# 调用者传入的脏数据")[0].strip()
                     sub_cfg.context = ctx_base
-                    _callee_params = normalize_taint_params(callee.tainted_params)[0] or [x.strip() for x in (callee.tainted_params or "").split(",") if x.strip()]
+                    _callsite_for_params = analyze_callsite(target_dir, callee.file or src_file, callee.line, callee.function_name)
+                    _callee_params = map_taint_signature([x.strip() for x in (callee.tainted_params or "").split(",") if x.strip()], _callsite_for_params.actual_args)[0] or normalize_taint_params(callee.tainted_params)[0] or [x.strip() for x in (callee.tainted_params or "").split(",") if x.strip()]
                     sub_cfg.taint_params = _callee_params or ["all"]
                     sub_cfg.taint_details = [
                         {"name": p, "description": f"由 {func_name} 在 {callee.line or 'unknown'} 调用传入", "source_kind": "call_argument"}
@@ -996,7 +1007,8 @@ class Orchestrator(JudgeMixin):
                         f"函数 {callee.function_name} 被 {func_name} 在 {callee.line} 调用。\n"
                         f"污染参数: {callee.tainted_params}\n说明: {callee.description}"
                     )
-                    sub_tid = tid + f"-d{dep + 1}-{callee.function_name[:25]}"
+                    suffix = (callee.followup_id or hashlib.sha1((callee.function_name + callee.tainted_params + callee.line).encode()).hexdigest())[-6:]
+                    sub_tid = tid + f"-d{dep + 1}-{callee.function_name[:25]}-{suffix}"
                     sub_line_hint = _get_definition_line(
                         target_dir, callee.function_name, sub_file)
                     if not sub_line_hint:
@@ -1028,7 +1040,7 @@ class Orchestrator(JudgeMixin):
                     # 多个 callee 并发读取同一源文件是安全的；各自写入独立目标文件无冲突
                     await queue.put((callee.function_name, sub_file, sub_line_hint, sub_cfg,
                                      sub_tid, dep + 1, tainted_ctx_str,
-                                     completed_session_file or None, callee.followup_id))
+                                     completed_session_file or None, callee.followup_id, context_id))
 
             if vuln_mining_task is not None:
                 try:
@@ -1051,12 +1063,15 @@ class Orchestrator(JudgeMixin):
                 except asyncio.CancelledError:
                     return
                 except Exception as e:
-                    # item layout: (func_name, src_file, line_hint, task_cfg, tid, dep, ..., followup_id)
+                    # item layout: (func_name, src_file, line_hint, task_cfg, tid, dep, ..., followup_id, context_id)
                     err_tid = item[4] if len(item) > 4 else "?"
                     err_followup_id = item[8] if len(item) > 8 else ""
+                    err_context_id = item[9] if len(item) > 9 else ""
                     if err_followup_id:
                         try:
                             VulnScanStore(graph_db_path).update_followup_status(err_followup_id, "error", reason=str(e))
+                            if err_context_id:
+                                VulnScanStore(graph_db_path).update_analysis_context_status(err_context_id, "error")
                         except Exception:
                             pass
                     logger.exception("recursive process_item failed task_id=%s function=%s", err_tid, item[0] if item else "?")
