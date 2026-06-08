@@ -188,7 +188,6 @@ def build_intake_payload(
                 "reported_severity": _normalize_severity(finding.severity),
             },
             "dataflow_vuln_scan": {
-                "graph_storage": "sqlite",
                 "finding_id": finding.finding_id,
                 "function_name": function_name,
                 "vuln_type": finding.vuln_type,

@@ -42,22 +42,8 @@ def load_vuln_scan_graph(run_root: str | Path) -> dict[str, Any]:
             continue
         seen.add(resolved)
         db_path = resolved / "vuln-scan.sqlite"
-        graph_json = resolved / "vuln-scan-graph.json"
         if db_path.exists():
             return VulnScanStore(db_path).export_json()
-        if graph_json.exists():
-            try:
-                return json.loads(graph_json.read_text(encoding="utf-8"))
-            except Exception as exc:
-                return {
-                    "error": f"failed to read graph json: {exc}",
-                    "analysis_runs": [],
-                    "taint_nodes": [],
-                    "taint_edges": [],
-                    "followups": [],
-                    "vulnerability_findings": [],
-                    "context_forks": [],
-                }
     return {"analysis_runs": [], "taint_nodes": [], "taint_edges": [], "followups": [], "vulnerability_findings": [], "context_forks": []}
 
 

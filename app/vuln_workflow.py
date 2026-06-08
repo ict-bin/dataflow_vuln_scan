@@ -151,8 +151,6 @@ class DataflowVulnWorkflow:
         self.ws = self.out_dir / "workspace-worker-0"
         self.ws.mkdir(parents=True, exist_ok=True)
         self.sessions = self.out_dir / "sessions"
-        self.sessions.mkdir(parents=True, exist_ok=True)
-        self.graph_json_path = self.out_dir / "vuln-scan-graph.json"
 
     def _emit(self, etype: str, **data: Any) -> None:
         try:
@@ -493,30 +491,18 @@ class DataflowVulnWorkflow:
         final_output_root = self.out_dir.parent / "output"
         final_output_root.mkdir(parents=True, exist_ok=True)
         final_sqlite_path = final_output_root / "vuln-scan.sqlite"
-        final_graph_json_path = final_output_root / "vuln-scan-graph.json"
         try:
             shutil.copyfile(self.store.db_path, final_sqlite_path)
-        except OSError:
-            pass
-        try:
-            self.graph_json_path.write_text(json.dumps(graph_export, ensure_ascii=False, indent=2), encoding="utf-8")
-        except OSError:
-            pass
-        try:
-            final_graph_json_path.write_text(json.dumps(graph_export, ensure_ascii=False, indent=2), encoding="utf-8")
         except OSError:
             pass
         result.upstream_entry_metadata = dict(result.upstream_entry_metadata or {})
         result.upstream_entry_metadata["vuln_scan"] = {
             "sqlite_path": str(final_sqlite_path if final_sqlite_path.exists() else self.store.db_path),
-            "graph_json_path": str(final_graph_json_path if final_graph_json_path.exists() else str(final_output_root / "vuln-scan-graph.json")),
             "epoch_sqlite_path": str(self.store.db_path),
-            "epoch_graph_json_path": str(self.graph_json_path),
             "vulnerabilities_dir": str(self.vuln_root),
-            "graph_storage": "sqlite",
         }
         # 兼容清理：旧版本/异常模型可能仍写文件，中间产物不再保留，SQLite 是唯一图谱来源。
-        for _json_path in [self.ws / "taint-graph.json", self.ws / "taintvars.json", self.ws / "tainted.list", self.out_dir / "taint-graph.validation.json", *self.ws.glob("dataflow-*.md"), *self.ws.glob("taint-flow-*.md")]:
+        for _json_path in [self.ws / "taint-graph.json", self.ws / "taintvars.json", self.ws / "tainted.list", self.ws / "vuln-scan-graph.json", self.out_dir / "taint-graph.validation.json", *self.ws.glob("dataflow-*.md"), *self.ws.glob("taint-flow-*.md")]:
             try:
                 if _json_path.exists():
                     _json_path.unlink()
