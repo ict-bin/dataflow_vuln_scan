@@ -21,7 +21,7 @@ from app.time_utils import isoformat_local
 from app.service.worker_snapshot import build_worker_cluster_snapshot
 from app.service.session_index import build_session_catalog
 from app.service.task_service import generate_prompt_from_path, get_task_service
-from app.vuln_graph_service import load_vuln_scan_graph, summarize_graph
+from app.vuln_graph_service import load_vuln_scan_graph, summarize_graph, build_trace_tree
 from .deps import ensure_admin_user, ensure_project_access, get_current_user
 
 from . import router
@@ -1758,11 +1758,13 @@ def get_task_vuln_graph(task_id: str, db: Session = Depends(get_db)):
     latest_run_root = _latest_epoch_run_root(root) if str(root) else Path()
     run_root = latest_run_root if latest_run_root.exists() else root / "run"
     graph = load_vuln_scan_graph(run_root)
+    trace_tree = build_trace_tree(graph)
     return {
         "task_id": task_id,
         "available": bool(graph.get("analysis_runs") or graph.get("taint_nodes") or graph.get("taint_edges") or graph.get("vulnerability_findings")),
         "run_root": str(run_root),
         "summary": summarize_graph(graph),
+        "trace_tree": trace_tree,
         "graph": graph,
     }
 

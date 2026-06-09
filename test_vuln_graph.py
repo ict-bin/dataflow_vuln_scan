@@ -88,6 +88,7 @@ class VulnGraphStoreTests(unittest.TestCase):
             "nodes": 1,
             "edges": 1,
             "followups": 0,
+            "executed_followups": 0,
             "findings": 1,
         }, summarize_graph(graph))
         self.assertEqual("buf", graph["taint_nodes"][0]["symbol"])
