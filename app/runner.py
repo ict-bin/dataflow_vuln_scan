@@ -734,14 +734,14 @@ async def run_agent(
                     pi_max_retries=pi_max_retries,
                     pi_retry_delay=pi_retry_delay,
                 )
-                return await asyncio.wait_for(coro, timeout=timeout_seconds) if timeout_seconds else await coro
+                return await coro
             except asyncio.TimeoutError:
                 timeout_failures += 1
                 r = AgentResult()
                 r.error = (
-                    f"agent step timed out after {timeout_seconds:.0f}s"
+                    f"agent step idle timed out after {timeout_seconds:.0f}s"
                     if timeout_seconds else
-                    "agent step timed out"
+                    "agent step idle timed out"
                 )
                 r.exit_code = -1
                 can_retry = timeout_retry_enabled and (
@@ -752,7 +752,7 @@ async def run_agent(
                 delay = _backoff(retry_delay, timeout_failures)
                 if on_stream:
                     on_stream(
-                        f"\n⏱️ 智能体执行超时，{delay:.0f}s 后重试 "
+                        f"\n⏱️ 智能体空闲超时，{delay:.0f}s 后重试 "
                         f"({timeout_failures}/{_fmt_max(timeout_max_retries)})...\n"
                     )
                 await asyncio.sleep(delay)
@@ -934,15 +934,26 @@ async def _run_with_api_retry(
             await proc.stdin.drain()
 
             buffer = b""
+            last_activity_at = time.monotonic()
+
+            def _mark_activity() -> None:
+                nonlocal last_activity_at
+                last_activity_at = time.monotonic()
             while True:
-                chunk = await proc.stdout.read(4096)
+                try:
+                    chunk = await asyncio.wait_for(proc.stdout.read(4096), timeout=1.0)
+                except asyncio.TimeoutError:
+                    if timeout_seconds and (time.monotonic() - last_activity_at) >= timeout_seconds:
+                        raise asyncio.TimeoutError
+                    continue
                 if not chunk:
                     break
+                _mark_activity()
                 buffer += chunk
                 while b"\n" in buffer:
                     line, buffer = buffer.split(b"\n", 1)
                     ended = _process_line(
-                        line.decode("utf-8", errors="replace"), result, on_stream
+                        line.decode("utf-8", errors="replace"), result, on_stream, _mark_activity
                     )
                     if ended:
                         agent_ended = True
@@ -951,7 +962,7 @@ async def _run_with_api_retry(
                     break
             if buffer.strip():
                 _process_line(
-                    buffer.decode("utf-8", errors="replace"), result, on_stream
+                    buffer.decode("utf-8", errors="replace"), result, on_stream, _mark_activity
                 )
 
             # agent_ended 后必须继续 drain stdout 直到 EOF，
@@ -978,7 +989,7 @@ async def _run_with_api_retry(
                         while b"\n" in _buf2:
                             _l2, _buf2 = _buf2.split(b"\n", 1)
                             if _process_line(_l2.decode("utf-8", errors="replace"),
-                                             result, on_stream):
+                                             result, on_stream, _mark_activity):
                                 break
                         else:
                             continue
@@ -1164,11 +1175,14 @@ def _process_line(
     line: str,
     result: AgentResult,
     on_stream: Callable[[str], None] | None,
+    on_activity: Callable[[], None] | None = None,
 ) -> bool:
     """解析一行 JSONL。返回 True 表示收到 agent_end（调用方应停止读取）。"""
     line = line.strip()
     if not line:
         return False
+    if on_activity:
+        on_activity()
     try:
         event = json.loads(line)
     except json.JSONDecodeError:
