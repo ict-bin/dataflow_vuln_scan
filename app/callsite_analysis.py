@@ -108,17 +108,21 @@ def analyze_callsite(source_root: str, source_file: str, line_hint: str, callee_
     parser = Parser(); parser.language = _language(path)
     tree = parser.parse(data)
     short = callee_function.split("::")[-1]
-    candidates = []
+    exact: list[Any] = []
+    nearby: list[Any] = []
 
     def visit(node):
         if node.type == "call_expression" and _callee_name(node, data) == short:
             start = int(node.start_point[0]) + 1
             end = int(node.end_point[0]) + 1
-            if not target_line or start <= target_line <= end or abs(start - target_line) <= 2:
-                candidates.append(node)
+            if target_line and start <= target_line <= end:
+                exact.append(node)
+            elif not target_line or abs(start - target_line) <= 2:
+                nearby.append(node)
         for child in node.children:
             visit(child)
     visit(tree.root_node)
+    candidates = exact if exact else nearby
     # Do not infer validations when multiple same-line callsites are possible;
     # otherwise a guarded call can incorrectly sanitize an unguarded sibling.
     if len(candidates) != 1:
