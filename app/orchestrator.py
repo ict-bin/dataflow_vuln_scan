@@ -881,6 +881,10 @@ class Orchestrator(JudgeMixin):
                 if not callees:
                     self._emit("trace_skip", tid, function=func_name, reason="no followups")
                 valid: list[CalleeRef] = []
+                context_by_callee: dict[str, str] = {}
+                facts_by_callee: dict[str, list[dict]] = {}
+                def _callee_key(c: CalleeRef) -> str:
+                    return c.followup_id or f"{c.function_name}|{c.file}|{c.line}|{c.tainted_params}"
                 for callee in callees:
                     resolved_name, resolved_file = _resolve_function_pointer_followup(target_dir, callee, func_name)
                     if resolved_name != callee.function_name:
@@ -952,7 +956,8 @@ class Orchestrator(JudgeMixin):
                     analyzed.add(c_key)
                     context_id = "ctx_" + hashlib.sha1(c_key.encode()).hexdigest()[:16]
                     try:
-                        VulnScanStore(graph_db_path).upsert_analysis_context(
+                        _store_ctx = VulnScanStore(graph_db_path)
+                        _store_ctx.upsert_analysis_context(
                             context_id=context_id,
                             function_identity=function_identity,
                             source_file=callee.file,
@@ -965,8 +970,18 @@ class Orchestrator(JudgeMixin):
                             created_from_followup_id=callee.followup_id,
                             validation_facts=validation_state.facts,
                         )
+                        _store_ctx.record_constraints(
+                            run_id=getattr(workflow, "run_id", "") if workflow is not None else tid,
+                            followup_id=callee.followup_id,
+                            source_file=src_file,
+                            function_name=func_name,
+                            line=callsite_line or callee.line,
+                            facts=validation_state.facts,
+                        )
                     except Exception:
                         pass
+                    context_by_callee[_callee_key(callee)] = context_id
+                    facts_by_callee[_callee_key(callee)] = validation_state.facts
                     if callee.followup_id:
                         try:
                             VulnScanStore(graph_db_path).update_followup_status(callee.followup_id, "queued")
@@ -1036,7 +1051,8 @@ class Orchestrator(JudgeMixin):
                     # 多个 callee 并发读取同一源文件是安全的；各自写入独立目标文件无冲突
                     await queue.put((callee.function_name, sub_file, sub_line_hint, sub_cfg,
                                      sub_tid, dep + 1, tainted_ctx_str,
-                                     completed_session_file or None, callee.followup_id, context_id))
+                                     completed_session_file or None, callee.followup_id,
+                                     context_by_callee.get(_callee_key(callee), "")))
 
             if vuln_mining_task is not None:
                 try:
