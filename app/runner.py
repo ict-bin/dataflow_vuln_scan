@@ -559,6 +559,7 @@ async def _run_with_context_overflow_recovery(
     retry_delay: float,
     pi_max_retries: int,
     pi_retry_delay: float,
+    timeout_seconds: float | None = None,
 ) -> AgentResult:
     result = await _run_with_pi_retry(
         args=args,
@@ -572,6 +573,7 @@ async def _run_with_context_overflow_recovery(
         retry_delay=retry_delay,
         pi_max_retries=pi_max_retries,
         pi_retry_delay=pi_retry_delay,
+        timeout_seconds=timeout_seconds,
     )
     if not _is_context_overflow_error(result.error):
         return result
@@ -604,6 +606,7 @@ async def _run_with_context_overflow_recovery(
             retry_delay=retry_delay,
             pi_max_retries=pi_max_retries,
             pi_retry_delay=pi_retry_delay,
+            timeout_seconds=timeout_seconds,
         )
 
     if single_input_tokens > single_input_limit:
@@ -631,6 +634,7 @@ async def _run_with_context_overflow_recovery(
         retry_delay=retry_delay,
         pi_max_retries=pi_max_retries,
         pi_retry_delay=pi_retry_delay,
+        timeout_seconds=timeout_seconds,
     )
 
 
@@ -734,6 +738,7 @@ async def run_agent(
                     retry_delay=retry_delay,
                     pi_max_retries=pi_max_retries,
                     pi_retry_delay=pi_retry_delay,
+                    timeout_seconds=timeout_seconds,
                 )
                 return await coro
             except asyncio.TimeoutError:
@@ -777,6 +782,7 @@ async def _run_with_pi_retry(
     retry_delay: float,
     pi_max_retries: int,
     pi_retry_delay: float,
+    timeout_seconds: float | None = None,
 ) -> AgentResult:
     """外层循环：处理 pi 进程拉起失败、崩溃、致命错误。"""
     # cwd 不存在是致命错误（目录被删除等），不进入重试
@@ -807,6 +813,7 @@ async def _run_with_pi_retry(
                 on_stream=on_stream,
                 max_retries=max_retries,
                 retry_delay=retry_delay,
+                timeout_seconds=timeout_seconds,
             )
 
             # ── 致命错误检测（在 pi 进程重试前拦截）──
@@ -884,6 +891,7 @@ async def _run_with_api_retry(
     on_stream: Callable[[str], None] | None,
     max_retries: int,
     retry_delay: float,
+    timeout_seconds: float | None = None,
 ) -> AgentResult:
     """内层循环：启动 pi 子进程，处理 API 级错误重试。"""
     api_attempt = 0
