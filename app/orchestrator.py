@@ -908,13 +908,8 @@ class Orchestrator(JudgeMixin):
                         validation_facts = []
                     validation_facts = list(validation_facts or []) + list(callsite.derived_validations or [])
                     validation_state = normalize_validation_state(validation_facts)
-                    if meta.get("validation_signature"):
-                        validation_state = validation_state.__class__(
-                            facts=validation_state.facts,
-                            signature=str(meta.get("validation_signature") or validation_state.signature),
-                            risk_rank=int(meta.get("validation_risk_rank") or validation_state.risk_rank),
-                            risk_class=validation_state.risk_class,
-                        )
+                    # Recompute from combined model + callsite facts. Do not let stale
+                    # followup metadata override validations inferred from exact callsite.
                     function_identity = resolved.func_hash or resolved.source_file + ":" + resolved.function_name
                     c_key = f"{function_identity}:{taint_sig}:{validation_state.signature}"
                     if callee.function_name == func_name and taint_sig == normalize_taint_params(task_cfg.taint_params)[1]:
