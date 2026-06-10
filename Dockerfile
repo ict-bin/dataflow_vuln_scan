@@ -101,7 +101,7 @@ ENV SESSION_DIR=/data/sessions
 EXPOSE 3000
 
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
-    CMD curl -f http://localhost:${PORT}/health || exit 1
+    CMD curl -f http://localhost:18080/healthz || exit 1
 
 # ═══ 入口脚本 ═════════════════════════════════════════════════════════════════
 # 启动前自动链接 models.json（如果挂载了的话）
@@ -110,4 +110,4 @@ RUN sed -i 's/\r$//' /entrypoint.sh && chmod +x /entrypoint.sh
 ENTRYPOINT ["/entrypoint.sh"]
 
 # 默认 REST API，覆盖: python3 cli.py /data/config/config.json
-CMD ["python3", "main.py"]
+CMD ["./scripts/start-with-probe.sh", "python3", "main.py"]

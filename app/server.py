@@ -91,6 +91,10 @@ _probe_started_at = 0.0
 logger = logging.getLogger("dvs.server")
 
 
+def _external_probe_process_enabled() -> bool:
+    return str(os.environ.get("SECFLOW_EXTERNAL_PROBE_PROCESS", "")).strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _cached_summary(key: str, builder: Callable[[], Any]) -> Any:
     now = time.monotonic()
     with _summary_cache_lock:
@@ -155,7 +159,8 @@ async def lifespan(app: FastAPI):
     global _probe_shutdown, _probe_started_at
     _probe_shutdown = False
     _probe_started_at = time.time()
-    _ensure_probe_server_started()
+    if not _external_probe_process_enabled():
+        _ensure_probe_server_started()
     await get_runtime_bootstrap().start(app)
     lag_task = asyncio.create_task(_control_plane_loop_monitor(), name="dvs_control_plane_loop_monitor")
 
@@ -166,7 +171,8 @@ async def lifespan(app: FastAPI):
     with contextlib.suppress(asyncio.CancelledError):
         await lag_task
     await get_runtime_bootstrap().stop()
-    _stop_probe_server()
+    if not _external_probe_process_enabled():
+        _stop_probe_server()
 
 
 app = FastAPI(title="dataflow_vuln_scan", version="2.0.0", lifespan=lifespan)
