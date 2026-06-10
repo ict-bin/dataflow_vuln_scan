@@ -863,10 +863,12 @@ def _latest_epoch_run_root(root: Path) -> Path:
     epochs_root = run_root / "epochs"
     if not epochs_root.exists():
         return run_root
-    candidates = [path for path in epochs_root.iterdir() if path.is_dir()]
+    # Only numeric epoch directories are execution attempts.  Auxiliary folders
+    # such as run/epochs/output contain intermediate snapshots and must not win.
+    candidates = [path for path in epochs_root.iterdir() if path.is_dir() and path.name.isdigit()]
     if not candidates:
         return run_root
-    return sorted(candidates, key=lambda path: path.name)[-1]
+    return sorted(candidates, key=lambda path: int(path.name))[-1]
 
 
 def _epoch_label(path: Path) -> str | None:

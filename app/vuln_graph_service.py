@@ -14,26 +14,28 @@ def load_vuln_scan_graph(run_root: str | Path) -> dict[str, Any]:
     if root.parts and "epochs" in root.parts:
         epoch_idx = list(root.parts).index("epochs")
         run_dir = Path(*root.parts[:epoch_idx])
-        candidates.extend([
-            root,
-            run_dir,
-        ])
+        task_output_dir = run_dir.parent / "output"
+        # Prefer final archives over epoch-local snapshots so the UI sees the
+        # completed recursive graph instead of an early pending followup view.
+        candidates.extend([task_output_dir, run_dir])
+        if root.name.isdigit():
+            candidates.append(root)
         epochs_dir = run_dir / "epochs"
-        if root.name == "output" and root.parent == epochs_dir and epochs_dir.exists():
+        if epochs_dir.exists():
             epoch_dirs = sorted(
                 [
                     path for path in epochs_dir.iterdir()
                     if path.is_dir() and path.name.isdigit()
                 ],
+                key=lambda path: int(path.name),
                 reverse=True,
             )
             candidates.extend(epoch_dirs)
-        candidates.append(run_dir.parent / "output")
     else:
         candidates.extend([
-            root,
             root / "output",
             root.parent / "output",
+            root,
         ])
     seen: set[Path] = set()
     for candidate in candidates:
