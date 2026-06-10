@@ -374,7 +374,7 @@ def _build_args(
         args.extend(["--model", model])
     if tools:
         args.extend(["--tools", ",".join(tools)])
-    if thinking_level and thinking_level != "off":
+    if thinking_level:
         args.extend(["--thinking", thinking_level])
     return args
 

@@ -61,6 +61,7 @@ RUN cp tools/extract_func.py /usr/local/bin/extract_func \
 # pi 的全局配置目录，models.json 放这里才能被 pi 识别
 # 容器启动脚本会将 /data/config/models.json 链接到此处
 ENV PI_CODING_AGENT_DIR=/root/.pi/agent
+COPY config/settings.json /root/.pi/agent/settings.json
 RUN mkdir -p /root/.pi/agent/bin \
     # 将 write-dataflow skill 安装到 pi 全局发现目录
     # ~/.pi/agent/skills/ 是 pi 全局 skill 目录，任何 cwd 都能发现

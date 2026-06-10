@@ -1,4 +1,5 @@
 {
   "defaultProvider": "gaiasec",
-  "defaultModel": "auto"
+  "defaultModel": "auto",
+  "defaultThinkingLevel": "off"
 }
