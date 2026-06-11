@@ -1343,6 +1343,74 @@ def _write_models_json_from_db(db: Session) -> None:
         logger.warning("_write_models_json_from_db failed: %s", _exc, exc_info=True)
 
 
+def _write_settings_json(db: Session | None = None) -> None:
+    """写入 pi 的 settings.json，包含 compaction（自动上下文压缩）配置。
+
+    优先级：配置中心 > 服务配置文件 > 内置默认值。
+    每次任务执行前调用，确保运行中的 Worker 使用最新配置。
+    """
+    import json as _json
+    from pathlib import Path as _Path
+    from app.service.llm_provider_sync import _PI_DIR
+
+    pi_dir = _Path(_PI_DIR)
+    pi_dir.mkdir(parents=True, exist_ok=True)
+    settings_path = pi_dir / "settings.json"
+
+    # Load existing settings (if any) to preserve manually configured fields
+    existing: dict[str, object] = {}
+    try:
+        if settings_path.exists() and not settings_path.is_symlink():
+            existing = _json.loads(settings_path.read_text(encoding="utf-8")) or {}
+    except Exception:
+        pass
+
+    # Compaction defaults
+    compaction = {
+        "enabled": True,
+        "reserveTokens": 16384,
+        "keepRecentTokens": 20000,
+    }
+
+    # Override from config center if available
+    try:
+        from app.config import get_service_yaml
+        import httpx
+        svc_yaml = get_service_yaml()
+        url = f"{svc_yaml.configcenter.base_url.rstrip('/')}/service/llm/providers"
+        headers = {}
+        if svc_yaml.auth_service.service_machine_token:
+            headers["Authorization"] = f"Bearer {svc_yaml.auth_service.service_machine_token}"
+        resp = httpx.get(url, headers=headers, timeout=svc_yaml.configcenter.timeout)
+        if resp.status_code == 200:
+            data = resp.json()
+            cc_compaction = data.get("compaction") if isinstance(data, dict) else None
+            if isinstance(cc_compaction, dict):
+                if "enabled" in cc_compaction:
+                    compaction["enabled"] = bool(cc_compaction["enabled"])
+                if "reserveTokens" in cc_compaction:
+                    compaction["reserveTokens"] = int(cc_compaction["reserveTokens"])
+                if "keepRecentTokens" in cc_compaction:
+                    compaction["keepRecentTokens"] = int(cc_compaction["keepRecentTokens"])
+    except Exception:
+        pass
+
+    existing["compaction"] = compaction
+    existing.setdefault("defaultProvider", existing.get("defaultProvider") or "gaiasec")
+    existing.setdefault("defaultModel", existing.get("defaultModel") or "auto")
+    existing.setdefault("defaultThinkingLevel", existing.get("defaultThinkingLevel") or "off")
+
+    tmp = settings_path.with_suffix(".json.tmp")
+    tmp.write_text(_json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(settings_path)
+    logger.info(
+        "已写入 pi settings.json compaction=%s reserveTokens=%s keepRecentTokens=%s",
+        compaction["enabled"],
+        compaction["reserveTokens"],
+        compaction["keepRecentTokens"],
+    )
+
+
 def generate_prompt_from_path(input_path: str) -> str:
     """Generate a default Chinese data flow analysis prompt from the input path."""
     path_lower = input_path.lower()
@@ -2546,6 +2614,7 @@ class TaskService:
             _write_input_manifest(row)
 
             _write_models_json_from_db(db)
+            _write_settings_json(db)
             svc = _load_svc_config_from_db(db, row.project_id)
 
             # Apply per-task config overrides

@@ -1,5 +1,10 @@
 {
   "defaultProvider": "gaiasec",
   "defaultModel": "auto",
-  "defaultThinkingLevel": "off"
+  "defaultThinkingLevel": "off",
+  "compaction": {
+    "enabled": true,
+    "reserveTokens": 16384,
+    "keepRecentTokens": 20000
+  }
 }
