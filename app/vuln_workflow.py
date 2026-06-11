@@ -592,6 +592,18 @@ class DataflowVulnWorkflow:
             self._emit("vuln_scan_error", function=self.func_name, error=str(exc), depth=self.dep)
             return []
 
+    async def run(self) -> TaskResult:
+        result = await self.run_taint_tracking_only()
+        await self.run_vuln_mining_after_taint(result)
+        return result
+
+    def _make_result(self, final_output: str, agent_result: Any, passed: bool, completion_reason: str, *, rounds: list[RoundResult] | None = None, total_tokens: TokenUsage | None = None) -> TaskResult:
+        status = TaskStatus.PASSED if passed else TaskStatus.COMPLETED_LIMITED
+        entry_metadata = _build_upstream_entry_metadata(self.cfg)
+        taint_hint_summary = _build_taint_hint_summary(self.cfg, self.taint_params)
+        output = _prepend_upstream_hint_section(final_output, entry_metadata=entry_metadata, taint_hint_summary=taint_hint_summary)
+        return TaskResult(task_id=self.task_id, task=self.cfg.task, status=status, analysis_status=status.value, completion_reason=completion_reason, upstream_entry_metadata=entry_metadata, taint_hint_summary=taint_hint_summary, final_output=output, rounds=rounds or [], total_tokens=total_tokens or TokenUsage(), error=(completion_reason if not passed else None))
+
 
 def build_function_summary_from_result(
     result: TaskResult,
