@@ -111,6 +111,60 @@ def _resolve_function_pointer_followup(target_dir: str, callee: CalleeRef, calle
     return raw, ""
 
 
+def _sanitize_callee_name(raw: str) -> list[str]:
+    """Generate progressively cleaned candidate names from LLM-produced callee names.
+
+    LLM workers sometimes embed qualifiers inside the function name rather than putting
+    them in the reason/description field.  This helper strips common qualifier patterns
+    so the FunctionResolver gets a plain C/C++ identifier it can match.
+    """
+    raw = raw.strip().strip("`")
+    candidates: list[str] = [raw]
+
+    # 1.  Strip trailing parenthesised qualifier (only when there is content before it):
+    #    "px_find_combo (通过 ...)" -> "px_find_combo"
+    #    "next_client_auth_hook (函数指针)" -> "next_client_auth_hook"
+    #    Avoid matching the entire string when it IS the wrapping paren.
+    cleaned = re.sub(r"^(.+)\s*[\(（][^)）]*[\)）]\s*$", r"\1", raw)
+    if cleaned != raw:
+        candidates.append(cleaned.strip())
+
+    # 2.  Strip wrapping parentheses:
+    #    "(next_ProcessUtility_hook)" -> "next_ProcessUtility_hook"
+    m = re.match(r"^[\(（]([^)）]+)[\)）]$", cleaned.strip())
+    if m:
+        inner = m.group(1).strip()
+        if inner != cleaned:
+            candidates.append(inner)
+
+    # 3.  Pointer-through-member patterns (virtual dispatch):
+    #    "pf->op->pull (function pointer)"  ->  "pull"
+    #    "mp->op->push (函数指针)"         ->  "push"
+    if "->" in cleaned:
+        method = cleaned.rsplit("->", 1)[-1].strip()
+        if method and method != cleaned:
+            candidates.append(method)
+
+    # 4.  Slash-separated alternatives (LLM suggests multiple):
+    #    "ossl_aes_cbc_decrypt / ossl_aes_ecb_decrypt / aes_cbc_decrypt"
+    if "/" in cleaned:
+        for part in cleaned.split("/"):
+            part = part.strip()
+            if part and part != cleaned:
+                candidates.append(part)
+
+    # 5.  Drop placeholder middle scope:
+    #    "ZmqSocket::sock_::RecvMsg" -> "ZmqSocket::RecvMsg"
+    if "::" in cleaned and cleaned.count("::") >= 2:
+        parts = cleaned.split("::")
+        # If the second-to-last part looks like a placeholder (short, lowercase,
+        # ends with underscore), try the name without it.
+        middle = parts[-2]
+        if len(middle) <= 6 and re.match(r"^[a-z_]+", middle):
+            candidates.append("::".join(parts[:-2] + parts[-1:]))
+
+    return [c for c in candidates if c.strip()]
+
     return f"round_{round_num:03d}"
 
 
@@ -890,9 +944,18 @@ class Orchestrator(JudgeMixin):
                     if resolved_name != callee.function_name:
                         callee = CalleeRef(function_name=resolved_name, file=resolved_file or callee.file, line=callee.line, tainted_params=callee.tainted_params, description=callee.description, followup_id=callee.followup_id)
                     callsite_line = callee.line
-                    resolved = resolver.resolve(callee.function_name, source_file_hint=callee.file or src_file, line_hint=callee.line)
-                    if not resolved.resolved:
-                        reason = "external followup" if _is_external_followup(callee) else resolved.reason or "not_in_source_root_funcdb"
+                    # Try to resolve the callee.  When the raw LLM-produced name fails,
+                    # attempt progressively cleaned variants (strip qualifiers, pointer
+                    # dereference chains, slash-separated alternatives).
+                    resolved = None
+                    for cname in _sanitize_callee_name(callee.function_name):
+                        resolved = resolver.resolve(cname, source_file_hint=callee.file or src_file, line_hint=callee.line)
+                        if resolved.resolved:
+                            if cname != callee.function_name:
+                                callee = CalleeRef(function_name=resolved.function_name, file=resolved.source_file or callee.file, line=(f"L{resolved.line}" if resolved.line else callee.line), tainted_params=callee.tainted_params, description=callee.description, followup_id=callee.followup_id)
+                            break
+                    if not resolved or not resolved.resolved:
+                        reason = "external followup" if _is_external_followup(callee) else (resolved.reason if resolved else "not_in_source_root_funcdb") or "not_in_source_root_funcdb"
                         self._emit("trace_skip", tid, function=callee.function_name,
                                    reason=reason)
                         if callee.followup_id:

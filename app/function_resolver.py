@@ -100,7 +100,7 @@ class FunctionResolver:
 
     def resolve(self, function_name: str, *, source_file_hint: str = "", line_hint: str = "") -> FunctionResolution:
         name = str(function_name or "").strip().strip("`")
-        if not re.match(r"^[A-Za-z_]\w*(?:::[A-Za-z_]\w*)?$", name):
+        if not re.match(r"^[A-Za-z_]\w*(?:::[A-Za-z_]\w*)*$", name):
             return FunctionResolution("unresolved", name, reason="invalid_name")
         hit = self._resolve_ea_funcdb(name, source_file_hint=source_file_hint, line_hint=line_hint)
         if hit.resolved:
