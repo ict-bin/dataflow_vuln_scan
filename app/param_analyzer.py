@@ -314,7 +314,7 @@ def analyze(callee_name: str, callee_file: str,
         )
 
     needs_seq = any(p.needs_sequential for p in params)
-    max_pri = max((p.priority for p in params), default=2)
+    max_pri = min((p.priority for p in params), default=2)
     reason_parts: list[str] = []
     for p in params:
         if p.priority == 0:
