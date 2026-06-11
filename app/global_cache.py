@@ -314,7 +314,7 @@ def compute_func_hash(source_root: str, source_file: str, func_name: str) -> str
                 if p.exists():
                     file_path = Path(source_root) / p
                     break
-        except Exception:
+        except (FileNotFoundError, subprocess.TimeoutExpired, subprocess.SubprocessError):
             pass
     if not file_path.exists():
         return ""
