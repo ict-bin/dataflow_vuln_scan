@@ -133,19 +133,36 @@ def analyze_callsite(source_root: str, source_file: str, line_hint: str, callee_
 
 
 def map_taint_signature(raw_params: list[str], actual_args: list[str]) -> tuple[list[str], str]:
+    """Normalise tainted parameter names into position-based signatures (arg1, arg2, ...).
+
+    The return value is used as part of the dedup key so two followups that pass
+    different variable names to the same positional parameter of the same function
+    are recognised as equivalent.
+    """
     mapped: set[str] = set()
-    for raw in raw_params:
+    used_positions: set[int] = set()
+    for i, raw in enumerate(raw_params):
         item = str(raw or "").strip()
+        # Explicit positional notation: "arg3" or "参数2"
         m = re.search(r"(?:arg|param|参数|第)\s*([0-9]+)", item.lower())
         if m:
-            mapped.add(f"arg{int(m.group(1))}")
+            pos = int(m.group(1))
+            mapped.add(f"arg{pos}")
+            used_positions.add(pos)
             continue
-        for idx, actual in enumerate(actual_args, start=1):
-            if item and (item == actual or item in actual or actual in item):
+        # Try to match by symbolic name against actual call-site arguments
+        matched = False
+        for idx, actual in enumerate(actual_args or [], start=1):
+            a = str(actual or "").strip()
+            if item and (item == a or item in a or a in item):
                 mapped.add(f"arg{idx}")
+                used_positions.add(idx)
+                matched = True
                 break
-        else:
-            if item:
-                mapped.add(item)
+        if not matched:
+            # Fallback: use positional index.  When the Worker lists params in
+            # order, this maps the first param to arg1, second to arg2, etc.
+            fallback = i + 1
+            mapped.add(f"arg{fallback}")
     result = sorted(mapped)
     return result, "+".join(result) if result else "none"

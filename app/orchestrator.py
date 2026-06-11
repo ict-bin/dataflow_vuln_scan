@@ -722,8 +722,8 @@ class Orchestrator(JudgeMixin):
         all_results: dict[str, TaskResult] = {}   # func_key -> TaskResult
         sub_dataflow_files: list[tuple[str, str]] = []
 
-        # 注册根函数
-        root_key = cfg.source_file + "::" + cfg.function_name
+        # 注册根函数（用 : 分隔符保持与后续 c_key 一致）
+        root_key = cfg.source_file + ":" + cfg.function_name
         analyzed.add(root_key)
 
         self._emit("task_start", root_task_id, task=cfg.task,
@@ -852,6 +852,27 @@ class Orchestrator(JudgeMixin):
                 completed_session_file = str(
                     result.upstream_entry_metadata.get("worker_session_file") or ""
                 )
+                # 将当前函数加入去重集合，防止后续 followup / tracker 回环到此函数
+                _item_tc_m = re.search(r'污染参数[:\uff1a]\s*([^\n]+)', taint_ctx or "")
+                _item_taints = task_cfg.taint_params or ([t.strip() for t in _item_tc_m.group(1).split(',')] if _item_tc_m else []) or ["all"]
+                _item_identity = f"{src_file}:{func_name}"
+                _item_taint_sig = normalize_taint_params(_item_taints)[1]
+                analyzed.add(f"{_item_identity}:{_item_taint_sig}:none")
+                try:
+                    _item_ctx_id = "ctx_" + hashlib.sha1(f"{_item_identity}:{_item_taint_sig}".encode()).hexdigest()[:16]
+                    VulnScanStore(graph_db_path).upsert_analysis_context(
+                        context_id=_item_ctx_id,
+                        function_identity=_item_identity,
+                        source_file=src_file,
+                        function_name=func_name,
+                        taint_signature=_item_taint_sig,
+                        validation_signature="none",
+                        validation_risk_rank=100,
+                        risk_class="no_validation",
+                        status="analyzed",
+                    )
+                except Exception:
+                    pass
 
             _relativize_round_artifacts(result, out_dir, root_out_dir)
 
@@ -889,7 +910,7 @@ class Orchestrator(JudgeMixin):
                 except OSError:
                     pass
 
-            func_key = src_file + "::" + func_name
+            func_key = src_file + ":" + func_name
             all_results[func_key] = result
 
             vuln_mining_task: asyncio.Task | None = None
@@ -1070,7 +1091,7 @@ class Orchestrator(JudgeMixin):
                     validation_state = normalize_validation_state(validation_facts)
                     # Recompute from combined model + callsite facts. Do not let stale
                     # followup metadata override validations inferred from exact callsite.
-                    function_identity = resolved.func_hash or resolved.source_file + ":" + resolved.function_name
+                    function_identity = resolved.func_hash or f"{resolved.source_file}:{resolved.function_name}:L{resolved.line}" if resolved.line else f"{resolved.source_file}:{resolved.function_name}"
                     c_key = f"{function_identity}:{taint_sig}:{validation_state.signature}"
                     if callee.function_name == func_name and taint_sig == normalize_taint_params(task_cfg.taint_params)[1]:
                         continue

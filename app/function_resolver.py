@@ -272,8 +272,7 @@ def normalize_taint_params(raw_params: Iterable[str] | str | None) -> tuple[list
     else:
         items = [str(x).strip() for x in raw_params]
     args: set[str] = set()
-    unknown = False
-    for raw in items:
+    for i, raw in enumerate(items):
         text = raw.strip()
         if not text or text in {"*", "无"}:
             continue
@@ -281,22 +280,24 @@ def normalize_taint_params(raw_params: Iterable[str] | str | None) -> tuple[list
         if low in {"all", "所有参数", "全部参数"}:
             args.add("all")
             continue
+        # Explicit positional notation
         m = re.search(r"(?:arg|param|参数|第)\s*([0-9]+)", low)
         if m:
             args.add(f"arg{int(m.group(1))}")
             continue
+        # Strip leading noise (C++ qualifiers, ampersands) and extract the symbol
         text = re.sub(r"^[^A-Za-z_&*]*", "", text)
         text = text.lstrip("&").strip()
         m = re.match(r"\*?\s*([A-Za-z_]\w*)", text)
         if m:
             sym = m.group(1)
             if sym.startswith("v") and sym[1:].isdigit():
-                unknown = True
+                args.add("unknown")
             else:
-                args.add(sym)
+                # Fallback to positional index so that different variable names
+                # passed to the same parameter slot produce the same signature.
+                args.add(f"arg{i + 1}")
         else:
-            unknown = True
-    if unknown:
-        args.add("unknown")
+            args.add("unknown")
     norm = sorted(args)
     return norm, "+".join(norm) if norm else "none"
