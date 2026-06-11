@@ -195,6 +195,8 @@ class CalleeRef(BaseModel):
     tainted_params: str = ""
     description: str = ""
     followup_id: str = ""
+    dispatch_kind: str = "direct_call"
+    tainted_nonlocal: list[dict] = Field(default_factory=list)
 
 
 class TraceNode(BaseModel):

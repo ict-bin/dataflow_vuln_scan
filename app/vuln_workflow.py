@@ -257,7 +257,9 @@ class DataflowVulnWorkflow:
             "请一个 Worker 在当前函数内同时分析所有污点，不要按污点拆分 worker。\n"
             "不要写任何中间产物文件；禁止创建 `taint-graph.json`、`tainted.list`、`taintvars.json`、`dataflow-*.md` 或 `taint-flow-*.md`。\n"
             "请在最终回复中直接输出一个 JSON 对象，包含 function/source_file/taints/edges/followups/termination。\n"
-            "`followups` 是唯一跟入点输出，每个元素必须包含 file/function/line/tainted_params/reason；服务端会直接写入 SQLite。\n"
+            "`followups` 是唯一跟入点输出，每个元素必须包含 file/function/line/tainted_params/reason/dispatch_kind/tainted_nonlocal/validations；服务端会直接写入 SQLite。\n"
+            "`dispatch_kind` 用于说明调用机制：direct_call/function_pointer/vtable_dispatch/hook_callback/macro/inline/unknown。\n"
+            "如果污点写入全局变量、静态变量或类成员变量，必须在相关 followup 的 `tainted_nonlocal` 中记录 symbol/kind/evidence，供后续 tracker 追踪使用点。\n"
             "每条 edge 都必须有 line/evidence/sanitizer_effect；终止边必须有 termination_reason。\n"
             "同时在报告中判断当前函数内是否存在漏洞候选，漏洞判断会由后续 fork 上下文复核。\n"
         )
@@ -489,7 +491,11 @@ class DataflowVulnWorkflow:
                 validation_state = normalize_validation_state(item.get("validations") or item.get("validation"), default_target=dst_symbol)
                 edges.append(TaintEdgeRecord(edge_id=eid, run_id=self.run_id, from_node_id=node_ids[0] if node_ids else "", to_node_id=_node_id(str(item.get("file") or self.src_file), fname, dst_symbol, self.dep + 1), source_file=self.src_file, function_name=self.func_name, from_symbol=src_symbol, to_symbol=dst_symbol, line=fline, operation="call_arg", evidence=str(item.get("reason") or item.get("evidence") or ""), validation=str(item.get("validation") or ""), validation_facts_json=json.dumps(validation_state.facts, ensure_ascii=False), validation_signature=validation_state.signature, validation_risk_rank=validation_state.risk_rank))
                 followup_id = "follow_" + hashlib.sha1((eid+fname).encode()).hexdigest()[:16]
-                followups.append(FollowupRecord(followup_id=followup_id, edge_id=eid, parent_node_id=node_ids[0] if node_ids else "", callee_file=str(item.get("file") or self.src_file), callee_function=fname, callee_line=fline, tainted_params_json=json.dumps(param_list, ensure_ascii=False), depth=self.dep + 1, reason=str(item.get("reason") or "")))
+                dispatch_kind = str(item.get("dispatch_kind") or item.get("call_kind") or item.get("kind") or "direct_call").strip() or "direct_call"
+                tainted_nonlocal = item.get("tainted_nonlocal") or item.get("nonlocal_taints") or []
+                if not isinstance(tainted_nonlocal, list):
+                    tainted_nonlocal = []
+                followups.append(FollowupRecord(followup_id=followup_id, edge_id=eid, parent_node_id=node_ids[0] if node_ids else "", callee_file=str(item.get("file") or self.src_file), callee_function=fname, callee_line=fline, tainted_params_json=json.dumps(param_list, ensure_ascii=False), depth=self.dep + 1, reason=str(item.get("reason") or ""), dispatch_kind=dispatch_kind, tainted_nonlocal_json=json.dumps(tainted_nonlocal, ensure_ascii=False)))
                 self.store.record_constraints(run_id=self.run_id, edge_id=eid, followup_id=followup_id, source_file=self.src_file, function_name=self.func_name, line=fline, facts=validation_state.facts)
         callees = []
         for c in callees:
@@ -503,6 +509,7 @@ class DataflowVulnWorkflow:
             _meta["followup_refs"] = [
                 {"followup_id": f.followup_id, "callee_function": f.callee_function, "callee_file": f.callee_file,
                  "callee_line": f.callee_line, "tainted_params_json": f.tainted_params_json, "reason": f.reason,
+                 "dispatch_kind": f.dispatch_kind, "tainted_nonlocal_json": f.tainted_nonlocal_json,
                  "validation_signature": next((e.validation_signature for e in edges if e.edge_id == f.edge_id), "none"),
                  "validation_risk_rank": next((e.validation_risk_rank for e in edges if e.edge_id == f.edge_id), 100),
                  "validation_facts_json": next((e.validation_facts_json for e in edges if e.edge_id == f.edge_id), "[]")}

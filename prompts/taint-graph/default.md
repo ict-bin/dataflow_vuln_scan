@@ -40,6 +40,14 @@
       "line": "L30",
       "tainted_params": ["arg1"],
       "reason": "污点作为第1参数传入",
+      "dispatch_kind": "direct_call|function_pointer|vtable_dispatch|hook_callback|macro|inline|unknown",
+      "tainted_nonlocal": [
+        {
+          "symbol": "g_state.token",
+          "kind": "global|field|static_local",
+          "evidence": "L20: g_state.token = token"
+        }
+      ],
       "validations": [
         {
           "kind": "range|null_check|bounds|enum|auth|sanitizer|unknown",
@@ -71,6 +79,18 @@
 
 `followups` 是唯一的跟入点输出，不需要再写 `tainted.list`。每个元素必须包含：
 - `file` / `function` / `line` / `tainted_params` / `reason`
+- `dispatch_kind`: 调用机制分类，必须输出，不要省略：
+  - `direct_call`: 直接函数调用，目标函数名明确。
+  - `function_pointer`: 函数指针变量、函数指针字段、函数指针数组/表调用，如 `handler(args)`、`pf->op->pull(...)`。
+  - `vtable_dispatch`: C++ 虚函数/多态调用，目标可能是 override。
+  - `hook_callback`: hook/回调链，如 `next_ExecutorStart_hook(...)`。
+  - `macro`: 宏调用或宏展开后才有真实目标。
+  - `inline`: 内联 helper；如果能确定真实函数名仍填函数名，并标记 inline。
+  - `unknown`: 无法判断调用机制。
+- `tainted_nonlocal`: 当前 followup 调用前已经被污点写入、且可能被后续函数读取的非局部变量列表。没有则输出 `[]`，不要省略。每项包含：
+  - `symbol`: 如 `g_config.key`、`this->ctx_`、`ClassName::static_field`。
+  - `kind`: `global | field | static_local`。
+  - `evidence`: 带行号的写入证据。
 - `validations`: 调用该 callee 前对这些污点参数已经生效且支配 callsite 的校验事实。没有校验时输出 `[]`，不要省略字段。
 
 `validations` 必须使用统一 JSON 语言，不要只写中文描述：

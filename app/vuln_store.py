@@ -75,6 +75,11 @@ class FollowupRecord:
     reason: str = ""
     fork_session: str = ""
     depth: int = 0
+    dispatch_kind: str = "direct_call"
+    tainted_nonlocal_json: str = "[]"
+    tracker_type: str = ""
+    tracker_status: str = ""
+    tracker_result_json: str = "{}"
     created_at: float = 0.0
 
 
@@ -188,6 +193,11 @@ class VulnScanStore:
                   reason TEXT NOT NULL DEFAULT '',
                   fork_session TEXT NOT NULL DEFAULT '',
                   depth INTEGER NOT NULL DEFAULT 0,
+                  dispatch_kind TEXT NOT NULL DEFAULT 'direct_call',
+                  tainted_nonlocal_json TEXT NOT NULL DEFAULT '[]',
+                  tracker_type TEXT NOT NULL DEFAULT '',
+                  tracker_status TEXT NOT NULL DEFAULT '',
+                  tracker_result_json TEXT NOT NULL DEFAULT '{}',
                   created_at REAL NOT NULL DEFAULT (strftime('%s','now'))
                 );
 
@@ -276,6 +286,11 @@ class VulnScanStore:
                 ("taint_edges", "validation_signature", "ALTER TABLE taint_edges ADD COLUMN validation_signature TEXT NOT NULL DEFAULT 'none'"),
                 ("taint_edges", "validation_risk_rank", "ALTER TABLE taint_edges ADD COLUMN validation_risk_rank INTEGER NOT NULL DEFAULT 100"),
                 ("analysis_contexts", "validation_facts_json", "ALTER TABLE analysis_contexts ADD COLUMN validation_facts_json TEXT NOT NULL DEFAULT '[]'"),
+                ("followups", "dispatch_kind", "ALTER TABLE followups ADD COLUMN dispatch_kind TEXT NOT NULL DEFAULT 'direct_call'"),
+                ("followups", "tainted_nonlocal_json", "ALTER TABLE followups ADD COLUMN tainted_nonlocal_json TEXT NOT NULL DEFAULT '[]'"),
+                ("followups", "tracker_type", "ALTER TABLE followups ADD COLUMN tracker_type TEXT NOT NULL DEFAULT ''"),
+                ("followups", "tracker_status", "ALTER TABLE followups ADD COLUMN tracker_status TEXT NOT NULL DEFAULT ''"),
+                ("followups", "tracker_result_json", "ALTER TABLE followups ADD COLUMN tracker_result_json TEXT NOT NULL DEFAULT '{}'"),
             ]:
                 try:
                     conn.execute(ddl)
@@ -343,6 +358,24 @@ class VulnScanStore:
                 conn.execute("UPDATE followups SET status=? WHERE followup_id=?", (status, followup_id))
             else:
                 conn.execute("UPDATE followups SET status=?, reason=? WHERE followup_id=?", (status, reason, followup_id))
+
+    def update_followup_tracker(
+        self,
+        followup_id: str,
+        *,
+        tracker_type: str,
+        tracker_status: str,
+        result: dict[str, Any] | None = None,
+    ) -> None:
+        if not followup_id:
+            return
+        with self.connect() as conn:
+            conn.execute(
+                """UPDATE followups
+                   SET tracker_type=?, tracker_status=?, tracker_result_json=?
+                   WHERE followup_id=?""",
+                (tracker_type, tracker_status, json.dumps(result or {}, ensure_ascii=False), followup_id),
+            )
 
     def list_followups(self, run_id: str | None = None, *, status: str | None = None) -> list[FollowupRecord]:
         where: list[str] = []

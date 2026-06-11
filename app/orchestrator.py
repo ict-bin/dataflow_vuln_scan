@@ -43,6 +43,8 @@ from .vuln_store import VulnScanStore, FollowupRecord
 from .function_resolver import FunctionResolver, normalize_taint_params
 from .callsite_analysis import analyze_callsite, map_taint_signature
 from .validation_state import normalize_validation_state
+from .followup_resolver import ResolutionContext, ResolutionResult, default_followup_resolver
+from .tracker import run_tracker
 
 logger = logging.getLogger("dvs.orchestrator")
 from .judge_runner import JudgeMixin
@@ -913,6 +915,8 @@ class Orchestrator(JudgeMixin):
                             tainted_params=",".join(json.loads(f.get("tainted_params_json") or "[]")) if f.get("tainted_params_json") else "",
                             description=str(f.get("reason") or ""),
                             followup_id=str(f.get("followup_id") or ""),
+                            dispatch_kind=str(f.get("dispatch_kind") or "direct_call"),
+                            tainted_nonlocal=json.loads(f.get("tainted_nonlocal_json") or "[]") if f.get("tainted_nonlocal_json") else [],
                         )
                         for f in _fup_refs if f.get("callee_function")
                     ]
@@ -926,6 +930,8 @@ class Orchestrator(JudgeMixin):
                                 tainted_params=",".join(json.loads(f.tainted_params_json or "[]")) if f.tainted_params_json else "",
                                 description=f.reason,
                                 followup_id=f.followup_id,
+                                dispatch_kind=f.dispatch_kind,
+                                tainted_nonlocal=json.loads(f.tainted_nonlocal_json or "[]") if f.tainted_nonlocal_json else [],
                             )
                             for f in _db_fups
                         ]
@@ -937,12 +943,14 @@ class Orchestrator(JudgeMixin):
                 valid: list[CalleeRef] = []
                 context_by_callee: dict[str, str] = {}
                 facts_by_callee: dict[str, list[dict]] = {}
+                callsite_line_by_callee: dict[str, str] = {}
+                followup_resolver = default_followup_resolver()
                 def _callee_key(c: CalleeRef) -> str:
                     return c.followup_id or f"{c.function_name}|{c.file}|{c.line}|{c.tainted_params}"
                 for callee in callees:
                     resolved_name, resolved_file = _resolve_function_pointer_followup(target_dir, callee, func_name)
                     if resolved_name != callee.function_name:
-                        callee = CalleeRef(function_name=resolved_name, file=resolved_file or callee.file, line=callee.line, tainted_params=callee.tainted_params, description=callee.description, followup_id=callee.followup_id)
+                        callee = CalleeRef(function_name=resolved_name, file=resolved_file or callee.file, line=callee.line, tainted_params=callee.tainted_params, description=callee.description, followup_id=callee.followup_id, dispatch_kind=callee.dispatch_kind, tainted_nonlocal=callee.tainted_nonlocal)
                     callsite_line = callee.line
                     # Try to resolve the callee.  When the raw LLM-produced name fails,
                     # attempt progressively cleaned variants (strip qualifiers, pointer
@@ -952,10 +960,95 @@ class Orchestrator(JudgeMixin):
                         resolved = resolver.resolve(cname, source_file_hint=callee.file or src_file, line_hint=callee.line)
                         if resolved.resolved:
                             if cname != callee.function_name:
-                                callee = CalleeRef(function_name=resolved.function_name, file=resolved.source_file or callee.file, line=(f"L{resolved.line}" if resolved.line else callee.line), tainted_params=callee.tainted_params, description=callee.description, followup_id=callee.followup_id)
+                                callee = CalleeRef(function_name=resolved.function_name, file=resolved.source_file or callee.file, line=(f"L{resolved.line}" if resolved.line else callee.line), tainted_params=callee.tainted_params, description=callee.description, followup_id=callee.followup_id, dispatch_kind=callee.dispatch_kind, tainted_nonlocal=callee.tainted_nonlocal)
                             break
                     if not resolved or not resolved.resolved:
                         reason = "external followup" if _is_external_followup(callee) else (resolved.reason if resolved else "not_in_source_root_funcdb") or "not_in_source_root_funcdb"
+                        tracker_ctx = ResolutionContext(
+                            source_root=target_dir,
+                            funcdb_path=getattr(task_cfg, "funcdb_path", ""),
+                            cache_root=cache_root,
+                            graph_db_path=graph_db_path,
+                            caller_func=func_name,
+                            caller_file=src_file,
+                            line_hint=callsite_line,
+                        )
+                        tracker_decision = followup_resolver.resolve_tracker(callee, tracker_ctx)
+                        tracked_callees: list[CalleeRef] = []
+                        if tracker_decision.needs_tracker and workflow is not None:
+                            tracker_type = tracker_decision.tracker_type
+                            tracker_session = root_sessions_dir / f"{session_label}-tracker-{tracker_type}-{(callee.followup_id or 'item')[-8:]}.jsonl"
+                            try:
+                                VulnScanStore(graph_db_path).update_followup_tracker(
+                                    callee.followup_id,
+                                    tracker_type=tracker_type,
+                                    tracker_status="running",
+                                )
+                                self._emit("tracker_start", tid, function=callee.function_name, tracker_type=tracker_type, depth=dep)
+                                acfg = workflow._agent_cfg()
+                                tracked = await run_tracker(
+                                    tracker_type,
+                                    tracker_decision.tracker_context,
+                                    workspace=workflow.ws,
+                                    model=acfg.model,
+                                    tools=acfg.tools or task_cfg.workers.default_tools,
+                                    session_file=str(tracker_session),
+                                    cancel_event=self._cancel_event,
+                                    run_timeout_seconds=min(float(task_cfg.agent_run_timeout_seconds or 300), 600),
+                                    pi_max_retries=task_cfg.pi_max_retries,
+                                    pi_retry_delay=task_cfg.pi_retry_delay,
+                                    task_context={"task_id": tid, "task_root": str(root_output_path.parent), "task_run_root": str(root_out_dir)},
+                                )
+                                for item in tracked.functions:
+                                    fname = str(item.get("function") or item.get("function_name") or "").strip()
+                                    if not fname:
+                                        continue
+                                    params = item.get("tainted_params") or []
+                                    if isinstance(params, list):
+                                        param_text = ",".join(str(x).strip() for x in params if str(x).strip())
+                                    else:
+                                        param_text = str(params or "")
+                                    tracked_callees.append(CalleeRef(
+                                        function_name=fname,
+                                        file=str(item.get("file") or callee.file or ""),
+                                        line=str(item.get("line") or callee.line or ""),
+                                        tainted_params=param_text or callee.tainted_params,
+                                        description=str(item.get("reason") or f"{tracker_type} tracker resolved target"),
+                                        followup_id=callee.followup_id,
+                                        dispatch_kind="direct_call",
+                                        tainted_nonlocal=[],
+                                    ))
+                                tracker_payload = {"functions": [c.model_dump() for c in tracked_callees], "error": tracked.error}
+                                VulnScanStore(graph_db_path).update_followup_tracker(
+                                    callee.followup_id,
+                                    tracker_type=tracker_type,
+                                    tracker_status="resolved" if tracked_callees else "unresolved",
+                                    result=tracker_payload,
+                                )
+                                self._emit("tracker_done", tid, function=callee.function_name, tracker_type=tracker_type, targets=[c.function_name for c in tracked_callees], error=tracked.error, depth=dep)
+                            except asyncio.CancelledError:
+                                raise
+                            except Exception as tracker_exc:
+                                logger.exception("tracker failed function=%s type=%s", callee.function_name, tracker_type)
+                                try:
+                                    VulnScanStore(graph_db_path).update_followup_tracker(
+                                        callee.followup_id,
+                                        tracker_type=tracker_type,
+                                        tracker_status="error",
+                                        result={"error": str(tracker_exc)},
+                                    )
+                                except Exception:
+                                    pass
+                        if tracked_callees:
+                            # Re-run deterministic resolution on tracker targets; this keeps
+                            # all normal funcdb, dedup and validation logic in one path.
+                            callees.extend(tracked_callees)
+                            if callee.followup_id:
+                                try:
+                                    VulnScanStore(graph_db_path).update_followup_status(callee.followup_id, "tracker_resolved", reason=callee.description or "tracker resolved targets")
+                                except Exception:
+                                    pass
+                            continue
                         self._emit("trace_skip", tid, function=callee.function_name,
                                    reason=reason)
                         if callee.followup_id:
@@ -964,7 +1057,7 @@ class Orchestrator(JudgeMixin):
                             except Exception:
                                 pass
                         continue
-                    callee = CalleeRef(function_name=resolved.function_name, file=resolved.source_file or callee.file, line=(f"L{resolved.line}" if resolved.line else callee.line), tainted_params=callee.tainted_params, description=callee.description, followup_id=callee.followup_id)
+                    callee = CalleeRef(function_name=resolved.function_name, file=resolved.source_file or callee.file, line=(f"L{resolved.line}" if resolved.line else callee.line), tainted_params=callee.tainted_params, description=callee.description, followup_id=callee.followup_id, dispatch_kind=callee.dispatch_kind, tainted_nonlocal=callee.tainted_nonlocal)
                     raw_params = [x.strip() for x in (callee.tainted_params or "").split(",") if x.strip()]
                     callsite = analyze_callsite(target_dir, callee.file or src_file, callsite_line, callee.function_name)
                     norm_params, taint_sig = map_taint_signature(raw_params, callsite.actual_args) if callsite.actual_args else normalize_taint_params(callee.tainted_params)
@@ -1045,6 +1138,7 @@ class Orchestrator(JudgeMixin):
                         pass
                     context_by_callee[_callee_key(callee)] = context_id
                     facts_by_callee[_callee_key(callee)] = validation_state.facts
+                    callsite_line_by_callee[_callee_key(callee)] = callsite_line
                     if callee.followup_id:
                         try:
                             VulnScanStore(graph_db_path).update_followup_status(callee.followup_id, "queued")
@@ -1070,15 +1164,16 @@ class Orchestrator(JudgeMixin):
                     if "# 调用者传入的脏数据" in ctx_base:
                         ctx_base = ctx_base.split("# 调用者传入的脏数据")[0].strip()
                     sub_cfg.context = ctx_base
-                    _callsite_for_params = analyze_callsite(target_dir, callee.file or src_file, callsite_line, callee.function_name)
+                    _callee_callsite_line = callsite_line_by_callee.get(_callee_key(callee), callee.line)
+                    _callsite_for_params = analyze_callsite(target_dir, callee.file or src_file, _callee_callsite_line, callee.function_name)
                     _callee_params = map_taint_signature([x.strip() for x in (callee.tainted_params or "").split(",") if x.strip()], _callsite_for_params.actual_args)[0] or normalize_taint_params(callee.tainted_params)[0] or [x.strip() for x in (callee.tainted_params or "").split(",") if x.strip()]
                     sub_cfg.taint_params = _callee_params or ["all"]
                     sub_cfg.taint_details = [
-                        {"name": p, "description": f"由 {func_name} 在 {callsite_line or callee.line or 'unknown'} 调用传入", "source_kind": "call_argument"}
+                        {"name": p, "description": f"由 {func_name} 在 {_callee_callsite_line or callee.line or 'unknown'} 调用传入", "source_kind": "call_argument"}
                         for p in sub_cfg.taint_params
                     ]
                     tainted_ctx_str = (
-                        f"函数 {callee.function_name} 被 {func_name} 在 {callsite_line or callee.line} 调用。\n"
+                        f"函数 {callee.function_name} 被 {func_name} 在 {_callee_callsite_line or callee.line} 调用。\n"
                         f"污染参数: {callee.tainted_params}\n说明: {callee.description}"
                     )
                     suffix = (callee.followup_id or hashlib.sha1((callee.function_name + callee.tainted_params + callee.line).encode()).hexdigest())[-6:]
