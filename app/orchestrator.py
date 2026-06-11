@@ -1215,7 +1215,7 @@ class Orchestrator(JudgeMixin):
                     sem = analyze_param_semantics(
                         callee.function_name, callee.file or src_file,
                         tainted_params=taint_list,
-                        callsite_args=callsite.actual_args or taint_list,
+                        callsite_args=callsite.actual_args,
                         source_root=target_dir,
                     )
                     pri = sem.highest_priority
