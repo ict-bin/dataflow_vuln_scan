@@ -211,6 +211,15 @@ docker run --rm --network host \
   python3 cli.py "对 src-vul/openthread/.../foo.cpp 的 Bar::Process 函数完成数据流漏洞挖掘"
 ```
 
+### 健康检查
+
+- 容器默认通过 `scripts/start-with-probe.sh` 同时拉起主服务和独立 probe 子进程
+- K8s / Docker 健康检查统一访问 `18080` 端口
+  - `GET /healthz`：只看主进程 PID 是否仍存活
+  - `GET /readyz`：主进程存活且 probe 未进入关闭流程
+  - `GET /startupz`：主进程启动满 30 秒后返回 200
+- `GET /health`、`GET /api/app/dataflow-vuln-scan/ready` 仍保留，但它们是业务观测接口，不是 kube probe
+
 ### 目录挂载
 
 | 容器路径 | 说明 |

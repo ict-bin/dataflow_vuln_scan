@@ -100,8 +100,15 @@ ENV OUTPUT_DIR=/data/output
 ENV ARCHIVE_DIR=/data/output
 ENV RESULT_DIR=/data/output
 ENV SESSION_DIR=/data/sessions
+ENV SECFLOW_EXTERNAL_PROBE_PROCESS=1
+ENV SECFLOW_PROBE_PORT=18080
+ENV SECFLOW_MAIN_PID_FILE=/tmp/secflow-main.pid
+ENV SECFLOW_MAIN_STARTED_AT_FILE=/tmp/secflow-main.started_at
+ENV SECFLOW_PROBE_STARTUP_GRACE_SECONDS=30
+ENV SECFLOW_PROBE_SERVICE_NAME=secflow-app-dataflow-vuln-scan
 
 EXPOSE 3000
+EXPOSE 18080
 
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
     CMD curl -f http://localhost:18080/healthz || exit 1
