@@ -54,9 +54,8 @@ _VALUE_TYPE_RE = re.compile(
     r"^\s*[-+]?\d+$|"                                         # integer literal
     r"^\s*[-+]?\d+\.\d*[fF]?$|"                               # float literal
     r"^\s*(true|false)\s*$|"                                   # bool
-    r"^\s*[A-Za-z_]\w*(?:\([^)]*\))?$|"                       # simple var / enum cast
-    r"^\s*(?:sizeof|offsetof)\s*\(|"                           # compile-time expr
-    r"^\s*[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+(?!\s*->)\s*$"       # struct.field value access
+    r"^\s*(?:sizeof|offsetof)\s*\(|$"                           # compile-time expr (but not a simple var)
+    r"^\s*[A-Z_]\w*(?:_[A-Z_]\w*)+$"                            # MACRO_CONSTANT style
 )
 
 _TAKE_ADDRESS_RE = re.compile(r"^\s*&\s*([A-Za-z_]\w*(?:\.|->)?[A-Za-z_\[\].\w]*)\s*$")
@@ -84,18 +83,27 @@ def _read_first_lines(path: Path, max_lines: int = 30) -> str:
 def _extract_param_decl(source: str, func_name: str, arg_index: int) -> str:
     """Best-effort extraction of the N-th parameter declaration from function source."""
     short = func_name.rsplit("::", 1)[-1]
-    # Look for function definition or declaration
     pat = re.compile(
         r"((?:static\s+|inline\s+|virtual\s+|const\s+)*"
         r"(?:[\w:*&<>\s]+)\s+" + re.escape(short) +
         r"\s*\(([^)]*)\))",
         re.MULTILINE | re.DOTALL,
     )
+    # Find ALL matches, prefer the one with richest parameter types (definition over call)
     matches = list(pat.finditer(source))
     if not matches:
         return ""
-    # Use the first match
-    params_text = matches[0].group(2)
+    # Score: prefer match with more type information (containing * or keywords)
+    def _score(m) -> int:
+        params = m.group(2)
+        s = 0
+        if "*" in params or "const" in params:
+            s += 10  # likely a declaration/definition
+        if "void" in params and params.strip() == "void":
+            s -= 5  # void param, less useful
+        return s
+    best = max(matches, key=_score)
+    params_text = best.group(2)
     params = [p.strip() for p in params_text.split(",")]
     if 0 <= arg_index - 1 < len(params):
         return params[arg_index - 1]
@@ -211,6 +219,7 @@ def _classify_arg(
                 param_name=text,
                 is_pointer=is_ptr,
                 is_const_qualified=is_const,
+                is_value_type=not is_ptr,
                 evidence=f"decl: {decl}",
             )
         # No declaration found → conservative if source_root is valid
