@@ -695,6 +695,7 @@ class Orchestrator(JudgeMixin):
         n_workers = max(1, cfg.callee_concurrency) if cfg.callee_concurrency > 0 else 4
         analyzed: set[str] = _analyzed if _analyzed is not None else set()
         validation_cache = ValidationCache()
+        target_dir = os.path.abspath(cfg.cwd)
         global_cache = GlobalCache(target_dir)
         taint_state_stack: list[TaintState] = []  # DFS 调用链上的累积校验
 
@@ -943,8 +944,9 @@ class Orchestrator(JudgeMixin):
 
             # ── 解析 callee 并加入队列 ─────
             if dep < max_depth and result.final_output:
+                local_td = os.path.abspath(task_cfg.cwd)
                 funcdb_cache_root = str(global_cache.funcdb_root / "dvs-fallback")
-                resolver = FunctionResolver(target_dir, funcdb_path=getattr(task_cfg, "funcdb_path", ""), cache_root=funcdb_cache_root)
+                resolver = FunctionResolver(local_td, funcdb_path=getattr(task_cfg, "funcdb_path", ""), cache_root=funcdb_cache_root)
                 # 优先从 result 元数据直接获取 followup，避免 SQLite JOIN 复杂性
                 _fup_refs: list[dict] = (result.upstream_entry_metadata or {}).get("followup_refs") or []
                 fup_meta: dict[str, dict] = {str(f.get("followup_id") or ""): f for f in _fup_refs if f.get("followup_id")}
@@ -1007,7 +1009,7 @@ class Orchestrator(JudgeMixin):
                     if not resolved or not resolved.resolved:
                         reason = "external followup" if _is_external_followup(callee) else (resolved.reason if resolved else "not_in_source_root_funcdb") or "not_in_source_root_funcdb"
                         tracker_ctx = ResolutionContext(
-                            source_root=target_dir,
+                            source_root=local_td,
                             funcdb_path=getattr(task_cfg, "funcdb_path", ""),
                             cache_root=funcdb_cache_root,
                             graph_db_path=graph_db_path,
@@ -1101,7 +1103,7 @@ class Orchestrator(JudgeMixin):
                         continue
                     callee = CalleeRef(function_name=resolved.function_name, file=resolved.source_file or callee.file, line=(f"L{resolved.line}" if resolved.line else callee.line), tainted_params=callee.tainted_params, description=callee.description, followup_id=callee.followup_id, dispatch_kind=callee.dispatch_kind, tainted_nonlocal=callee.tainted_nonlocal)
                     raw_params = [x.strip() for x in (callee.tainted_params or "").split(",") if x.strip()]
-                    callsite = analyze_callsite(target_dir, callee.file or src_file, callsite_line, callee.function_name)
+                    callsite = analyze_callsite(local_td, callee.file or src_file, callsite_line, callee.function_name)
                     norm_params, taint_sig = map_taint_signature(raw_params, callsite.actual_args) if callsite.actual_args else normalize_taint_params(callee.tainted_params)
                     meta = fup_meta.get(callee.followup_id, {})
                     try:
