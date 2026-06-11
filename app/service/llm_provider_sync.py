@@ -15,7 +15,6 @@ logger = logging.getLogger("dvs.llm_sync")
 
 _PI_DIR = os.environ.get("PI_CODING_AGENT_DIR", "/root/.pi/agent")
 _DEFAULT_CONTEXT_WINDOW = 128000
-_DEFAULT_MAX_TOKENS = 8192
 
 
 def _provider_api(provider_type: str) -> str:
@@ -48,10 +47,6 @@ def _model_entries(provider: dict[str, Any]) -> list[dict[str, Any]]:
         or extra_config.get("contextLength"),
         _DEFAULT_CONTEXT_WINDOW,
     )
-    max_tokens = _as_positive_int(
-        provider.get("max_tokens") or provider.get("maxTokens") or extra_config.get("max_tokens") or extra_config.get("maxTokens"),
-        _DEFAULT_MAX_TOKENS,
-    )
     pi_models = extra_config.get("pi_models")
     raw_models = pi_models if isinstance(pi_models, list) else (
         [{"id": model_id, "reasoning": False}] if model_id else []
@@ -66,7 +61,6 @@ def _model_entries(provider: dict[str, Any]) -> list[dict[str, Any]]:
         entry.setdefault("reasoning", False)
         entry.setdefault("input", ["text"])
         entry.setdefault("contextWindow", context_window)
-        entry.setdefault("maxTokens", max_tokens)
         entry.setdefault("cost", {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0})
         models.append(entry)
     return models
@@ -83,7 +77,7 @@ def build_models_json(providers: list[dict[str, Any]]) -> dict:
                 "baseUrl": "...",
                 "api": "openai-completions",
                 "apiKey": "<raw_key>",
-                "models": [{"id": "<model_id>", "contextWindow": 128000, "maxTokens": 8192}]
+                "models": [{"id": "<model_id>", "contextWindow": 128000}]
             }
         }
     }
