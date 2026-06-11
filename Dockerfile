@@ -39,7 +39,9 @@ RUN apt-get update \
 # ═══ 项目代码 ═════════════════════════════════════════════════════════════════
 WORKDIR /opt/dataflow_vuln_scan
 COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt -q
+RUN pip install --no-cache-dir -r requirements.txt -q \
+    && python3 -c "import tree_sitter, tree_sitter_c, tree_sitter_cpp; print('tree-sitter OK')" \
+    && python3 -c "from pydantic import BaseModel; print('pydantic OK')"
 COPY app/               ./app/
 COPY cli.py main.py     ./
 COPY prompts/           ./prompts/
