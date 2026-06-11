@@ -882,8 +882,9 @@ class Orchestrator(JudgeMixin):
 
                 # ── 写全局缓存：脚本提取函数摘要 ──────────────────────────
                 try:
+                    _local_target_dir = os.path.abspath(task_cfg.cwd)
                     _item_taint_sig = _normalize_taint_signature(task_cfg.taint_params or _item_taints)
-                    _item_func_h = compute_func_hash(target_dir, src_file, func_name) or "0"
+                    _item_func_h = compute_func_hash(_local_target_dir, src_file, func_name) or "0"
                     _summary_data = build_function_summary_from_result(
                         result, task_cfg.taint_params or _item_taints, _item_func_h
                     )
@@ -942,7 +943,6 @@ class Orchestrator(JudgeMixin):
 
             # ── 解析 callee 并加入队列 ─────
             if dep < max_depth and result.final_output:
-                target_dir = os.path.abspath(task_cfg.cwd)
                 funcdb_cache_root = str(global_cache.funcdb_root / "dvs-fallback")
                 resolver = FunctionResolver(target_dir, funcdb_path=getattr(task_cfg, "funcdb_path", ""), cache_root=funcdb_cache_root)
                 # 优先从 result 元数据直接获取 followup，避免 SQLite JOIN 复杂性
