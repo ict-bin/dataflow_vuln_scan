@@ -291,6 +291,8 @@ class VulnScanStore:
                 ("followups", "tracker_type", "ALTER TABLE followups ADD COLUMN tracker_type TEXT NOT NULL DEFAULT ''"),
                 ("followups", "tracker_status", "ALTER TABLE followups ADD COLUMN tracker_status TEXT NOT NULL DEFAULT ''"),
                 ("followups", "tracker_result_json", "ALTER TABLE followups ADD COLUMN tracker_result_json TEXT NOT NULL DEFAULT '{}'"),
+                ("analysis_contexts", "validations_json", "ALTER TABLE analysis_contexts ADD COLUMN validations_json TEXT NOT NULL DEFAULT '[]'"),
+                ("analysis_contexts", "func_hash", "ALTER TABLE analysis_contexts ADD COLUMN func_hash TEXT NOT NULL DEFAULT ''"),
             ]:
                 try:
                     conn.execute(ddl)
@@ -472,11 +474,49 @@ class VulnScanStore:
         rows.sort(key=lambda r: int(r.get("validation_risk_rank") or 0), reverse=True)
         for row in rows:
             try:
+                existing_facts = json.loads(row.get("validation_facts_json") or "[]")
+                if validation_covers(existing_facts, validation_facts or []):
+                    return dict(row)
+            except Exception:
+                continue
+        return None
+
+    def find_running_context(self, function_identity: str, taint_signature: str) -> dict[str, Any] | None:
+        """Check if the same (func, taint) is currently being analyzed in another slot."""
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM analysis_contexts WHERE function_identity=? AND taint_signature=? AND status='running'",
+                (function_identity, taint_signature),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def update_context_validations(self, context_id: str, validations_json: str, func_hash: str = "") -> None:
+        """After Worker completes, persist validation facts into analysis_contexts."""
+        if not context_id:
+            return
+        with self.connect() as conn:
+            conn.execute(
+                """UPDATE analysis_contexts
+                   SET validation_facts_json=?, func_hash=?, status='completed'
+                   WHERE context_id=?""",
+                (validations_json, func_hash, context_id),
+            )
+
+    def find_covering_context(self, *, function_identity: str, taint_signature: str, validation_signature: str, validation_risk_rank: int, validation_facts: list[dict[str, Any]] | None = None) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            rows = [dict(r) for r in conn.execute(
+                """SELECT * FROM analysis_contexts
+                   WHERE function_identity=? AND taint_signature=? AND status IN ('created','queued','running','analyzed')""",
+                (function_identity, taint_signature),
+            ).fetchall()]
+        rows.sort(key=lambda r: int(r.get("validation_risk_rank") or 0), reverse=True)
+        for row in rows:
+            try:
                 existing_facts = json.loads(str(row.get("validation_facts_json") or "[]"))
             except Exception:
                 existing_facts = []
             if validation_covers(str(row.get("validation_signature") or "none"), int(row.get("validation_risk_rank") or 100), validation_signature, validation_risk_rank, existing_facts, validation_facts or []):
-                return row
+                return dict(row)
         return None
 
     def upsert_analysis_context(self, *, context_id: str, function_identity: str, source_file: str, function_name: str, taint_signature: str, validation_signature: str, validation_risk_rank: int, risk_class: str, status: str, created_from_followup_id: str = "", covered_by_context_id: str = "", validation_facts: list[dict[str, Any]] | None = None) -> None:

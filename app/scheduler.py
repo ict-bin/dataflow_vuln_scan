@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .global_cache import GlobalCache, TaintValidationItem
 from .param_analyzer import FollowupSemantics
 
 logger = logging.getLogger("dvs.scheduler")

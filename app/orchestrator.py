@@ -47,6 +47,8 @@ from .followup_resolver import ResolutionContext, ResolutionResult, default_foll
 from .tracker import run_tracker
 from .param_analyzer import analyze as analyze_param_semantics
 from .scheduler import TaintState, TaintEntry, ValidationCache, _normalize_taint_signature
+from .global_cache import GlobalCache, compute_func_hash
+from .vuln_workflow import build_function_summary_from_result
 
 logger = logging.getLogger("dvs.orchestrator")
 from .judge_runner import JudgeMixin
@@ -693,6 +695,7 @@ class Orchestrator(JudgeMixin):
         n_workers = max(1, cfg.callee_concurrency) if cfg.callee_concurrency > 0 else 4
         analyzed: set[str] = _analyzed if _analyzed is not None else set()
         validation_cache = ValidationCache()
+        global_cache = GlobalCache(target_dir)
         taint_state_stack: list[TaintState] = []  # DFS 调用链上的累积校验
 
         # 初始化根目录
@@ -877,6 +880,21 @@ class Orchestrator(JudgeMixin):
                 except Exception:
                     pass
 
+                # ── 写全局缓存：脚本提取函数摘要 ──────────────────────────
+                try:
+                    _item_taint_sig = _normalize_taint_signature(task_cfg.taint_params or _item_taints)
+                    _item_func_h = compute_func_hash(target_dir, src_file, func_name) or "0"
+                    _summary_data = build_function_summary_from_result(
+                        result, task_cfg.taint_params or _item_taints, _item_func_h
+                    )
+                    from .global_cache import FunctionSummary
+                    _summary = FunctionSummary.from_json(_summary_data)
+                    global_cache.put(
+                        func_name, src_file, _item_taint_sig, _item_func_h, _summary,
+                    )
+                except Exception:
+                    pass
+
             _relativize_round_artifacts(result, out_dir, root_out_dir)
 
             # 通知 CLI: 函数分析完成
@@ -925,8 +943,8 @@ class Orchestrator(JudgeMixin):
             # ── 解析 callee 并加入队列 ─────
             if dep < max_depth and result.final_output:
                 target_dir = os.path.abspath(task_cfg.cwd)
-                cache_root = str(root_output_path.parent.parent / "funcdb" / "dvs-fallback")
-                resolver = FunctionResolver(target_dir, funcdb_path=getattr(task_cfg, "funcdb_path", ""), cache_root=cache_root)
+                funcdb_cache_root = str(global_cache.funcdb_root / "dvs-fallback")
+                resolver = FunctionResolver(target_dir, funcdb_path=getattr(task_cfg, "funcdb_path", ""), cache_root=funcdb_cache_root)
                 # 优先从 result 元数据直接获取 followup，避免 SQLite JOIN 复杂性
                 _fup_refs: list[dict] = (result.upstream_entry_metadata or {}).get("followup_refs") or []
                 fup_meta: dict[str, dict] = {str(f.get("followup_id") or ""): f for f in _fup_refs if f.get("followup_id")}
@@ -991,7 +1009,7 @@ class Orchestrator(JudgeMixin):
                         tracker_ctx = ResolutionContext(
                             source_root=target_dir,
                             funcdb_path=getattr(task_cfg, "funcdb_path", ""),
-                            cache_root=cache_root,
+                            cache_root=funcdb_cache_root,
                             graph_db_path=graph_db_path,
                             caller_func=func_name,
                             caller_file=src_file,
@@ -1118,8 +1136,18 @@ class Orchestrator(JudgeMixin):
                                 pass
                         continue
                     if c_key in analyzed:
+                        # 全局缓存查重：命中时注入缓存的校验事实
+                        taint_sig_cache = _normalize_taint_signature(callee.tainted_params)
+                        func_h = compute_func_hash(target_dir, callee.file or src_file, callee.function_name) or "0"
+                        cached_vals = global_cache.get_validations(
+                            callee.function_name, callee.file or src_file, taint_sig_cache, func_h)
+                        if cached_vals:
+                            for v in cached_vals:
+                                current_taint_state.entries.append(TaintEntry(
+                                    variable=v.variable, kind=v.kind, evidence=v.evidence,
+                                    confidence=v.confidence))
                         self._emit("trace_skip", tid, function=callee.function_name,
-                                   reason="already analyzed")
+                                   reason="already analyzed (cache validations applied)" if cached_vals else "already analyzed")
                         if callee.followup_id:
                             try:
                                 VulnScanStore(graph_db_path).update_followup_status(callee.followup_id, "skipped", reason="already analyzed")
@@ -1174,8 +1202,9 @@ class Orchestrator(JudgeMixin):
                     self._emit("trace_callees", tid, function=func_name,
                                callees=[c.function_name for c in valid], depth=dep)
 
-                # ── 参数语义分析 + P0/P2 分流 ───────────────────────────
+                # ── 参数语义分析 + P0/P1/P2 分流 ────────────────────────
                 p0_followups: list[CalleeRef] = []
+                p1_followups: list[CalleeRef] = []
                 p2_followups: list[CalleeRef] = []
                 for callee in valid:
                     _callsite_line = callsite_line_by_callee.get(_callee_key(callee), callee.line)
@@ -1187,22 +1216,20 @@ class Orchestrator(JudgeMixin):
                         callsite_args=callsite.actual_args,
                         source_root=target_dir,
                     )
-                    if sem.needs_sequential:
-                        callee.tainted_params = callee.tainted_params  # preserve
+                    pri = sem.highest_priority
+                    if pri <= 0:
                         p0_followups.append(callee)
-                        self._emit("trace_sequential", tid, function=callee.function_name,
-                                   reason=sem.reason, depth=dep)
+                    elif pri == 1:
+                        p1_followups.append(callee)
                     else:
                         p2_followups.append(callee)
+                    self._emit("trace_priority", tid, function=callee.function_name,
+                               priority=pri, reason=sem.reason[:120], depth=dep)
 
                 # ── P0: 顺序依赖，当前 Slot 内 DFS ────────────────────────
                 current_taint_state = TaintState()
                 for callee in p0_followups:
                     self._raise_if_cancelled()
-                    # 注入累积校验上下文
-                    validation_context = current_taint_state.summary()
-                    if validation_context != "(无)":
-                        callee.tainted_params = callee.tainted_params
                     sub_file = callee.file or src_file
                     sub_cfg = task_cfg.model_copy(deep=True)
                     sub_cfg.function_name = callee.function_name
@@ -1223,6 +1250,7 @@ class Orchestrator(JudgeMixin):
                         {"name": p, "description": f"由 {func_name} 在 {_callee_callsite_line or callee.line or 'unknown'} 调用传入", "source_kind": "call_argument"}
                         for p in sub_cfg.taint_params
                     ]
+                    validation_context = current_taint_state.summary()
                     tainted_ctx_str = (
                         f"函数 {callee.function_name} 被 {func_name} 在 {_callee_callsite_line or callee.line} 调用。\n"
                         f"污染参数: {callee.tainted_params}\n说明: {callee.description}"
@@ -1233,14 +1261,85 @@ class Orchestrator(JudgeMixin):
                     sub_tid = tid + f"-d{dep + 1}-{callee.function_name[:25]}-{(callee.followup_id or hashlib.sha1((callee.function_name + callee.tainted_params + callee.line).encode()).hexdigest())[-6:]}"
                     self._emit("sequence_call", tid,
                                parent_function=func_name, callee_function=callee.function_name,
-                               depth=dep + 1, reason="sequential P0")
-                    # P0: inline recursion → sequential execution
+                               depth=dep + 1, reason="sequential P0: modifies param")
                     await queue.put((callee.function_name, sub_file, sub_line_hint, sub_cfg,
                                      sub_tid, dep + 1, tainted_ctx_str,
                                      completed_session_file or None, callee.followup_id,
                                      context_by_callee.get(_callee_key(callee), "")))
-                    # Wait for this P0 item to be processed before continuing
-                    # (P0 items are extracted sequentially by the worker loop below)
+
+                # ── P1: 不修改参数但产出校验 ────────────────────────────
+                for callee in p1_followups:
+                    self._raise_if_cancelled()
+                    taint_sig = _normalize_taint_signature(callee.tainted_params)
+                    func_h = compute_func_hash(target_dir, callee.file or src_file, callee.function_name) or "0"
+
+                    # 查全局缓存
+                    cached = global_cache.get_validations(
+                        callee.function_name, callee.file or src_file, taint_sig, func_h)
+                    if cached:
+                        # 命中：注入校验，不启动 Worker
+                        for v in cached:
+                            current_taint_state.entries.append(TaintEntry(
+                                variable=v.variable, kind=v.kind, evidence=v.evidence,
+                                confidence=v.confidence))
+                        # 还要处理缓存的 followups（check 内部调用的子函数）
+                        cached_fups = global_cache.get_followups(
+                            callee.function_name, callee.file or src_file, taint_sig, func_h)
+                        for fup in cached_fups:
+                            if fup.function:
+                                cf = CalleeRef(
+                                    function_name=fup.function, file=fup.file or callee.file or "",
+                                    line=fup.line or "", tainted_params=callee.tainted_params,
+                                    description=fup.reason or "cached followup from P1",
+                                    dispatch_kind="direct_call")
+                                valid.append(cf)
+                        if callee.followup_id:
+                            try:
+                                VulnScanStore(graph_db_path).update_followup_status(
+                                    callee.followup_id, "skipped", reason="cache hit (validations applied)")
+                            except Exception:
+                                pass
+                        self._emit("trace_cache_hit", tid, function=callee.function_name,
+                                   taint_sig=taint_sig, depth=dep)
+                        continue
+
+                    # 未命中缓存 → 正常入队，Worker 分析后写缓存
+                    sub_file = callee.file or src_file
+                    sub_cfg = task_cfg.model_copy(deep=True)
+                    sub_cfg.function_name = callee.function_name
+                    sub_cfg.source_file = sub_file
+                    sub_cfg.task = (
+                        f"对 {sub_file} 的 {callee.function_name} 函数进行静态污点分析,"
+                        f"外部输入参数(已污染)为:{callee.tainted_params or '所有参数'}"
+                    )
+                    ctx_base = task_cfg.context or ""
+                    if "# 调用者传入的脏数据" in ctx_base:
+                        ctx_base = ctx_base.split("# 调用者传入的脏数据")[0].strip()
+                    sub_cfg.context = ctx_base
+                    _callee_callsite_line = callsite_line_by_callee.get(_callee_key(callee), callee.line)
+                    _callsite_for_params = analyze_callsite(target_dir, callee.file or src_file, _callee_callsite_line, callee.function_name)
+                    _callee_params = map_taint_signature([x.strip() for x in (callee.tainted_params or "").split(",") if x.strip()], _callsite_for_params.actual_args)[0] or normalize_taint_params(callee.tainted_params)[0] or [x.strip() for x in (callee.tainted_params or "").split(",") if x.strip()]
+                    sub_cfg.taint_params = _callee_params or ["all"]
+                    sub_cfg.taint_details = [
+                        {"name": p, "description": f"由 {func_name} 在 {_callee_callsite_line or callee.line or 'unknown'} 调用传入", "source_kind": "call_argument"}
+                        for p in sub_cfg.taint_params
+                    ]
+                    validation_context = current_taint_state.summary()
+                    tainted_ctx_str = (
+                        f"函数 {callee.function_name} 被 {func_name} 在 {_callee_callsite_line or callee.line} 调用。\n"
+                        f"污染参数: {callee.tainted_params}\n说明: {callee.description}"
+                    )
+                    if validation_context != "(无)":
+                        tainted_ctx_str += f"\n\n# 调用链上已累积的校验\n{validation_context}"
+                    sub_line_hint = _get_definition_line(target_dir, callee.function_name, sub_file) or callee.line
+                    sub_tid = tid + f"-d{dep + 1}-{callee.function_name[:25]}-{(callee.followup_id or hashlib.sha1((callee.function_name + callee.tainted_params + callee.line).encode()).hexdigest())[-6:]}"
+                    self._emit("sequence_call", tid,
+                               parent_function=func_name, callee_function=callee.function_name,
+                               depth=dep + 1, reason="sequential P1: validates/reads-only")
+                    await queue.put((callee.function_name, sub_file, sub_line_hint, sub_cfg,
+                                     sub_tid, dep + 1, tainted_ctx_str,
+                                     completed_session_file or None, callee.followup_id,
+                                     context_by_callee.get(_callee_key(callee), "")))
 
                 # ── P2: 参数隔离，全局 BFS 并行 ───────────────────────────
                 for index, callee in enumerate(p2_followups):

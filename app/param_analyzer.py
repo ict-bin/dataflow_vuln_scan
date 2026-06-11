@@ -25,6 +25,7 @@ class ParamSemantics:
     is_const_qualified: bool = False
     is_pointer: bool = False
     is_reference: bool = False
+    effect: str = "unknown"  # reads_only | modifies | validates | unknown
     evidence: str = ""
 
     @property
@@ -36,6 +37,15 @@ class ParamSemantics:
     def needs_sequential(self) -> bool:
         return not self.is_isolated
 
+    @property
+    def priority(self) -> int:
+        """0=P0(modifies), 1=P1(validates/reads_only), 2=P2(isolated)"""
+        if self.is_isolated:
+            return 2
+        if self.effect in ("validates", "reads_only"):
+            return 1
+        return 0
+
 
 @dataclass
 class FollowupSemantics:
@@ -46,6 +56,7 @@ class FollowupSemantics:
     needs_sequential: bool = False
     reason: str = ""
     source: str = "script"  # "script" | "llm_fallback" | "conservative"
+    highest_priority: int = 0  # 0=P0, 1=P1, 2=P2
 
 
 # ─── fast heuristic helpers ───────────────────────────────────────────────────
@@ -157,6 +168,21 @@ def _lookup_param_decl(
     return _extract_param_decl(source, func_name, arg_index)
 
 
+_VALIDATES_PREFIX = re.compile(r"^(?:check_|validate_|verify_|test_|assert_|is_|has_|can_)")
+
+
+def _infer_effect(func_name: str, is_const: bool, is_ptr: bool) -> str:
+    """Infer parameter modification effect from function name and const-ness."""
+    short = func_name.rsplit("::", 1)[-1]
+    if not is_ptr:
+        return "reads_only"  # value type
+    if is_const:
+        return "reads_only"  # const pointer
+    if _VALIDATES_PREFIX.search(short):
+        return "validates"
+    return "modifies"
+
+
 # ─── main classifier ──────────────────────────────────────────────────────────
 
 def _classify_arg(
@@ -185,6 +211,7 @@ def _classify_arg(
             param_name=m.group(1),
             is_pointer=True,
             is_const_qualified=False,
+            effect="modifies",
             evidence=f"address-of: {text} → callee may modify pointed-to object",
         )
 
@@ -197,10 +224,12 @@ def _classify_arg(
                 hint_file=hint_file, source_root=source_root,
             )
         is_const = bool(decl and _CONST_RE.search(decl))
+        effect = _infer_effect(func_name, is_const, True)
         return ParamSemantics(
             param_name=text,
             is_pointer=True,
             is_const_qualified=is_const,
+            effect=effect,
             evidence=f"decl: {decl}" if decl else f"pointer access: {text}",
         )
 
@@ -215,11 +244,13 @@ def _classify_arg(
         if decl:
             is_ptr = "*" in decl or _POINTER_RE.search(decl)
             is_const = bool(decl and _CONST_RE.search(decl))
+            effect = _infer_effect(func_name, is_const, is_ptr)
             return ParamSemantics(
                 param_name=text,
                 is_pointer=is_ptr,
                 is_const_qualified=is_const,
                 is_value_type=not is_ptr,
+                effect=effect,
                 evidence=f"decl: {decl}",
             )
         # No declaration found → conservative if source_root is valid
@@ -228,12 +259,14 @@ def _classify_arg(
                 param_name=text,
                 is_pointer=True,
                 is_const_qualified=False,
+                effect="modifies",
                 evidence=f"no declaration found for {text}, assume pointer",
             )
         # No source_root available → assume value type for simple names
         return ParamSemantics(
             param_name=text,
             is_value_type=True,
+            effect="reads_only",
             evidence=f"simple identifier: {text} (no source root)",
         )
 
@@ -242,6 +275,7 @@ def _classify_arg(
         param_name=text,
         is_pointer=True,
         is_const_qualified=False,
+        effect="modifies",
         evidence=f"complex expression: {text[:60]}",
     )
 
@@ -280,9 +314,15 @@ def analyze(callee_name: str, callee_file: str,
         )
 
     needs_seq = any(p.needs_sequential for p in params)
+    max_pri = max((p.priority for p in params), default=2)
     reason_parts: list[str] = []
     for p in params:
-        tag = "may modify" if p.needs_sequential else "isolated"
+        if p.priority == 0:
+            tag = "P0: may modify"
+        elif p.priority == 1:
+            tag = f"P1: {p.effect}"
+        else:
+            tag = "P2: isolated"
         reason_parts.append(f"  {p.param_name}: {tag} ({p.evidence[:80]})")
     reason = "\n".join(reason_parts)
 
@@ -291,6 +331,7 @@ def analyze(callee_name: str, callee_file: str,
         callee_file=callee_file,
         params=params,
         needs_sequential=needs_seq,
+        highest_priority=max_pri,
         reason=reason,
         source="script",
     )

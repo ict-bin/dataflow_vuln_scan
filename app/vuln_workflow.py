@@ -592,6 +592,86 @@ class DataflowVulnWorkflow:
             self._emit("vuln_scan_error", function=self.func_name, error=str(exc), depth=self.dep)
             return []
 
+
+def build_function_summary_from_result(
+    result: TaskResult,
+    tainted_params: list[str],
+    func_hash: str,
+) -> dict:
+    """Script-based summary extraction — no LLM overhead.
+
+    Returns a dict suitable for GlobalCache.put() / FunctionSummary construction.
+    Called from orchestrator after Worker analysis completes.
+    """
+    validations: list[dict] = []
+    edges_list: list[dict] = []
+    followups_list: list[dict] = []
+
+    # Extract from rounds
+    for rnd in (result.rounds or []):
+        for worker in (rnd.worker_results or []):
+            if worker.df_issues:
+                for issue in worker.df_issues:
+                    validations.append({
+                        "variable": "",
+                        "kind": "structure_check",
+                        "evidence": issue,
+                        "confidence": "high",
+                    })
+
+    # Extract from upstream_entry_metadata
+    meta = result.upstream_entry_metadata or {}
+    followup_refs = meta.get("followup_refs") or []
+    for fup in followup_refs:
+        followups_list.append({
+            "file": fup.get("callee_file", ""),
+            "function": fup.get("callee_function", ""),
+            "line": fup.get("callee_line", ""),
+            "reason": fup.get("reason", ""),
+        })
+        # If followup has validation facts, collect them
+        facts_json = fup.get("validation_facts_json", "[]")
+        try:
+            facts = json.loads(facts_json) if isinstance(facts_json, str) else facts_json
+            for fact in (facts if isinstance(facts, list) else []):
+                if isinstance(fact, dict):
+                    validations.append({
+                        "variable": fact.get("target_symbol", ""),
+                        "kind": fact.get("kind", "constraint"),
+                        "evidence": fact.get("evidence", ""),
+                        "confidence": fact.get("confidence", "medium"),
+                    })
+        except Exception:
+            pass
+
+    # Extract taint edges from taint_graph
+    taint_graph = meta.get("taint_graph")
+    if isinstance(taint_graph, dict):
+        for edge in (taint_graph.get("edges") or []):
+            if isinstance(edge, dict):
+                edges_list.append({
+                    "from": edge.get("from", ""),
+                    "to": edge.get("to", ""),
+                    "operation": edge.get("operation", ""),
+                    "evidence": edge.get("evidence", ""),
+                })
+                # Validations from edges
+                if edge.get("sanitizer_effect") and edge["sanitizer_effect"] != "none":
+                    validations.append({
+                        "variable": edge.get("to", ""),
+                        "kind": edge.get("sanitizer", "sanitizer"),
+                        "evidence": edge.get("evidence", ""),
+                        "confidence": "high",
+                    })
+
+    return {
+        "function_name": result.task or "",
+        "func_hash": func_hash,
+        "validations": validations,
+        "edges": edges_list,
+        "followups": followups_list,
+    }
+
     async def run(self) -> TaskResult:
         result = await self.run_taint_tracking_only()
         await self.run_vuln_mining_after_taint(result)

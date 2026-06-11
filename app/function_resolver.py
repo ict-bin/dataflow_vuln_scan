@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
+from .global_cache import source_root_key, GlobalCache
+
 _SOURCE_EXTS = {".c", ".h", ".cc", ".cpp", ".cxx", ".hpp", ".hh", ".hxx"}
 _CPP_EXTS = {".cc", ".cpp", ".cxx", ".hpp", ".hh", ".hxx"}
 _EXCLUDE_PARTS = {".git", "build", "out", "cmake-build-debug", "cmake-build-release", "node_modules"}
@@ -169,9 +171,13 @@ class FunctionResolver:
         )
 
     def ensure_fallback_funcdb(self) -> Path | None:
-        cache_root = Path(self.cache_root or (Path(os.environ.get("FILESERVER_ROOT", "/data/files")) / "app" / "secflow-app-dataflow-vuln-scan" / "funcdb" / "dvs-fallback"))
+        cache_root = self.cache_root
+        if not cache_root:
+            cache_root = str(GlobalCache(self.source_root).funcdb_root / "dvs-fallback")
+        else:
+            cache_root = str(Path(cache_root))
         digest = hashlib.sha1(self.source_root.encode("utf-8", errors="replace")).hexdigest()[:16]
-        db_path = cache_root / digest / "dvs-fallback-functions.db"
+        db_path = Path(cache_root) / digest / "dvs-fallback-functions.db"
         marker = cache_root / digest / "source-root.txt"
         try:
             db_path.parent.mkdir(parents=True, exist_ok=True)
