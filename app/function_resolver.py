@@ -178,7 +178,7 @@ class FunctionResolver:
             cache_root = str(Path(cache_root))
         digest = hashlib.sha1(self.source_root.encode("utf-8", errors="replace")).hexdigest()[:16]
         db_path = Path(cache_root) / digest / "dvs-fallback-functions.db"
-        marker = cache_root / digest / "source-root.txt"
+        marker = Path(cache_root) / digest / "source-root.txt"
         try:
             db_path.parent.mkdir(parents=True, exist_ok=True)
             marker.write_text(self.source_root, encoding="utf-8")

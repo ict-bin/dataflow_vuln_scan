@@ -894,8 +894,8 @@ class Orchestrator(JudgeMixin):
                     global_cache.put(
                         func_name, src_file, _item_taint_sig, _item_func_h, _summary,
                     )
-                except Exception:
-                    pass
+                except Exception as _cache_exc:
+                    logger.warning("global cache write failed for %s: %s", func_name, _cache_exc)
 
             _relativize_round_artifacts(result, out_dir, root_out_dir)
 
