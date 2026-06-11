@@ -705,6 +705,7 @@ class PerTaintWorkflow:
                 "task_id": self.task_id,
                 "task_root": str(self.out_dir.parent) if self.out_dir else "",
                 "task_run_root": str(self.out_dir) if self.out_dir else str(self.ws),
+                "task_pi_dir": getattr(self.cfg, "task_pi_dir", ""),
             },
         )
 

@@ -102,6 +102,7 @@ class JudgeMixin:
                 "task_id": result.task_id,
                 "task_root": str(Path(cwd).resolve().parent),
                 "task_run_root": str(Path(cwd).resolve()),
+                "task_pi_dir": getattr(cfg, "task_pi_dir", ""),
             },
         )
 
@@ -184,6 +185,12 @@ class JudgeMixin:
             "timeout_max_retries": cfg.agent_timeout_max_retries,
             "pi_max_retries": cfg.pi_max_retries,
             "pi_retry_delay": cfg.pi_retry_delay,
+            "task_context": {
+                "task_id": result.task_id,
+                "task_root": str(sess_dir.parent.resolve().parent),
+                "task_run_root": str(sess_dir.parent.resolve()),
+                "task_pi_dir": getattr(cfg, "task_pi_dir", ""),
+            },
         }
 
         # ═══ 步骤0:准备 Worker 输出文件(放入 Judge 工作目录)═══

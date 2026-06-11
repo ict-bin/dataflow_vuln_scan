@@ -79,6 +79,11 @@ class TaskCreateRequest(BaseModel):
     parent_stage_name: Optional[str] = None
     parent_stage_item_id: Optional[str] = None
     parent_stage_item_key: Optional[str] = None
+    agent_task_key_id: Optional[str] = None
+    agent_task_key_name: Optional[str] = None
+    agent_task_key_prefix: Optional[str] = None
+    agent_task_key_secret: Optional[str] = None
+    agent_task_key_source: Optional[str] = None
 
 
 class GeneratePromptRequest(BaseModel):
@@ -1092,6 +1097,23 @@ def create_task(body: TaskCreateRequest, db: Session = Depends(get_db)):
         task_config_json["funcdb_path"] = str(body.funcdb_path).strip()
     if body.func_hash:
         task_config_json["func_hash"] = str(body.func_hash).strip()
+    if any(
+        value is not None
+        for value in (
+            body.agent_task_key_id,
+            body.agent_task_key_name,
+            body.agent_task_key_prefix,
+            body.agent_task_key_secret,
+            body.agent_task_key_source,
+        )
+    ):
+        task_config_json["agent_task_key"] = {
+            "id": body.agent_task_key_id,
+            "name": body.agent_task_key_name,
+            "prefix": body.agent_task_key_prefix,
+            "secret": body.agent_task_key_secret,
+            "source": body.agent_task_key_source,
+        }
 
     svc = get_task_service()
     return svc.create_task(

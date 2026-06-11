@@ -324,7 +324,12 @@ class DataflowVulnWorkflow:
             cancel_event=self.cancel_event, run_timeout_seconds=self.cfg.agent_run_timeout_seconds,
             timeout_retry_enabled=self.cfg.agent_timeout_retry_enabled, timeout_max_retries=self.cfg.agent_timeout_max_retries,
             pi_max_retries=self.cfg.pi_max_retries, pi_retry_delay=self.cfg.pi_retry_delay,
-            task_context={"task_id": self.task_id, "task_root": str(self.out_dir.parent), "task_run_root": str(self.out_dir)},
+            task_context={
+                "task_id": self.task_id,
+                "task_root": str(self.out_dir.parent),
+                "task_run_root": str(self.out_dir),
+                "task_pi_dir": getattr(self.cfg, "task_pi_dir", ""),
+            },
         )
         self._emit("worker_done", worker_id="worker-0", output=res.output[:300], tokens_in=res.token_usage.input, tokens_out=res.token_usage.output)
         total_tokens = TokenUsage(); total_tokens += res.token_usage
@@ -391,7 +396,12 @@ class DataflowVulnWorkflow:
             cancel_event=self.cancel_event, run_timeout_seconds=self.cfg.agent_run_timeout_seconds,
             timeout_retry_enabled=self.cfg.agent_timeout_retry_enabled, timeout_max_retries=self.cfg.agent_timeout_max_retries,
             pi_max_retries=self.cfg.pi_max_retries, pi_retry_delay=self.cfg.pi_retry_delay,
-            task_context={"task_id": self.task_id, "task_root": str(self.out_dir.parent), "task_run_root": str(self.out_dir)},
+            task_context={
+                "task_id": self.task_id,
+                "task_root": str(self.out_dir.parent),
+                "task_run_root": str(self.out_dir),
+                "task_pi_dir": getattr(self.cfg, "task_pi_dir", ""),
+            },
         )
         parsed = _extract_json_from_text(output.output, "findings") or {"findings": []}
         self.store.add_context_fork(fork_id=fork_id, run_id=self.run_id, purpose="vulnerability_mining", session_file=str(fork_session), node_id=node, status="completed" if not output.error else "error")

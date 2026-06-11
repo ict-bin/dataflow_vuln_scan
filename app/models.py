@@ -113,6 +113,7 @@ class TaskConfig(BaseModel):
     project_id: str = Field(default="", description="SecFlow 项目 ID，用于漏洞疑点上报")
     task_name: str = Field(default="", description="SecFlow 任务名称，用于漏洞疑点上报元数据")
     cwd: str = Field(default="/data/target", description="待分析文件所在目录")
+    task_pi_dir: str = Field(default="", description="任务级 PI runtime 目录")
 
     # 服务配置部分（从 ServiceConfig 合并）
     max_rounds: int = Field(default=3)

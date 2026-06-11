@@ -411,6 +411,10 @@ def _build_agent_env(
         payload["DVS_WORKER_ID"] = str(task_context["worker_id"])
     if task_context.get("execution_epoch") is not None:
         payload["DVS_EXECUTION_EPOCH"] = str(task_context["execution_epoch"])
+    if task_context.get("task_pi_dir"):
+        task_pi_dir = str(task_context["task_pi_dir"])
+        payload["PI_CODING_AGENT_DIR"] = task_pi_dir
+        payload["PI_MODELS_JSON"] = str(Path(task_pi_dir) / "models.json")
     return payload
 
 

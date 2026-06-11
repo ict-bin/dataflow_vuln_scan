@@ -66,6 +66,47 @@ _RUNNING_TASK_LOCK = threading.RLock()
 _running_tasks: dict[str, "_RunningTaskContext"] = {}
 
 
+def _task_agent_key(task_config_json: dict | None) -> dict | None:
+    if not isinstance(task_config_json, dict):
+        return None
+    payload = task_config_json.get("agent_task_key")
+    return payload if isinstance(payload, dict) else None
+
+
+def _materialize_task_pi_runtime(*, task_root: str, agent_task_key: dict | None) -> tuple[str | None, str]:
+    secret = str((agent_task_key or {}).get("secret") or "").strip()
+    if not secret or not task_root:
+        return None, "global"
+    task_pi_dir = Path(task_root) / ".pi" / "agent"
+    task_pi_dir.mkdir(parents=True, exist_ok=True)
+    global_pi_dir = Path(os.environ.get("PI_CODING_AGENT_DIR", "/root/.pi/agent"))
+    models_src = Path(os.environ.get("PI_MODELS_JSON") or (global_pi_dir / "models.json"))
+    settings_src = global_pi_dir / "settings.json"
+    if models_src.is_file():
+        shutil.copy2(models_src, task_pi_dir / "models.json")
+    else:
+        (task_pi_dir / "models.json").write_text(json.dumps({"providers": {}}, ensure_ascii=False, indent=2), encoding="utf-8")
+    if settings_src.is_file():
+        shutil.copy2(settings_src, task_pi_dir / "settings.json")
+    elif not (task_pi_dir / "settings.json").exists():
+        (task_pi_dir / "settings.json").write_text("{}", encoding="utf-8")
+    (task_pi_dir / "auth.json").write_text(
+        json.dumps(
+            {
+                "agent_task_key_id": str((agent_task_key or {}).get("id") or "").strip() or None,
+                "agent_task_key_name": str((agent_task_key or {}).get("name") or "").strip() or None,
+                "agent_task_key_prefix": str((agent_task_key or {}).get("prefix") or "").strip() or None,
+                "agent_task_key_secret": secret,
+                "agent_task_key_source": str((agent_task_key or {}).get("source") or "").strip() or None,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    return str(task_pi_dir), "task_scoped"
+
+
 def _run_db_write_with_retries(label: str, operation, *, attempts: int | None = None):
     """Run a DB write operation with fresh sessions on transient MySQL disconnects.
 
@@ -2579,6 +2620,12 @@ class TaskService:
                 epoch_run_root.mkdir(parents=True, exist_ok=True)
 
             cfg = build_task_config(svc, row.prompt_content, cwd=row.source_root_path or row.input_path)
+            agent_task_key = _task_agent_key(tcfg)
+            task_pi_dir, agent_runtime_mode = _materialize_task_pi_runtime(
+                task_root=task_root_path or "",
+                agent_task_key=agent_task_key,
+            )
+            cfg.task_pi_dir = task_pi_dir or ""
             cfg.project_id = str(row.project_id or "")
             cfg.task_name = str(row.task_name or "")
             if tcfg.get("source_file"):
@@ -2632,6 +2679,21 @@ class TaskService:
                 epoch=epoch,
                 control_version=control_version,
             )
+            _record_task_event(
+                db,
+                row=row,
+                event_type="task_agent_runtime_materialized" if task_pi_dir else "task_agent_runtime_fallback_to_global",
+                message="已生成任务级 PI runtime" if task_pi_dir else "未提供任务级 key，回退到全局 PI runtime",
+                status=row.status,
+                dispatch_status=row.dispatch_status,
+                payload={
+                    "agent_task_key_id": str((agent_task_key or {}).get("id") or "").strip() or None,
+                    "agent_task_key_prefix": str((agent_task_key or {}).get("prefix") or "").strip() or None,
+                    "agent_task_key_source": str((agent_task_key or {}).get("source") or "").strip() or None,
+                    "agent_runtime_mode": agent_runtime_mode,
+                },
+            )
+            db.commit()
             if not ctx.lease_alive():
                 ctx.lease_stop_requested.clear()
                 ctx.lease_thread = _start_task_lease_heartbeat(
@@ -3164,6 +3226,10 @@ class TaskService:
             "abnormal_reason_title": (abnormal_reason or {}).get("title"),
             "abnormal_reason_code": (abnormal_reason or {}).get("code"),
             "abnormal_reason_category": (abnormal_reason or {}).get("category"),
+            "has_agent_task_key": bool(str((((row.task_config_json or {}).get("agent_task_key") or {}).get("secret") or "")).strip()),
+            "agent_task_key_id": str((((row.task_config_json or {}).get("agent_task_key") or {}).get("id") or "")).strip() or None,
+            "agent_task_key_prefix": str((((row.task_config_json or {}).get("agent_task_key") or {}).get("prefix") or "")).strip() or None,
+            "agent_runtime_mode": "task_scoped" if bool(str((((row.task_config_json or {}).get("agent_task_key") or {}).get("secret") or "")).strip()) else "global",
         }
 
 
