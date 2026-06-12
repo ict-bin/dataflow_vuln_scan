@@ -263,7 +263,7 @@ class DataflowVulnWorkflow:
             "同时在报告中判断当前函数内是否存在漏洞候选，漏洞判断会由后续 fork 上下文复核。\n"
         )
 
-    async def _run_single_worker(self) -> tuple[TaskResult, str, str]:
+    def _run_single_worker(self) -> tuple[TaskResult, str, str]:
         self._link_source_tree()
         func_body = _extract_function_body(
             self.ws,
@@ -317,7 +317,7 @@ class DataflowVulnWorkflow:
         prompt = self._build_single_worker_prompt(func_body)
         self._emit("worker_start", worker_id="worker-0", model=acfg.model, function=self.func_name, depth=self.dep)
         started = time.time()
-        res = await run_agent(
+        res = run_agent(
             prompt=prompt, model=acfg.model, tools=acfg.tools or self.cfg.workers.default_tools,
             cwd=str(self.ws), session_file=session_file, system_prompt=system_prompt,
             cancel_event=self.cancel_event, run_timeout_seconds=self.cfg.agent_run_timeout_seconds,
@@ -358,7 +358,7 @@ class DataflowVulnWorkflow:
             result.upstream_entry_metadata["taint_graph"] = graph
         return result, str(session_file), df_content or res.output
 
-    async def _run_vuln_mining_fork(self, base_session: str, dataflow_text: str) -> list[VulnFindingRecord]:
+    def _run_vuln_mining_fork(self, base_session: str, dataflow_text: str) -> list[VulnFindingRecord]:
         if self._cancelled() or not self.cfg.workers.agents:
             return []
         acfg = self._agent_cfg()
@@ -389,7 +389,7 @@ class DataflowVulnWorkflow:
             f"{_EMBEDDED_VULN_MINING_SKILL}\n\n"
             f"{_read_prompt('prompts/vuln-miners/default.md')}"
         )
-        output = await run_agent(
+        output = run_agent(
             prompt=prompt, model=acfg.model, tools=acfg.tools or self.cfg.workers.default_tools,
             cwd=str(self.vuln_root.parent), session_file=str(fork_session), system_prompt=miner_system_prompt,
             cancel_event=self.cancel_event, run_timeout_seconds=self.cfg.agent_run_timeout_seconds,
@@ -437,7 +437,7 @@ class DataflowVulnWorkflow:
             )
             try:
                 from .vuln_intake_reporter import report_finding_to_intake
-                report_result = await report_finding_to_intake(
+                report_result = report_finding_to_intake(
                     project_id=self.project_id,
                     task_id=self.task_id,
                     task_name=self.task_name,
@@ -563,12 +563,12 @@ class DataflowVulnWorkflow:
                 pass
         return result
 
-    async def run_taint_tracking_only(self) -> TaskResult:
+    def run_taint_tracking_only(self) -> TaskResult:
         self._write_design_doc()
         self.store.start_run(self.run_id, self.task_id, self.src_file, self.func_name, self.cfg.cwd, self.cfg.model_dump())
         node_ids = self._seed_nodes()
         self._emit("vuln_scan_graph_start", function=self.func_name, source_file=self.src_file, taints=self.taint_params, depth=self.dep)
-        result, base_session, dataflow_text = await self._run_single_worker()
+        result, base_session, dataflow_text = self._run_single_worker()
         # 将 worker session 路径写入元数据，供 Orchestrator 传递给 callee 作为 parent session；
         # 同时保留漏洞挖掘所需的 dataflow 文本，使漏洞挖掘可以与后续 callee 污点分析并行。
         if base_session:
@@ -578,11 +578,11 @@ class DataflowVulnWorkflow:
         self._record_edges_from_result(result, node_ids)
         return self._finalize_taint_result(result)
 
-    async def run_vuln_mining_after_taint(self, result: TaskResult) -> list[VulnFindingRecord]:
+    def run_vuln_mining_after_taint(self, result: TaskResult) -> list[VulnFindingRecord]:
         base_session = str((result.upstream_entry_metadata or {}).get("vuln_mining_base_session") or "")
         dataflow_text = str((result.upstream_entry_metadata or {}).get("vuln_mining_dataflow_text") or result.final_output or "")
         try:
-            findings = await self._run_vuln_mining_fork(base_session, dataflow_text)
+            findings = self._run_vuln_mining_fork(base_session, dataflow_text)
             self._emit("vuln_scan_findings", function=self.func_name, count=len(findings), depth=self.dep)
             graph_export = self.store.export_json()
             result.vuln_summary = {"runs": len(graph_export.get("analysis_runs") or []), "nodes": len(graph_export.get("taint_nodes") or []), "edges": len(graph_export.get("taint_edges") or []), "followups": len(graph_export.get("followups") or []), "findings": len(graph_export.get("vulnerability_findings") or [])}
@@ -591,9 +591,9 @@ class DataflowVulnWorkflow:
             self._emit("vuln_scan_error", function=self.func_name, error=str(exc), depth=self.dep)
             return []
 
-    async def run(self) -> TaskResult:
-        result = await self.run_taint_tracking_only()
-        await self.run_vuln_mining_after_taint(result)
+    def run(self) -> TaskResult:
+        result = self.run_taint_tracking_only()
+        self.run_vuln_mining_after_taint(result)
         return result
 
     def _make_result(self, final_output: str, agent_result: Any, passed: bool, completion_reason: str, *, rounds: list[RoundResult] | None = None, total_tokens: TokenUsage | None = None) -> TaskResult:
@@ -683,9 +683,9 @@ def build_function_summary_from_result(
         "followups": followups_list,
     }
 
-    async def run(self) -> TaskResult:
-        result = await self.run_taint_tracking_only()
-        await self.run_vuln_mining_after_taint(result)
+    def run(self) -> TaskResult:
+        result = self.run_taint_tracking_only()
+        self.run_vuln_mining_after_taint(result)
         return result
 
     def _make_result(self, final_output: str, agent_result: Any, passed: bool, completion_reason: str, *, rounds: list[RoundResult] | None = None, total_tokens: TokenUsage | None = None) -> TaskResult:
