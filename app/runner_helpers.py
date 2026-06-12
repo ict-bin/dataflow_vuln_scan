@@ -236,7 +236,41 @@ def _find_pi_command() -> list[str]:
 
 
 def _resolve_pi_model(model: str) -> str:
-    return model
+    """Return a pi-compatible model name with provider prefix.
+
+    pi requires provider-qualified names. Platform config stores only the
+    model id (e.g. MiniMax/MiniMax-M2.5). Look up models.json to find the
+    matching provider and qualify the name.
+    """
+    raw = str(model or "").strip()
+    if not raw:
+        return raw
+    models_path = Path(os.environ.get("PI_MODELS_JSON") or Path.home() / ".pi" / "agent" / "models.json")
+    try:
+        data = json.loads(models_path.read_text(encoding="utf-8"))
+        providers = data.get("providers") if isinstance(data, dict) else None
+        if not isinstance(providers, dict):
+            return raw
+        provider_keys = {str(k) for k in providers.keys()}
+        if any(raw == key or raw.startswith(f"{key}/") for key in provider_keys):
+            return raw
+        matches: list[str] = []
+        for provider_key, provider_cfg in providers.items():
+            if not isinstance(provider_cfg, dict):
+                continue
+            for item in provider_cfg.get("models") or []:
+                if not isinstance(item, dict):
+                    continue
+                model_id = str(item.get("id") or item.get("name") or "").strip()
+                if model_id == raw:
+                    matches.append(f"{provider_key}/{raw}")
+        if len(matches) == 1:
+            resolved = matches[0]
+            _log_info(f"resolved pi model {raw!r} -> {resolved!r}")
+            return resolved
+    except Exception as exc:
+        _log_warn(f"resolve pi model failed for {raw!r}: {exc}")
+    return raw
 
 
 # ─── Process tree management (sync, using subprocess.Popen) ───────────────────
