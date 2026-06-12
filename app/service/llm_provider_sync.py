@@ -56,6 +56,10 @@ def _model_entries(provider: dict[str, Any]) -> list[dict[str, Any]]:
         if not isinstance(raw, dict):
             continue
         entry = dict(raw)
+        # Strip any maxTokens restriction to allow unlimited LLM output
+        for _k in list(entry.keys()):
+            if _k.lower() in ("maxtokens", "max_tokens", "max_output_tokens", "maxoutputtokens"):
+                entry.pop(_k, None)
         entry.setdefault("id", model_id)
         entry.setdefault("name", entry.get("id") or model_id)
         entry.setdefault("reasoning", False)
