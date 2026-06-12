@@ -6,10 +6,10 @@ Writes minimal valid mock files and returns immediately.
 """
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import re
+import time
 import uuid
 from pathlib import Path
 from typing import Callable
@@ -110,7 +110,14 @@ def run_agent_dryrun(
             "## 改进指令\n无"
         )
     else:
-        result.output = f"<result>[DRYRUN-{nonce}] ok</result>"
+        result.output = json.dumps({
+            "function": "process_auth_request",
+            "source_file": "auth.c",
+            "taints": [{"symbol": "tok", "kind": "param"}],
+            "edges": [],
+            "followups": [],
+            "termination": {"reason": "dryrun", "tainted_params": []}
+        })
 
     if on_stream:
         on_stream(result.output[:80])

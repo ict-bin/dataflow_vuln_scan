@@ -1,9 +1,9 @@
 """Single-worker dataflow taint tracking + vulnerability mining workflow."""
 from __future__ import annotations
-from sqlalchemy import func
 
 import hashlib
 import json
+import logging
 import re
 import shutil
 import time
@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
+from sqlalchemy import func
+
 from .config import load_system_prompts, resolve_system_prompt
 from .models import AgentInstanceConfig, RoundResult, SwarmEvent, TaskConfig, TaskResult, TaskStatus, TokenUsage, WorkerResult
 from .runner import run_agent
@@ -19,6 +21,8 @@ from .taint_workflow import _extract_function_body, _prepend_upstream_hint_secti
 from .vuln_graph_validator import normalize_taint_graph, validate_taint_graph
 from .validation_state import normalize_validation_state
 from .vuln_store import FollowupRecord, TaintEdgeRecord, TaintSourceRecord, VulnFindingRecord, VulnScanStore
+
+logger = logging.getLogger("dvs.vuln_workflow")
 
 
 @dataclass
