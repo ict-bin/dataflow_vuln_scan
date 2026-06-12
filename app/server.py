@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import threading
 import contextlib
-import queue
+from queue import Queue, Full
 import json
 import logging
 import os
@@ -140,7 +140,7 @@ class TaskEntry:
         self.prompt = prompt
         self.result: TaskResult | None = None
         self.events: list[dict] = []
-        self.queues: list[queue.Queue] = []
+        self.queues: list[Queue] = []
         self.done = threading.Event()
         self.callback_url: str | None = None
 
@@ -427,7 +427,7 @@ def submit_analyse(body: AnalyseRequest):
         for q in entry.queues:
             try:
                 q.put_nowait(d)
-            except queue.QueueFull:
+            except QueueFull:
                 pass
 
     orch = Orchestrator(config=cfg, on_event=on_event)
@@ -450,7 +450,7 @@ def submit_analyse(body: AnalyseRequest):
             for q in entry.queues:
                 try:
                     q.put_nowait(done_data)
-                except queue.QueueFull:
+                except QueueFull:
                     pass
             entry.done.set()
             if entry.callback_url and entry.result:
@@ -503,7 +503,7 @@ def stream_task(task_id: str):
     entry = _tasks.get(task_id)
     if not entry:
         raise HTTPException(404, "Task not found")
-    queue: queue.Queue = queue.Queue(maxsize=1000)
+    queue: Queue = Queue(maxsize=1000)
     entry.queues.append(queue)
 
     def gen():

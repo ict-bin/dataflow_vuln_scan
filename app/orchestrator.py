@@ -7,7 +7,7 @@ execute_recursive: BFS 队列 + Worker Pool 递归分析调用链
 from __future__ import annotations
 
 import threading
-import queue
+from queue import Queue
 import json
 import logging
 import math
@@ -733,7 +733,7 @@ class Orchestrator(JudgeMixin):
         root_sessions_dir = root_out_dir / "sessions"
         root_sessions_dir.mkdir(exist_ok=True)
 
-        queue: queue.Queue = queue.Queue()
+        queue: Queue = Queue()
         all_results: dict[str, TaskResult] = {}   # func_key -> TaskResult
         sub_dataflow_files: list[tuple[str, str]] = []
 

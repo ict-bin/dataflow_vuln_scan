@@ -17,7 +17,7 @@ context built by previous calls.
 """
 from __future__ import annotations
 
-import queue
+from queue import Queue
 import threading
 import hashlib
 import json
@@ -195,7 +195,7 @@ class Slot:
         p0_followups: list,
         ctx: SlotContext,
         executor,  # Callable[[CalleeRef, SlotContext, TaintState], TaintState]
-        bfs_queue: queue.Queue,
+        bfs_queue: Queue,
     ) -> TaintState:
         """Execute P0 followups sequentially, dispatching P2 to BFS queue.
 
