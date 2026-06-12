@@ -12,6 +12,7 @@ from datetime import datetime
 from pathlib import Path
 
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 from sqlalchemy.orm.attributes import flag_modified
 
 from app.config import load_service_config

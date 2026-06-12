@@ -2,6 +2,7 @@
 prompt_builder.py — Worker/Judge Prompt 构造 + 结果格式化
 """
 from __future__ import annotations
+from sqlalchemy import func
 
 import os
 import re

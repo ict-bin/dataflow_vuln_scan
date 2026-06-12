@@ -1,5 +1,6 @@
 """Single-worker dataflow taint tracking + vulnerability mining workflow."""
 from __future__ import annotations
+from sqlalchemy import func
 
 import hashlib
 import json

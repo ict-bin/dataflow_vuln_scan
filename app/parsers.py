@@ -2,6 +2,7 @@
 parsers.py — 输出文件解析 + 评审结果解析工具
 """
 from __future__ import annotations
+from sqlalchemy import func
 
 import json
 import os

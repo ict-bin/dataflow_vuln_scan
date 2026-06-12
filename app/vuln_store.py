@@ -6,6 +6,7 @@ context can append deterministic taint/vulnerability facts without polluting the
 platform database.
 """
 from __future__ import annotations
+from sqlalchemy import func
 
 try:
     import fcntl  # type: ignore
