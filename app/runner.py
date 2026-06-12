@@ -75,6 +75,11 @@ _RATE_LIMIT_PATTERNS = ["rate limit", "too many requests", "429"]
 _RATE_LIMIT_EXTRA_DELAY = 30.0
 
 
+def _should_emit_rate_limit_event(streak: int) -> bool:
+    streak = max(0, int(streak or 0))
+    return streak == 1 or (streak > 0 and streak % 10 == 0)
+
+
 # ─── Context overflow recovery ────────────────────────────────────────────────
 
 def _run_with_context_overflow_recovery(
@@ -385,6 +390,7 @@ def _run_with_api_retry(
     """Inner loop: launch pi subprocess via subprocess.Popen, threaded stdout/stderr reading."""
     api_attempt = 0
     query_engine_401_failures = 0
+    rate_limit_streak = 0
     process_launch_attempt = 0
 
     while True:
@@ -639,19 +645,31 @@ def _run_with_api_retry(
 
         # API retryable error
         if _is_retryable_api_error(result):
+            err_lower = (result.error or "").lower()
+            is_rate_limit = any(p in err_lower for p in _RATE_LIMIT_PATTERNS)
+            if is_rate_limit:
+                rate_limit_streak += 1
+                delay = _RATE_LIMIT_EXTRA_DELAY
+                result.rate_limited = True
+                result.consecutive_rate_limit_count = rate_limit_streak
+                result.retry_delay_seconds = int(delay)
+                result.rate_limit_event_due = _should_emit_rate_limit_event(rate_limit_streak)
+                _log_warn(f"Rate limit error [streak={rate_limit_streak}], retry in {delay:.0f}s: {(result.error or '')[:200]}")
+                if on_stream:
+                    on_stream(f"\n⚠️ Rate limit error, retry in {delay:.0f}s (streak {rate_limit_streak})...\n")
+                if _sleep_with_cancel(delay, cancel_event):
+                    result.error = (result.error or "") + " [cancelled during api retry backoff]"
+                    return result
+                continue
+            rate_limit_streak = 0
             api_attempt += 1
             can_retry = (max_retries == -1) or (api_attempt <= max_retries)
             if can_retry:
                 delay = _backoff(retry_delay, api_attempt)
-                err_lower = (result.error or "").lower()
-                is_rate_limit = any(p in err_lower for p in _RATE_LIMIT_PATTERNS)
-                if is_rate_limit:
-                    delay = max(delay, _RATE_LIMIT_EXTRA_DELAY)
                 label = f"{api_attempt}/{_fmt_max(max_retries)}"
-                kind = "Rate limit" if is_rate_limit else "API"
-                _log_warn(f"{kind} error [{label}], retry in {delay:.0f}s: {(result.error or '')[:200]}")
+                _log_warn(f"API error [{label}], retry in {delay:.0f}s: {(result.error or '')[:200]}")
                 if on_stream:
-                    on_stream(f"\n⚠️ {kind} error, retry in {delay:.0f}s ({label})...\n")
+                    on_stream(f"\n⚠️ API error, retry in {delay:.0f}s ({label})...\n")
                 if _sleep_with_cancel(delay, cancel_event):
                     result.error = (result.error or "") + " [cancelled during api retry backoff]"
                     return result

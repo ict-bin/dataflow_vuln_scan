@@ -66,6 +66,10 @@ class AgentResult:
         self.duration_ms = duration_ms
         self.pi_version = pi_version
         self.messages: list[dict] = []
+        self.rate_limited: bool = False
+        self.consecutive_rate_limit_count: int = 0
+        self.retry_delay_seconds: int = 0
+        self.rate_limit_event_due: bool = False
 
 
 class _PiProcessError(Exception):

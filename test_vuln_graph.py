@@ -3,6 +3,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from app.cpp_resolver import _find_virtual_override_candidates_if_stub, _resolve_virtual_override_if_stub
@@ -14,9 +15,143 @@ from app.vuln_graph_service import build_trace_tree, load_vuln_scan_graph, summa
 from app.vuln_graph_validator import validate_taint_graph
 from app.vuln_store import FollowupRecord, TaintEdgeRecord, TaintSourceRecord, VulnFindingRecord, VulnScanStore
 from app.vuln_workflow import DataflowVulnWorkflow, parse_taint_inputs
+from app.taint_workflow import PerTaintWorkflow
 
 
 class VulnGraphStoreTests(unittest.TestCase):
+    def _make_prompt_tree(self, root: Path) -> tuple[Path, Path]:
+        worker_dir = root / "prompts" / "workers"
+        judge_dir = root / "prompts" / "judges"
+        worker_dir.mkdir(parents=True, exist_ok=True)
+        judge_dir.mkdir(parents=True, exist_ok=True)
+        for name in ["default", "worker"]:
+            (worker_dir / f"{name}.md").write_text(f"# {name}\n", encoding="utf-8")
+        for name in ["default", "judge"]:
+            (judge_dir / f"{name}.md").write_text(f"# {name}\n", encoding="utf-8")
+        return worker_dir, judge_dir
+
+    def _make_cfg(self, root: Path) -> TaskConfig:
+        worker_dir, judge_dir = self._make_prompt_tree(root)
+        src = root / "src"
+        src.mkdir(exist_ok=True)
+        return TaskConfig(
+            task="task",
+            cwd=str(src),
+            output_dir=str(root / "output"),
+            workers=RoleConfig(
+                default_tools=["read"],
+                system_prompt_dir=str(worker_dir),
+                agents=[AgentInstanceConfig(model="dummy-model")],
+            ),
+            judges=RoleConfig(
+                default_tools=["read"],
+                system_prompt_dir=str(judge_dir),
+                agents=[AgentInstanceConfig(model="dummy-judge")],
+            ),
+            taint_params=["payload"],
+            agent_retry_delay=0,
+            pi_retry_delay=0,
+            agent_max_retries=1,
+            pi_max_retries=1,
+            max_rounds=1,
+        )
+
+    def test_dataflow_worker_emits_rate_limited_retrying_event(self):
+        root = Path(tempfile.mkdtemp())
+        cfg = self._make_cfg(root)
+        source_file = Path(cfg.cwd) / "a.c"
+        source_file.write_text("int foo(int payload) { return payload; }\n", encoding="utf-8")
+        events: list[dict] = []
+        workflow = DataflowVulnWorkflow(
+            cfg=cfg,
+            func_name="foo",
+            src_file="a.c",
+            line_hint="L1",
+            taint_params=["payload"],
+            taint_ctx="",
+            task_id="task-rate-limit-worker",
+            out_dir=root / "run",
+            dep=0,
+            max_depth=1,
+            on_event=lambda ev: events.append({"type": ev.type, **ev.data}),
+        )
+
+        rate_limited_result = SimpleNamespace(
+            output='{"function":"foo","source_file":"a.c","edges":[],"followups":[]}',
+            error="429 too many requests",
+            token_usage=TokenUsage(input=1, output=1),
+            rate_limit_event_due=True,
+            retry_delay_seconds=30,
+            consecutive_rate_limit_count=10,
+        )
+
+        with patch("app.vuln_workflow.resolve_system_prompt", return_value="system"):
+            with patch("app.vuln_workflow.load_system_prompts", return_value=["system"]):
+                with patch("app.vuln_workflow.validate_taint_graph", return_value=[]):
+                    with patch("app.vuln_workflow.normalize_taint_graph", side_effect=lambda graph: graph):
+                        with patch("app.vuln_workflow.run_agent", return_value=rate_limited_result):
+                            result, _, _ = workflow._run_single_worker()
+
+        self.assertEqual("passed", result.status.value)
+        rate_events = [event for event in events if event["type"] == "task_rate_limited_retrying"]
+        self.assertEqual(1, len(rate_events))
+        self.assertEqual("vuln_worker", rate_events[0]["stage"])
+        self.assertEqual(429, rate_events[0]["http_status"])
+        self.assertEqual(30, rate_events[0]["retry_delay_seconds"])
+        self.assertEqual(10, rate_events[0]["consecutive_rate_limit_count"])
+
+    def test_taint_summary_emits_rate_limited_retrying_event(self):
+        root = Path(tempfile.mkdtemp())
+        cfg = self._make_cfg(root)
+        source_file = Path(cfg.cwd) / "a.c"
+        source_file.write_text("int foo(int payload) { return payload; }\n", encoding="utf-8")
+        events: list[dict] = []
+        workflow = PerTaintWorkflow(
+            cfg=cfg,
+            func_name="foo",
+            src_file="a.c",
+            line_hint="L1",
+            taint_params=["payload"],
+            taint_ctx="",
+            task_id="task-rate-limit-summary",
+            out_dir=root / "run-summary",
+            dep=0,
+            max_depth=1,
+            on_event=lambda ev: events.append({"type": ev.type, **ev.data}),
+        )
+
+        taint_result = SimpleNamespace(
+            output="taint ok",
+            token_usage=TokenUsage(input=1, output=1),
+            rate_limit_event_due=False,
+        )
+        summary_result = SimpleNamespace(
+            output="summary ok",
+            token_usage=TokenUsage(input=1, output=1),
+            rate_limit_event_due=True,
+            retry_delay_seconds=30,
+            consecutive_rate_limit_count=20,
+        )
+        judge_result = SimpleNamespace(
+            output="## 评分: 90\n## 通过: 是\n## 评审意见\n通过",
+            token_usage=TokenUsage(input=1, output=1),
+            rate_limit_event_due=False,
+        )
+
+        with patch("app.config.resolve_system_prompt", return_value="system"):
+            with patch("app.config.load_system_prompts", return_value=["system"]):
+                with patch("app.taint_workflow._extract_function_body", return_value="int foo(int payload) { return payload; }"):
+                    with patch("app.taint_workflow.run_agent", side_effect=[taint_result, summary_result, judge_result]):
+                        result = workflow.run()
+
+        self.assertEqual("passed", result.status.value)
+        rate_events = [event for event in events if event["type"] == "task_rate_limited_retrying"]
+        self.assertEqual(1, len(rate_events))
+        self.assertEqual("taint_summary", rate_events[0]["stage"])
+        self.assertEqual(429, rate_events[0]["http_status"])
+        self.assertEqual(30, rate_events[0]["retry_delay_seconds"])
+        self.assertEqual(20, rate_events[0]["consecutive_rate_limit_count"])
+
     def test_function_resolver_uses_ea_funcdb_and_source_root_boundary(self):
         root = Path(tempfile.mkdtemp())
         src = root / "src"

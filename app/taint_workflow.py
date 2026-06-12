@@ -818,6 +818,17 @@ class PerTaintWorkflow:
                         post_skill_prompt=post_skill,
                         **self._agent_kwargs(self.taint_sess[param])
                     )
+                    if getattr(res, "rate_limit_event_due", False):
+                        self._emit(
+                            "task_rate_limited_retrying",
+                            stage="taint_worker",
+                            function=self.func_name,
+                            taint_param=param,
+                            http_status=429,
+                            retry_delay_seconds=int(getattr(res, "retry_delay_seconds", 30) or 30),
+                            consecutive_rate_limit_count=int(getattr(res, "consecutive_rate_limit_count", 0) or 0),
+                            model=self.worker_model,
+                        )
                     self._raise_if_cancelled()
                     self._emit("worker_done",
                                worker_id=f"worker-taint-{_safe_param(param)}",
@@ -859,6 +870,16 @@ class PerTaintWorkflow:
                 post_skill_prompt=summary_post,
                 **self._agent_kwargs(self.summary_sess)
             )
+            if getattr(summary_result, "rate_limit_event_due", False):
+                self._emit(
+                    "task_rate_limited_retrying",
+                    stage="taint_summary",
+                    function=self.func_name,
+                    http_status=429,
+                    retry_delay_seconds=int(getattr(summary_result, "retry_delay_seconds", 30) or 30),
+                    consecutive_rate_limit_count=int(getattr(summary_result, "consecutive_rate_limit_count", 0) or 0),
+                    model=self.worker_model,
+                )
             self._raise_if_cancelled()
             self._emit("worker_done", worker_id="worker-summary",
                        output=summary_result.output[:200],
@@ -909,6 +930,16 @@ class PerTaintWorkflow:
                 prompt=eval_prompt,
                 **self._agent_kwargs(judge_session_file, is_judge=True)
             )
+            if getattr(judge_result, "rate_limit_event_due", False):
+                self._emit(
+                    "task_rate_limited_retrying",
+                    stage="taint_judge",
+                    function=self.func_name,
+                    http_status=429,
+                    retry_delay_seconds=int(getattr(judge_result, "retry_delay_seconds", 30) or 30),
+                    consecutive_rate_limit_count=int(getattr(judge_result, "consecutive_rate_limit_count", 0) or 0),
+                    model=self.judge_model,
+                )
             self._raise_if_cancelled()
             self._emit("judge_done", judge_id="judge-0",
                        output=judge_result.output[:200],
