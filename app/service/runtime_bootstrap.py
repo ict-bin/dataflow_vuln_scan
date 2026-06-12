@@ -74,15 +74,15 @@ class RuntimeBootstrap:
             self._task.cancel()
             try:
                 self._task
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.warning("unexpected error in runtime_bootstrap.py: %s", _e, exc_info=True)
         self._task = None
         if self._dispatcher_task and not self._dispatcher_task.done():
             self._dispatcher_task.cancel()
             try:
                 self._dispatcher_task
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.warning("unexpected error in runtime_bootstrap.py: %s", _e, exc_info=True)
         self._dispatcher_task = None
         self._worker_slot_stop.set()
         self._worker_slot_thread = None
@@ -90,8 +90,8 @@ class RuntimeBootstrap:
             from app.service.registry_service import get_registry_service
 
             get_registry_service().stop()
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.warning("unexpected error in runtime_bootstrap.py: %s", _e, exc_info=True)
         log_event(logger, logging.INFO, "dispatcher stopped", event="dispatcher_stopped", owner_id=INSTANCE_ID)
 
     def status(self) -> dict:
@@ -165,8 +165,8 @@ class RuntimeBootstrap:
 
             try:
                 self._stop_event.wait()
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.warning("unexpected error in runtime_bootstrap.py: %s", _e, exc_info=True)
 
     def _init_db(self, svc_yaml) -> bool:
         self._status.phase = "db_init"

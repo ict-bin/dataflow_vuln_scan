@@ -115,8 +115,8 @@ def _extract_json_from_text(text: str, key: str | None = None) -> Any:
                     obj = json.loads(raw[start:end+1])
                     if key is None or (isinstance(obj, dict) and key in obj):
                         return obj
-                except Exception:
-                    pass
+                except Exception as _e:
+                    logger.warning("unexpected error in vuln_workflow.py: %s", _e, exc_info=True)
     return None
 
 
@@ -183,8 +183,8 @@ class DataflowVulnWorkflow:
     def _emit(self, etype: str, **data: Any) -> None:
         try:
             self.on_event(SwarmEvent(type=etype, task_id=self.task_id, data=data))
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.warning("unexpected error in vuln_workflow.py: %s", _e, exc_info=True)
 
     def _cancelled(self) -> bool:
         return bool(self.cancel_event and self.cancel_event.is_set())
@@ -653,8 +653,8 @@ def build_function_summary_from_result(
                         "evidence": fact.get("evidence", ""),
                         "confidence": fact.get("confidence", "medium"),
                     })
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.warning("unexpected error in vuln_workflow.py: %s", _e, exc_info=True)
 
     # Extract taint edges from taint_graph
     taint_graph = meta.get("taint_graph")

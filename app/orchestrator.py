@@ -203,8 +203,8 @@ def _relativize_round_artifacts(result: TaskResult, round_root: Path, root_out_d
                 except Exception:
                     try:
                         worker.session_file = str(Path(worker.session_file).resolve().relative_to(root_out_dir.resolve())).replace("\\", "/")
-                    except Exception:
-                        pass
+                    except Exception as _e:
+                        logger.warning("unexpected error in orchestrator.py: %s", _e, exc_info=True)
         for judge in rnd.judge_results or []:
             if getattr(judge, "session_file", None):
                 try:
@@ -212,8 +212,8 @@ def _relativize_round_artifacts(result: TaskResult, round_root: Path, root_out_d
                 except Exception:
                     try:
                         judge.session_file = str(Path(judge.session_file).resolve().relative_to(root_out_dir.resolve())).replace("\\", "/")
-                    except Exception:
-                        pass
+                    except Exception as _e:
+                        logger.warning("unexpected error in orchestrator.py: %s", _e, exc_info=True)
 
 class Orchestrator(JudgeMixin):
 
@@ -231,8 +231,8 @@ class Orchestrator(JudgeMixin):
     def _emit(self, etype: str, task_id: str, **data):
         try:
             self.on_event(SwarmEvent(type=etype, task_id=task_id, data=data))
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.warning("unexpected error in orchestrator.py: %s", _e, exc_info=True)
 
     def _is_cancelled(self) -> bool:
         return bool(self._cancel_event and self._cancel_event.is_set())
@@ -768,8 +768,8 @@ class Orchestrator(JudgeMixin):
                 if followup_id:
                     try:
                         VulnScanStore(graph_db_path).update_followup_status(followup_id, "forked", reason="multiple concrete overrides")
-                    except Exception:
-                        pass
+                    except Exception as _e:
+                        logger.warning("unexpected error in orchestrator.py: %s", _e, exc_info=True)
                 for index, (_rf, _rs, _rl) in enumerate(_override_candidates):
                     _sub_cfg = task_cfg.model_copy(deep=True)
                     _sub_cfg.function_name = _rf
@@ -795,8 +795,8 @@ class Orchestrator(JudgeMixin):
                     VulnScanStore(graph_db_path).update_followup_status(followup_id, "running")
                     if context_id:
                         VulnScanStore(graph_db_path).update_analysis_context_status(context_id, "running")
-                except Exception:
-                    pass
+                except Exception as _e:
+                    logger.warning("unexpected error in orchestrator.py: %s", _e, exc_info=True)
 
             # 通知 CLI: 新函数开始
             self._emit("trace_start", tid,
@@ -887,8 +887,8 @@ class Orchestrator(JudgeMixin):
                         risk_class="no_validation",
                         status="analyzed",
                     )
-                except Exception:
-                    pass
+                except Exception as _e:
+                    logger.warning("unexpected error in orchestrator.py: %s", _e, exc_info=True)
 
                 # ── 写全局缓存：脚本提取函数摘要 ──────────────────────────
                 try:
@@ -920,8 +920,8 @@ class Orchestrator(JudgeMixin):
                     )
                     if context_id:
                         VulnScanStore(graph_db_path).update_analysis_context_status(context_id, "analyzed" if result.status.value == "passed" else "error")
-                except Exception:
-                    pass
+                except Exception as _e:
+                    logger.warning("unexpected error in orchestrator.py: %s", _e, exc_info=True)
             df_path = _find_dataflow_file(out_dir, func_name)
             if df_path:
                 try:
@@ -1091,8 +1091,8 @@ class Orchestrator(JudgeMixin):
                                         tracker_status="error",
                                         result={"error": str(tracker_exc)},
                                     )
-                                except Exception:
-                                    pass
+                                except Exception as _e:
+                                    logger.warning("unexpected error in orchestrator.py: %s", _e, exc_info=True)
                         if tracked_callees:
                             # Re-run deterministic resolution on tracker targets; this keeps
                             # all normal funcdb, dedup and validation logic in one path.
@@ -1100,16 +1100,16 @@ class Orchestrator(JudgeMixin):
                             if callee.followup_id:
                                 try:
                                     VulnScanStore(graph_db_path).update_followup_status(callee.followup_id, "tracker_resolved", reason=callee.description or "tracker resolved targets")
-                                except Exception:
-                                    pass
+                                except Exception as _e:
+                                    logger.warning("unexpected error in orchestrator.py: %s", _e, exc_info=True)
                             continue
                         self._emit("trace_skip", tid, function=callee.function_name,
                                    reason=reason)
                         if callee.followup_id:
                             try:
                                 VulnScanStore(graph_db_path).update_followup_status(callee.followup_id, "skipped", reason=reason)
-                            except Exception:
-                                pass
+                            except Exception as _e:
+                                logger.warning("unexpected error in orchestrator.py: %s", _e, exc_info=True)
                         continue
                     callee = CalleeRef(function_name=resolved.function_name, file=resolved.source_file or callee.file, line=(f"L{resolved.line}" if resolved.line else callee.line), tainted_params=callee.tainted_params, description=callee.description, followup_id=callee.followup_id, dispatch_kind=callee.dispatch_kind, tainted_nonlocal=callee.tainted_nonlocal)
                     raw_params = [x.strip() for x in (callee.tainted_params or "").split(",") if x.strip()]
@@ -1144,8 +1144,8 @@ class Orchestrator(JudgeMixin):
                         if callee.followup_id:
                             try:
                                 VulnScanStore(graph_db_path).update_followup_status(callee.followup_id, "skipped", reason="merged_equivalent_taint_validation")
-                            except Exception:
-                                pass
+                            except Exception as _e:
+                                logger.warning("unexpected error in orchestrator.py: %s", _e, exc_info=True)
                         continue
                     if c_key in analyzed:
                         # 全局缓存查重：命中时注入缓存的校验事实
@@ -1163,15 +1163,15 @@ class Orchestrator(JudgeMixin):
                         if callee.followup_id:
                             try:
                                 VulnScanStore(graph_db_path).update_followup_status(callee.followup_id, "skipped", reason="already analyzed")
-                            except Exception:
-                                pass
+                            except Exception as _e:
+                                logger.warning("unexpected error in orchestrator.py: %s", _e, exc_info=True)
                         continue
                     if callee.function_name in _STDLIB_SKIP:
                         if callee.followup_id:
                             try:
                                 VulnScanStore(graph_db_path).update_followup_status(callee.followup_id, "skipped", reason="stdlib skip")
-                            except Exception:
-                                pass
+                            except Exception as _e:
+                                logger.warning("unexpected error in orchestrator.py: %s", _e, exc_info=True)
                         continue
                     analyzed.add(c_key)
                     context_id = "ctx_" + hashlib.sha1(c_key.encode()).hexdigest()[:16]
@@ -1198,16 +1198,16 @@ class Orchestrator(JudgeMixin):
                             line=callsite_line or callee.line,
                             facts=validation_state.facts,
                         )
-                    except Exception:
-                        pass
+                    except Exception as _e:
+                        logger.warning("unexpected error in orchestrator.py: %s", _e, exc_info=True)
                     context_by_callee[_callee_key(callee)] = context_id
                     facts_by_callee[_callee_key(callee)] = validation_state.facts
                     callsite_line_by_callee[_callee_key(callee)] = callsite_line
                     if callee.followup_id:
                         try:
                             VulnScanStore(graph_db_path).update_followup_status(callee.followup_id, "queued")
-                        except Exception:
-                            pass
+                        except Exception as _e:
+                            logger.warning("unexpected error in orchestrator.py: %s", _e, exc_info=True)
                     valid.append(callee)
 
                 if valid:
@@ -1309,8 +1309,8 @@ class Orchestrator(JudgeMixin):
                             try:
                                 VulnScanStore(graph_db_path).update_followup_status(
                                     callee.followup_id, "skipped", reason="cache hit (validations applied)")
-                            except Exception:
-                                pass
+                            except Exception as _e:
+                                logger.warning("unexpected error in orchestrator.py: %s", _e, exc_info=True)
                         self._emit("trace_cache_hit", tid, function=callee.function_name,
                                    taint_sig=taint_sig, depth=dep)
                         continue
@@ -1425,8 +1425,8 @@ class Orchestrator(JudgeMixin):
                             VulnScanStore(graph_db_path).update_followup_status(err_followup_id, "error", reason=str(e))
                             if err_context_id:
                                 VulnScanStore(graph_db_path).update_analysis_context_status(err_context_id, "error")
-                        except Exception:
-                            pass
+                        except Exception as _e:
+                            logger.warning("unexpected error in orchestrator.py: %s", _e, exc_info=True)
                     logger.exception("recursive process_item failed task_id=%s function=%s", err_tid, item[0] if item else "?")
                     self._emit("error", err_tid, error=str(e), function=item[0] if item else "?")
                 finally:

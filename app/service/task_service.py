@@ -128,8 +128,8 @@ def _run_db_write_with_retries(label: str, operation, *, attempts: int | None = 
             last_exc = exc
             try:
                 db.rollback()
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.warning("unexpected error in task_service.py: %s", _e, exc_info=True)
             retryable = is_retryable_db_error(exc)
             logger.warning(
                 "%s DB operation failed attempt=%s/%s retryable=%s error=%s",
@@ -2256,8 +2256,8 @@ class TaskService:
         if execution_duration_ms is None and row.started_at and row.finished_at:
             try:
                 execution_duration_ms = (row.finished_at - row.started_at).total_seconds() * 1000
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.warning("unexpected error in task_service.py: %s", _e, exc_info=True)
         return {
             **_origin_payload(row),
             "task_id": row.task_id, "project_id": row.project_id,

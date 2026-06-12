@@ -534,8 +534,8 @@ def _run_with_api_retry(
                                         return
                                 if _ps_ended:
                                     return
-                        except Exception:
-                            pass
+                        except Exception as _e:
+                            logger.warning("unexpected error in runner.py: %s", _e, exc_info=True)
 
                     ps_thread = threading.Thread(target=_read_post_skill, daemon=True)
                     ps_thread.start()
@@ -548,14 +548,14 @@ def _run_with_api_retry(
                 try:
                     if proc.stdout:
                         proc.stdout.read()
-                except Exception:
-                    pass
+                except Exception as _e:
+                    logger.warning("unexpected error in runner.py: %s", _e, exc_info=True)
 
             # Close stdin
             try:
                 proc.stdin.close()
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.warning("unexpected error in runner.py: %s", _e, exc_info=True)
 
             # Read stderr
             try:
@@ -564,8 +564,8 @@ def _run_with_api_retry(
                     stderr_text = stderr_data.decode("utf-8", errors="replace").strip()
                     if stderr_text and not result.error:
                         result.error = stderr_text
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.warning("unexpected error in runner.py: %s", _e, exc_info=True)
 
             # Wait for process exit
             try:
