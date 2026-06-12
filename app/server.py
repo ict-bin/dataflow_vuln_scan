@@ -189,7 +189,7 @@ get_runtime_bootstrap().install_internal_observability_router(app)
 
 
 @app.middleware("http")
-def collect_request_metrics(request, call_next):
+async def collect_request_metrics(request, call_next):
     started = time.perf_counter()
     response = None
     route = request.scope.get("route")
@@ -197,7 +197,7 @@ def collect_request_metrics(request, call_next):
     normalized_route = normalize_http_route(str(path))
     observe_http_request_inflight(request.method, normalized_route, 1)
     try:
-        response = call_next(request)
+        response = await call_next(request)
         return response
     finally:
         status_code = response.status_code if response is not None else 500
