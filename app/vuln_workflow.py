@@ -337,14 +337,48 @@ class DataflowVulnWorkflow:
         )
         self._emit("worker_done", worker_id="worker-0", output=res.output[:300], tokens_in=res.token_usage.input, tokens_out=res.token_usage.output)
         total_tokens = TokenUsage(); total_tokens += res.token_usage
+
+        # ── 输出校验 + 重试：LLM 未输出 JSON 时，一句话 prompt 让 LLM 补充 ──
         graph = _extract_json_from_text(res.output)
         graph_warnings: list[str] = []
+        retry_used = 0
+        _JSON_RETRY_MAX = 3
+        _JSON_RETRY_PROMPT = (
+            "请直接回复一个完整的 JSON 对象（不要 Markdown 代码块，不要其他文字），"
+            "格式严格为: "
+            '{"function":"...","source_file":"...","taints":[{"symbol":"...","kind":"...","line":"...","description":"..."}],'
+            '"edges":[{"from":"...","to":"...","line":"...","operation":"...","evidence":"...",'
+            '"sanitizer":"","sanitizer_effect":"none","termination_reason":""}],'
+            '"followups":[{"file":"...","function":"...","line":"...","tainted_params":["..."],'
+            '"reason":"...","dispatch_kind":"direct_call","tainted_nonlocal":[],"validations":[]}],'
+            '"termination":{"terminated":false,"reason":"..."}}'
+        )
+        while not isinstance(graph, dict) and retry_used < _JSON_RETRY_MAX:
+            if self._cancelled():
+                break
+            retry_used += 1
+            self._emit("worker_retry_json", worker_id="worker-0", attempt=retry_used,
+                       function=self.func_name, reason="missing taint graph JSON")
+            res = run_agent(
+                prompt=_JSON_RETRY_PROMPT, model=acfg.model,
+                tools=[],  # 重试不需要工具，直接输出 JSON
+                cwd=str(self.ws), session_file=session_file, system_prompt="",
+                cancel_event=self.cancel_event,
+                run_timeout_seconds=min(self.cfg.agent_run_timeout_seconds or 300, 120),
+                pi_max_retries=1, pi_retry_delay=2,
+                max_retries=1, retry_delay=2,
+                task_context={"task_id": self.task_id, "task_root": str(self.out_dir.parent),
+                              "task_run_root": str(self.out_dir), "task_pi_dir": getattr(self.cfg, "task_pi_dir", "")},
+            )
+            total_tokens += res.token_usage
+            graph = _extract_json_from_text(res.output)
+
         if isinstance(graph, dict):
             graph = normalize_taint_graph(graph)
             graph_warnings = validate_taint_graph(graph)
         else:
             graph = None
-            graph_warnings = ["missing taint graph JSON in final response"]
+            graph_warnings = [f"missing taint graph JSON in final response (retried {retry_used}x)"]
         dataflow_file = None
         df_content = res.output
         if graph_warnings:
