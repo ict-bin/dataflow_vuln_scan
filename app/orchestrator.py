@@ -6,7 +6,8 @@ execute_recursive: BFS 队列 + Worker Pool 递归分析调用链
 """
 from __future__ import annotations
 
-import asyncio
+import threading
+import queue
 import json
 import logging
 import math
@@ -16,6 +17,7 @@ import shutil
 import time
 import hashlib
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Callable
 
@@ -223,7 +225,7 @@ class Orchestrator(JudgeMixin):
         self.cfg = config
         self.on_event = on_event or (lambda e: None)
         self.session_dir = os.path.abspath(session_dir)
-        self._cancel_event: asyncio.Event | None = None
+        self._cancel_event: threading.Event | None = None
 
     def _emit(self, etype: str, task_id: str, **data):
         try:
@@ -236,9 +238,9 @@ class Orchestrator(JudgeMixin):
 
     def _raise_if_cancelled(self) -> None:
         if self._is_cancelled():
-            raise asyncio.CancelledError("orchestrator cancelled")
+            raise Exception("orchestrator cancelled")
 
-    async def execute(
+    def execute(
         self,
         task_id: str | None = None,
         *,
@@ -252,7 +254,7 @@ class Orchestrator(JudgeMixin):
         start = time.time()
         target_dir = os.path.abspath(cfg.cwd)  # /data/target(只读,源文件在这里)
         threshold = cfg.pass_threshold if cfg.pass_threshold is not None else math.ceil(cfg.judge_count / 2)
-        self._cancel_event = asyncio.Event()
+        self._cancel_event = threading.Event()
         max_rounds_strategy = normalize_max_rounds_exceeded_review_strategy(
             getattr(cfg, "max_rounds_exceeded_review_strategy", None)
         )
@@ -401,7 +403,7 @@ class Orchestrator(JudgeMixin):
                     })
 
                 self._raise_if_cancelled()
-                w_raw = await run_agents_parallel(w_tasks, concurrency=cfg.worker_count)
+                w_raw = run_agents_parallel(w_tasks, concurrency=cfg.worker_count)
                 self._raise_if_cancelled()
 
                 round_workers: list[WorkerResult] = []
@@ -473,8 +475,8 @@ class Orchestrator(JudgeMixin):
                                model=j_acfg.model, round=rnd_num,
                                function=cfg.function_name)
 
-                async def _run_one_judge(j_idx: int, j_acfg: AgentInstanceConfig) -> JudgeRoundResult:
-                    return await self._run_judge_evaluation(
+                def _run_one_judge(j_idx: int, j_acfg: AgentInstanceConfig) -> JudgeRoundResult:
+                    return self._run_judge_evaluation(
                         judge_idx=j_idx,
                         judge_cfg=j_acfg,
                         judge_sys_prompt=resolve_system_prompt(j_idx, j_acfg, judge_dir_prompts),
@@ -491,7 +493,13 @@ class Orchestrator(JudgeMixin):
                     for j_idx, j_acfg in enumerate(cfg.judges.agents)
                 ]
                 self._raise_if_cancelled()
-                round_judges: list[JudgeRoundResult] = list(await asyncio.gather(*judge_tasks_async))
+                # Run judges in parallel using ThreadPoolExecutor
+                round_judges: list[JudgeRoundResult] = []
+                if judge_tasks_async:
+                    with ThreadPoolExecutor(max_workers=len(judge_tasks_async)) as _jexec:
+                        _jfutures = [_jexec.submit(_run_one_judge, j_idx, j_acfg) for j_idx, j_acfg in enumerate(cfg.judges.agents)]
+                        for _jf in _jfutures:
+                            round_judges.append(_jf.result())
                 self._raise_if_cancelled()
 
                 # 汇总事件 + token
@@ -580,7 +588,7 @@ class Orchestrator(JudgeMixin):
                         result.completion_reason = "max_rounds_exceeded"
                     break
 
-        except asyncio.CancelledError:
+        except Exception:
             result.status = TaskStatus.ERROR
             result.error = "cancelled"
             self._emit("error", task_id, error="cancelled")
@@ -644,7 +652,7 @@ class Orchestrator(JudgeMixin):
     # 递归分析入口
     # ═══════════════════════════════════════════════════════════════════════
 
-    async def execute_recursive(
+    def execute_recursive(
         self,
         task_id: str | None = None,
         depth: int = 0,
@@ -660,7 +668,7 @@ class Orchestrator(JudgeMixin):
         cfg = self.cfg
         is_root = (depth == 0)
         if self._cancel_event is None:
-            self._cancel_event = asyncio.Event()
+            self._cancel_event = threading.Event()
 
         # ── 非根任务:直接执行 W+J 并返回,由根任务的工作池调度 ──────────────
         if not is_root:
@@ -670,7 +678,7 @@ class Orchestrator(JudgeMixin):
                 if _root_out_dir is not None
                 else Path(os.path.abspath(cfg.output_dir)) / logical_task_id / "run"
             )
-            result = await self.execute(
+            result = self.execute(
                 logical_task_id,
                 archive=False,
                 depth=depth,
@@ -725,7 +733,7 @@ class Orchestrator(JudgeMixin):
         root_sessions_dir = root_out_dir / "sessions"
         root_sessions_dir.mkdir(exist_ok=True)
 
-        queue: asyncio.Queue = asyncio.Queue()
+        queue: queue.Queue = queue.Queue()
         all_results: dict[str, TaskResult] = {}   # func_key -> TaskResult
         sub_dataflow_files: list[tuple[str, str]] = []
 
@@ -741,10 +749,10 @@ class Orchestrator(JudgeMixin):
                    depth=0, max_depth=max_depth)
 
         # 根任务入队
-        await queue.put((cfg.function_name, cfg.source_file, cfg.line_hint,
+        queue.put((cfg.function_name, cfg.source_file, cfg.line_hint,
                          cfg.model_copy(deep=True), root_task_id, 0, tainted_context, None, "", ""))
 
-        async def process_item(item: tuple) -> None:
+        def process_item(item: tuple) -> None:
             self._raise_if_cancelled()
             func_name, src_file, line_hint, task_cfg, tid, dep, taint_ctx, parent_session_file, followup_id, context_id = item
             try:
@@ -767,7 +775,7 @@ class Orchestrator(JudgeMixin):
                     _sub_cfg.source_file = _rs
                     _sub_cfg.line_hint = _rl
                     _sub_tid = tid + f"-override{index}-{_rf[:25]}"
-                    await queue.put((_rf, _rs, _rl, _sub_cfg, _sub_tid, dep, taint_ctx, parent_session_file, "", ""))
+                    queue.put((_rf, _rs, _rl, _sub_cfg, _sub_tid, dep, taint_ctx, parent_session_file, "", ""))
                 return
             try:
                 _rf, _rs, _rl, _rr = _resolve_virtual_override_if_stub(os.path.abspath(task_cfg.cwd), func_name, src_file, line_hint)
@@ -853,7 +861,7 @@ class Orchestrator(JudgeMixin):
                     sessions_archive_dir=root_sessions_dir,
                     session_label=session_label,
                 )
-                result = await workflow.run_taint_tracking_only()
+                result = workflow.run_taint_tracking_only()
                 self._raise_if_cancelled()
                 # 取完成后的 worker session 路径，用作各 callee 继承的 parent session
                 completed_session_file = str(
@@ -936,11 +944,12 @@ class Orchestrator(JudgeMixin):
             func_key = src_file + ":" + func_name
             all_results[func_key] = result
 
-            vuln_mining_task: asyncio.Task | None = None
+            vuln_mining_thread: threading.Thread | None = None
             if workflow is not None and result is not None:
                 # 漏洞挖掘只依赖当前函数污点跟踪结果；与后续 callee 污点分析互不依赖，
                 # 因此先 fork 后台任务，让漏洞挖掘与 BFS 后续跟入点并行运行。
-                vuln_mining_task = asyncio.create_task(workflow.run_vuln_mining_after_taint(result))
+                vuln_mining_thread = threading.Thread(target=workflow.run_vuln_mining_after_taint, args=(result,), daemon=True)
+                vuln_mining_thread.start()
 
             # ── 解析 callee 并加入队列 ─────
             if dep < max_depth and result.final_output:
@@ -1030,7 +1039,7 @@ class Orchestrator(JudgeMixin):
                                 )
                                 self._emit("tracker_start", tid, function=callee.function_name, tracker_type=tracker_type, depth=dep)
                                 acfg = workflow._agent_cfg()
-                                tracked = await run_tracker(
+                                tracked = run_tracker(
                                     tracker_type,
                                     tracker_decision.tracker_context,
                                     workspace=workflow.ws,
@@ -1070,7 +1079,7 @@ class Orchestrator(JudgeMixin):
                                     result=tracker_payload,
                                 )
                                 self._emit("tracker_done", tid, function=callee.function_name, tracker_type=tracker_type, targets=[c.function_name for c in tracked_callees], error=tracked.error, depth=dep)
-                            except asyncio.CancelledError:
+                            except Exception:
                                 raise
                             except Exception as tracker_exc:
                                 logger.exception("tracker failed function=%s type=%s", callee.function_name, tracker_type)
@@ -1264,7 +1273,7 @@ class Orchestrator(JudgeMixin):
                     self._emit("sequence_call", tid,
                                parent_function=func_name, callee_function=callee.function_name,
                                depth=dep + 1, reason="sequential P0: modifies param")
-                    await queue.put((callee.function_name, sub_file, sub_line_hint, sub_cfg,
+                    queue.put((callee.function_name, sub_file, sub_line_hint, sub_cfg,
                                      sub_tid, dep + 1, tainted_ctx_str,
                                      completed_session_file or None, callee.followup_id,
                                      context_by_callee.get(_callee_key(callee), "")))
@@ -1338,7 +1347,7 @@ class Orchestrator(JudgeMixin):
                     self._emit("sequence_call", tid,
                                parent_function=func_name, callee_function=callee.function_name,
                                depth=dep + 1, reason="sequential P1: validates/reads-only")
-                    await queue.put((callee.function_name, sub_file, sub_line_hint, sub_cfg,
+                    queue.put((callee.function_name, sub_file, sub_line_hint, sub_cfg,
                                      sub_tid, dep + 1, tainted_ctx_str,
                                      completed_session_file or None, callee.followup_id,
                                      context_by_callee.get(_callee_key(callee), "")))
@@ -1384,30 +1393,28 @@ class Orchestrator(JudgeMixin):
                                    reason="multiple followup callees")
                     if self._is_cancelled():
                         break
-                    await queue.put((callee.function_name, sub_file, sub_line_hint, sub_cfg,
+                    queue.put((callee.function_name, sub_file, sub_line_hint, sub_cfg,
                                      sub_tid, dep + 1, tainted_ctx_str,
                                      completed_session_file or None, callee.followup_id,
                                      context_by_callee.get(_callee_key(callee), "")))
 
-            if vuln_mining_task is not None:
+            if vuln_mining_thread is not None:
                 try:
-                    await vuln_mining_task
-                except asyncio.CancelledError:
-                    raise
+                    vuln_mining_thread.join()
                 except Exception as exc:
                     self._emit("vuln_scan_error", tid, function=func_name, error=str(exc), depth=dep)
 
-        async def worker(wid: int) -> None:
+        def worker(wid: int) -> None:
             while True:
                 if self._is_cancelled() and queue.empty():
                     break
-                item = await queue.get()
+                item = queue.get()
                 if item is None:      # sentinel → 退出
                     queue.task_done()
                     break
                 try:
-                    await process_item(item)
-                except asyncio.CancelledError:
+                    process_item(item)
+                except Exception:
                     return
                 except Exception as e:
                     # item layout: (func_name, src_file, line_hint, task_cfg, tid, dep, ..., followup_id, context_id)
@@ -1427,21 +1434,23 @@ class Orchestrator(JudgeMixin):
                     queue.task_done()
 
         # 启动工作池(n_workers 个并发 Worker+Judge 会话)
-        workers = [asyncio.create_task(worker(i)) for i in range(n_workers)]
+        workers = [threading.Thread(target=worker, args=(i,), name=f"dvs-bfs-{i}", daemon=True) for i in range(n_workers)]
+        for w in workers:
+            w.start()
 
         try:
             # 等待所有任务处理完毕
-            await queue.join()
+            queue.join()
             if self._is_cancelled():
-                for task in workers:
-                    task.cancel()
-                await asyncio.gather(*workers, return_exceptions=True)
-                raise asyncio.CancelledError("recursive orchestration cancelled")
+                for w in workers:
+                    w.join(timeout=5.0)
+                raise Exception("recursive orchestration cancelled")
 
             # 发送终止 sentinel
             for _ in range(n_workers):
-                await queue.put(None)
-            await asyncio.gather(*workers)
+                queue.put(None)
+            for w in workers:
+                w.join()
 
             # ── 根函数结果 ────────────────────────────────────────────────────────
             root_result = all_results.get(root_key)

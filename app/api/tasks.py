@@ -23,6 +23,29 @@ from app.service.session_index import build_session_catalog
 from app.service.task_service import generate_prompt_from_path, get_task_service
 from app.vuln_graph_service import load_vuln_scan_graph, summarize_graph, build_trace_tree
 from .deps import ensure_admin_user, ensure_project_access, get_current_user
+from .task_models import (
+    TaskCreateRequest,
+    GeneratePromptRequest,
+    TaskSessionIndexNodeResponse,
+    TaskSessionIndexEdgeResponse,
+    TaskSessionIndexGroupResponse,
+    TaskSessionIndexResponse,
+    WorkerActiveJobResponse,
+    WorkerCapacityResponse,
+    WorkerClusterCapacityResponse,
+    AgentProcessSnapshotResponse,
+    AgentTaskOwnershipSnapshotResponse,
+    AgentPodSnapshotResponse,
+    AgentObservabilitySummaryResponse,
+    AgentProcessKillItemResponse,
+    AgentProcessKillResponse,
+    AgentRuntimeAggregateSummaryResponse,
+    AgentRuntimeAggregateResponse,
+    TaskTimelineEventResponse,
+    TaskTimelineResponse,
+    ActionResponse,
+    TaskListStatsResponse,
+)
 
 from . import router
 
@@ -49,289 +72,6 @@ AGGREGATE_CONCURRENCY = max(1, int(os.environ.get("DVS_AGENT_AGGREGATE_CONCURREN
 
 TERMINAL_STATUSES = {"passed", "failed", "error", "cancelled", "invalid_input", "completed_limited"}
 
-
-class TaskCreateRequest(BaseModel):
-    project_id: str
-    task_name: str
-    input_path: str
-    module_input_path: Optional[str] = None
-    source_root_path: Optional[str] = None
-    output_path: Optional[str] = None
-    task_description: Optional[str] = None
-    prompt_template_id: Optional[str] = None
-    prompt_content: Optional[str] = None  # If omitted, auto-generated from input_path
-    source_file: Optional[str] = None
-    function_name: Optional[str] = None
-    line_hint: Optional[str] = None
-    definition_kind: Optional[str] = None
-    taint_params: list[str] = []
-    taint_details: list[Dict[str, Any]] = []
-    function_description: Optional[str] = None
-    function_description_source: Optional[str] = None
-    entry_reason: Optional[str] = None
-    entry_reason_source: Optional[str] = None
-    funcdb_path: Optional[str] = None
-    func_hash: Optional[str] = None
-    task_origin_type: Optional[str] = None
-    parent_project_id: Optional[str] = None
-    parent_task_id: Optional[str] = None
-    parent_task_type: Optional[str] = None
-    parent_stage_name: Optional[str] = None
-    parent_stage_item_id: Optional[str] = None
-    parent_stage_item_key: Optional[str] = None
-    agent_task_key_id: Optional[str] = None
-    agent_task_key_name: Optional[str] = None
-    agent_task_key_prefix: Optional[str] = None
-    agent_task_key_secret: Optional[str] = None
-    agent_task_key_source: Optional[str] = None
-
-
-class GeneratePromptRequest(BaseModel):
-    input_path: str
-
-
-class TaskSessionIndexNodeResponse(BaseModel):
-    node_id: str
-    relative_path: str
-    session_name: str
-    display_name: str
-    role: str
-    role_label: str
-    status: str
-    is_active: bool = False
-    stage_key: str
-    stage_label: str
-    stage_order: int = 0
-    stage_group: str
-    module_name: Optional[str] = None
-    attempt: Optional[int] = None
-    judge_index: Optional[int] = None
-    batch_index: Optional[int] = None
-    parent_relative_path: Optional[str] = None
-    parallel_group: Optional[str] = None
-    family_key: Optional[str] = None
-    flow_kind: Optional[str] = None
-    started_at: Optional[str] = None
-    ended_at: Optional[str] = None
-    started_ts: Optional[float] = None
-    last_event_at: Optional[str] = None
-    last_event_ts: Optional[float] = None
-    mtime: float = 0
-    size: int = 0
-    event_count: int = 0
-    line_count: int = 0
-    warnings: List[str] = []
-    session_header: Dict[str, Any] = {}
-    cwd: Optional[str] = None
-    model: Optional[str] = None
-    latest_round_ref: Optional[Dict[str, Any]] = None
-    round_refs: List[Dict[str, Any]] = []
-    attempts_seen: List[int] = []
-
-
-class TaskSessionIndexEdgeResponse(BaseModel):
-    edge_id: str
-    source_node_id: str
-    target_node_id: str
-    kind: str
-    label: str
-
-
-class TaskSessionIndexGroupResponse(BaseModel):
-    group_id: str
-    kind: str
-    label: str
-    stage_key: Optional[str] = None
-    module_name: Optional[str] = None
-    node_ids: List[str] = []
-
-
-class TaskSessionIndexResponse(BaseModel):
-    version: int = 1
-    generated_at: Optional[str] = None
-    task_id: str
-    task_status: str
-    status: Optional[str] = None
-    sessions_root: Optional[str] = None
-    index_path: Optional[str] = None
-    summary: Dict[str, Any] = {}
-    nodes: List[TaskSessionIndexNodeResponse] = []
-    edges: List[TaskSessionIndexEdgeResponse] = []
-    groups: List[TaskSessionIndexGroupResponse] = []
-    warnings: List[str] = []
-
-
-class WorkerActiveJobResponse(BaseModel):
-    task_id: str
-    task_name: str
-    status: str
-    parent_task_id: str | None = None
-    parent_task_type: str | None = None
-    task_origin_type: str | None = None
-    input_path: str
-    started_at: str | None = None
-    updated_at: str | None = None
-    dispatch_status: str | None = None
-    execution_owner_id: str | None = None
-    execution_lease_until: str | None = None
-    execution_heartbeat_at: str | None = None
-    mapped: bool = True
-    mapping_reason: str = "matched_execution_owner"
-
-
-class WorkerCapacityResponse(BaseModel):
-    worker_id: str
-    host_name: str
-    pod_name: str | None = None
-    pod_ip: str | None = None
-    http_port: int | None = None
-    healthy: bool
-    max_concurrent_jobs: int
-    running_jobs: int = 0
-    available_slots: int = 0
-    source: str = "lease_registry"
-    last_heartbeat_at: str | None = None
-    pod_created_at: str | None = None
-    pod_started_at: str | None = None
-    pod_metrics_at: str | None = None
-    pod_cpu_usage_millicores: int | None = None
-    pod_memory_usage_bytes: int | None = None
-    pod_cpu_request_millicores: int | None = None
-    pod_memory_request_bytes: int | None = None
-    pod_cpu_limit_millicores: int | None = None
-    pod_memory_limit_bytes: int | None = None
-    active_jobs: list[WorkerActiveJobResponse] = Field(default_factory=list)
-    error: str | None = None
-
-
-class WorkerClusterCapacityResponse(BaseModel):
-    worker_count: int = 0
-    healthy_workers: int = 0
-    stale_workers: int = 0
-    total_capacity: int = 0
-    running_jobs: int = 0
-    queued_jobs: int = 0
-    available_slots: int = 0
-    updated_at: str | None = None
-    workers: list[WorkerCapacityResponse] = Field(default_factory=list)
-
-
-class AgentProcessSnapshotResponse(BaseModel):
-    pod_name: str
-    pid: int
-    pgid: Optional[int] = None
-    ppid: Optional[int] = None
-    command: str
-    cwd: Optional[str] = None
-    exe: Optional[str] = None
-    rss_bytes: Optional[int] = None
-    runtime_kind: Optional[str] = None
-    match_source: Optional[str] = None
-    match_confidence: Optional[str] = None
-    workspace_root: Optional[str] = None
-    task_id: Optional[str] = None
-    task_name: Optional[str] = None
-    task_status: Optional[str] = None
-    stage_key: Optional[str] = None
-    role_kind: Optional[str] = None
-    owner_kind: str
-    owner_reason: str
-    kill_allowed: bool = False
-    kill_block_reason: Optional[str] = None
-    termination_state: str
-
-
-class AgentTaskOwnershipSnapshotResponse(BaseModel):
-    task_id: str
-    task_name: str
-    task_status: str
-    stage_key: Optional[str] = None
-    pod_name: str
-    process_count: int = 0
-    agent_roles: list[str] = Field(default_factory=list)
-    process_pids: list[int] = Field(default_factory=list)
-    ownership_status: str
-
-
-class AgentPodSnapshotResponse(BaseModel):
-    pod_name: str
-    worker_id: Optional[str] = None
-    healthy: bool = True
-    process_count: int = 0
-    tracked_process_count: int = 0
-    residual_process_count: int = 0
-    unknown_process_count: int = 0
-    task_count: int = 0
-    running_task_count: int = 0
-    residual_task_count: int = 0
-    last_scanned_at: Optional[float] = None
-    scan_errors: int = 0
-    processes: list[AgentProcessSnapshotResponse] = Field(default_factory=list)
-    tasks: list[AgentTaskOwnershipSnapshotResponse] = Field(default_factory=list)
-
-
-class AgentObservabilitySummaryResponse(BaseModel):
-    pod_name: str
-    active_processes: int = 0
-    residual_processes: int = 0
-    unknown_processes: int = 0
-    killable_residual_processes: int = 0
-    killable_unknown_processes: int = 0
-    scanned_at: Optional[float] = None
-    scan_errors: int = 0
-    aggregate_mode: Optional[str] = None
-    aggregate_partial: Optional[bool] = None
-    aggregate_sources: Optional[int] = None
-    aggregate_fanout_errors: Optional[int] = None
-    aggregate_duration_seconds: Optional[float] = None
-    aggregate_cache_hit: Optional[bool] = None
-    aggregate_cache_age_seconds: Optional[float] = None
-    aggregate_failed_targets: list[str] = Field(default_factory=list)
-    aggregate_failed_target_details: list[dict[str, Any]] = Field(default_factory=list)
-    aggregate_all_sources_failed: Optional[bool] = None
-    total_pods: Optional[int] = None
-    healthy_pods: Optional[int] = None
-
-
-class AgentProcessKillItemResponse(BaseModel):
-    pid: int
-    pgid: Optional[int] = None
-    status: str
-    reason: Optional[str] = None
-
-
-class AgentProcessKillResponse(BaseModel):
-    requested: int
-    matched: int
-    succeeded: int
-    failed: int
-    skipped: int
-    items: list[AgentProcessKillItemResponse] = Field(default_factory=list)
-
-
-class AgentRuntimeAggregateSummaryResponse(BaseModel):
-    total_pods: int = 0
-    healthy_pods: int = 0
-    total_processes: int = 0
-    tracked_processes: int = 0
-    residual_processes: int = 0
-    unknown_processes: int = 0
-    killable_residual_processes: int = 0
-    killable_unknown_processes: int = 0
-    aggregate_partial: bool = False
-    aggregate_sources: int = 0
-    aggregate_fanout_errors: int = 0
-    aggregate_failed_targets: list[str] = Field(default_factory=list)
-    aggregate_failed_target_details: list[dict[str, Any]] = Field(default_factory=list)
-    aggregate_all_sources_failed: bool = False
-    scanned_at: Optional[float] = None
-
-
-class AgentRuntimeAggregateResponse(BaseModel):
-    summary: AgentRuntimeAggregateSummaryResponse
-    pods: list[AgentPodSnapshotResponse] = Field(default_factory=list)
-    processes: list[AgentProcessSnapshotResponse] = Field(default_factory=list)
-    tasks: list[AgentTaskOwnershipSnapshotResponse] = Field(default_factory=list)
 
 
 def _auth_headers_from_token(token: str) -> dict[str, str]:
@@ -376,13 +116,13 @@ def _aggregate_base_urls(worker) -> list[str]:
     return targets
 
 
-async def _fanout_get_json(urls: list[str], *, path: str, token: str, params: dict[str, Any]) -> tuple[Any | None, str | None, dict[str, Any] | None]:
+def _fanout_get_json(urls: list[str], *, path: str, token: str, params: dict[str, Any]) -> tuple[Any | None, str | None, dict[str, Any] | None]:
     headers = _auth_headers_from_token(token)
-    async with httpx.AsyncClient(timeout=AGGREGATE_HTTP_TIMEOUT_SECONDS) as client:
+    with httpx.AsyncClient(timeout=AGGREGATE_HTTP_TIMEOUT_SECONDS) as client:
         for base_url in urls:
             url = f"{base_url}{path}"
             try:
-                response = await client.get(url, headers=headers, params=params)
+                response = client.get(url, headers=headers, params=params)
                 if response.status_code == 200:
                     return response.json(), base_url, None
                 logger.warning("dvs-agent-fanout http_error url=%s status=%s body=%s", url, response.status_code, response.text[:200])
@@ -423,7 +163,7 @@ def _failed_target_detail(worker, urls: list[str], error_detail: dict[str, Any] 
     }
 
 
-async def _get_agent_observability_snapshot_impl(
+def _get_agent_observability_snapshot_impl(
     db: Session = Depends(get_db),
     user_and_token=Depends(get_current_user),
 ):
@@ -434,22 +174,22 @@ async def _get_agent_observability_snapshot_impl(
 
 
 @router.get("/agent-observability/snapshot")
-async def get_agent_observability_snapshot(
+def get_agent_observability_snapshot(
     db: Session = Depends(get_db),
     user_and_token=Depends(get_current_user),
 ):
-    return await _get_agent_observability_snapshot_impl(db=db, user_and_token=user_and_token)
+    return _get_agent_observability_snapshot_impl(db=db, user_and_token=user_and_token)
 
 
 @internal_observability_router.get("/agent-observability/snapshot", response_model=dict[str, Any], include_in_schema=False)
-async def get_internal_agent_observability_snapshot(
+def get_internal_agent_observability_snapshot(
     db: Session = Depends(get_db),
     user_and_token=Depends(get_current_user),
 ):
-    return await _get_agent_observability_snapshot_impl(db=db, user_and_token=user_and_token)
+    return _get_agent_observability_snapshot_impl(db=db, user_and_token=user_and_token)
 
 
-async def _build_agent_aggregate_snapshot(token: str, db: Session) -> dict[str, Any]:
+def _build_agent_aggregate_snapshot(token: str, db: Session) -> dict[str, Any]:
     now_ts = __import__("time").time()
     cache_key = _agent_cache_key()
     cached = _AGENT_AGGREGATE_CACHE.get(cache_key)
@@ -508,14 +248,21 @@ async def _build_agent_aggregate_snapshot(token: str, db: Session) -> dict[str, 
             continue
         work_items.append((worker, urls))
 
-    semaphore = asyncio.Semaphore(AGGREGATE_CONCURRENCY)
+    semaphore = threading.Semaphore(AGGREGATE_CONCURRENCY)
 
-    async def _fetch_worker_snapshot(worker, urls: list[str]) -> tuple[Any, list[str], Any | None, str | None, dict[str, Any] | None]:
-        async with semaphore:
-            worker_snapshot, process_source, error_detail = await _fanout_get_json(urls, path="/agent-observability/snapshot", token=token, params=_snapshot_query_params())
+    def _fetch_worker_snapshot(worker, urls: list[str]) -> tuple[Any, list[str], Any | None, str | None, dict[str, Any] | None]:
+        with semaphore:
+            worker_snapshot, process_source, error_detail = _fanout_get_json(urls, path="/agent-observability/snapshot", token=token, params=_snapshot_query_params())
             return worker, urls, worker_snapshot, process_source, error_detail
 
-    snapshot_results = await asyncio.gather(*[_fetch_worker_snapshot(worker, urls) for worker, urls in work_items]) if work_items else []
+    # Parallel fetch using ThreadPoolExecutor
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    snapshot_results = []
+    if work_items:
+        with ThreadPoolExecutor(max_workers=AGGREGATE_CONCURRENCY) as _exec:
+            _futures = {_exec.submit(_fetch_worker_snapshot, w, urls): (w, urls) for w, urls in work_items}
+            for _f in as_completed(_futures):
+                snapshot_results.append(_f.result())
     for worker, urls, worker_snapshot, process_source, error_detail in snapshot_results:
         if worker_snapshot is None:
             partial = True
@@ -604,7 +351,7 @@ async def _build_agent_aggregate_snapshot(token: str, db: Session) -> dict[str, 
     return snapshot
 
 
-async def _build_agent_aggregate_summary(token: str, db: Session) -> dict[str, Any]:
+def _build_agent_aggregate_summary(token: str, db: Session) -> dict[str, Any]:
     now_ts = __import__("time").time()
     cache_key = _agent_cache_key()
     cached = _AGENT_AGGREGATE_SUMMARY_CACHE.get(cache_key)
@@ -655,14 +402,21 @@ async def _build_agent_aggregate_summary(token: str, db: Session) -> dict[str, A
             continue
         work_items.append((worker, urls))
 
-    semaphore = asyncio.Semaphore(AGGREGATE_CONCURRENCY)
+    semaphore = threading.Semaphore(AGGREGATE_CONCURRENCY)
 
-    async def _fetch_worker_summary(worker, urls: list[str]) -> tuple[Any, list[str], Any | None, dict[str, Any] | None]:
-        async with semaphore:
-            worker_summary, _, error_detail = await _fanout_get_json(urls, path="/agent-observability/summary", token=token, params=_snapshot_query_params())
+    def _fetch_worker_summary(worker, urls: list[str]) -> tuple[Any, list[str], Any | None, dict[str, Any] | None]:
+        with semaphore:
+            worker_summary, _, error_detail = _fanout_get_json(urls, path="/agent-observability/summary", token=token, params=_snapshot_query_params())
             return worker, urls, worker_summary, error_detail
 
-    summary_results = await asyncio.gather(*[_fetch_worker_summary(worker, urls) for worker, urls in work_items]) if work_items else []
+    # Parallel fetch using ThreadPoolExecutor
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    summary_results = []
+    if work_items:
+        with ThreadPoolExecutor(max_workers=AGGREGATE_CONCURRENCY) as _exec:
+            _futures = {_exec.submit(_fetch_worker_summary, w, urls): (w, urls) for w, urls in work_items}
+            for _f in as_completed(_futures):
+                summary_results.append(_f.result())
     for worker, urls, worker_summary, error_detail in summary_results:
         if worker_summary is None:
             partial = True
@@ -791,51 +545,6 @@ def _audit_agent_kill_event(
         worker_id=str(payload.get("pod_name") or ""),
         execution_owner_id=str(payload.get("pod_name") or ""),
     )
-
-
-class TaskTimelineEventResponse(BaseModel):
-    id: str
-    task_id: str
-    project_id: str
-    source: str
-    level: str
-    event_type: str
-    status: str | None = None
-    worker_id: str | None = None
-    execution_owner_id: str | None = None
-    execution_epoch: int | None = None
-    control_version: int | None = None
-    dispatch_status: str | None = None
-    function_name: str | None = None
-    source_file: str | None = None
-    line_hint: str | None = None
-    parent_task_id: str | None = None
-    parent_stage_item_id: str | None = None
-    message: str
-    payload: Dict[str, Any] = Field(default_factory=dict)
-    created_at: str | None = None
-
-
-class TaskTimelineResponse(BaseModel):
-    task_id: str
-    events: list[TaskTimelineEventResponse] = Field(default_factory=list)
-
-
-class ActionResponse(BaseModel):
-    status: str = "ok"
-    task_id: str
-    message: str
-    deleted_event_count: int = 0
-
-
-class TaskListStatsResponse(BaseModel):
-    total: int = 0
-    pending: int = 0
-    running: int = 0
-    passed: int = 0
-    failed: int = 0
-    error: int = 0
-    cancelled: int = 0
 
 
 def _get_task_row(db: Session, task_id: str):
@@ -1263,7 +972,7 @@ def get_project_slot_cluster_compat(project_id: str, db: Session = Depends(get_d
 
 
 @router.get("/agent-observability/summary", response_model=AgentObservabilitySummaryResponse)
-async def get_agent_observability_summary(
+def get_agent_observability_summary(
     db: Session = Depends(get_db),
     user_and_token=Depends(get_current_user),
 ):
@@ -1274,16 +983,16 @@ async def get_agent_observability_summary(
 
 
 @router.get("/agent-observability/aggregate/summary", response_model=AgentObservabilitySummaryResponse)
-async def get_agent_observability_aggregate_summary(
+def get_agent_observability_aggregate_summary(
     db: Session = Depends(get_db),
     user_and_token=Depends(get_current_user),
 ):
     _, token = user_and_token
-    return await _build_agent_aggregate_summary(token, db)
+    return _build_agent_aggregate_summary(token, db)
 
 
 @router.get("/agent-observability/processes", response_model=list[AgentProcessSnapshotResponse])
-async def list_agent_processes(
+def list_agent_processes(
     pod: Optional[str] = Query(None),
     task_id: Optional[str] = Query(None),
     stage_key: Optional[str] = Query(None),
@@ -1316,7 +1025,7 @@ async def list_agent_processes(
 
 
 @router.get("/agent-observability/aggregate/processes", response_model=list[AgentProcessSnapshotResponse])
-async def list_agent_aggregate_processes(
+def list_agent_aggregate_processes(
     pod: Optional[str] = Query(None),
     task_id: Optional[str] = Query(None),
     stage_key: Optional[str] = Query(None),
@@ -1328,7 +1037,7 @@ async def list_agent_aggregate_processes(
     user_and_token=Depends(get_current_user),
 ):
     _, token = user_and_token
-    rows = list((await _build_agent_aggregate_snapshot(token, db))["processes"])
+    rows = list((_build_agent_aggregate_snapshot(token, db))["processes"])
     if pod:
         rows = [row for row in rows if str(row.get("pod_name") or "") == pod]
     if task_id:
@@ -1347,7 +1056,7 @@ async def list_agent_aggregate_processes(
 
 
 @router.get("/agent-observability/sessions/content")
-async def get_agent_session_content(
+def get_agent_session_content(
     task_id: str = Query(...),
     session_file: str = Query(...),
     db: Session = Depends(get_db),
@@ -1358,7 +1067,7 @@ async def get_agent_session_content(
 
 
 @router.get("/agent-observability/tasks", response_model=list[AgentTaskOwnershipSnapshotResponse])
-async def list_agent_tasks(
+def list_agent_tasks(
     db: Session = Depends(get_db),
     user_and_token=Depends(get_current_user),
 ):
@@ -1369,20 +1078,20 @@ async def list_agent_tasks(
 
 
 @router.get("/agent-observability/aggregate/tasks", response_model=list[AgentTaskOwnershipSnapshotResponse])
-async def list_agent_aggregate_tasks(
+def list_agent_aggregate_tasks(
     pod: Optional[str] = Query(None),
     db: Session = Depends(get_db),
     user_and_token=Depends(get_current_user),
 ):
     _, token = user_and_token
-    rows = list((await _build_agent_aggregate_snapshot(token, db))["tasks"])
+    rows = list((_build_agent_aggregate_snapshot(token, db))["tasks"])
     if pod:
         rows = [row for row in rows if str(row.get("pod_name") or "") == pod]
     return rows
 
 
 @router.get("/agent-observability/pods", response_model=list[AgentPodSnapshotResponse])
-async def list_agent_pods(
+def list_agent_pods(
     db: Session = Depends(get_db),
     user_and_token=Depends(get_current_user),
 ):
@@ -1393,31 +1102,31 @@ async def list_agent_pods(
 
 
 @router.get("/agent-observability/aggregate/pods", response_model=list[AgentPodSnapshotResponse])
-async def list_agent_aggregate_pods(
+def list_agent_aggregate_pods(
     db: Session = Depends(get_db),
     user_and_token=Depends(get_current_user),
 ):
     _, token = user_and_token
-    return (await _build_agent_aggregate_snapshot(token, db))["pods"]
+    return (_build_agent_aggregate_snapshot(token, db))["pods"]
 
 
 @router.get("/agent-observability/aggregate/runtime", response_model=AgentRuntimeAggregateResponse)
-async def get_agent_aggregate_runtime(
+def get_agent_aggregate_runtime(
     db: Session = Depends(get_db),
     user_and_token=Depends(get_current_user),
 ):
     _, token = user_and_token
-    snapshot = await _build_agent_aggregate_snapshot(token, db)
+    snapshot = _build_agent_aggregate_snapshot(token, db)
     return _build_agent_runtime_aggregate(snapshot)
 
 
-async def _fanout_post_json(urls: list[str], *, path: str, token: str, params: dict[str, Any]) -> tuple[Any | None, str | None, dict[str, Any] | None]:
+def _fanout_post_json(urls: list[str], *, path: str, token: str, params: dict[str, Any]) -> tuple[Any | None, str | None, dict[str, Any] | None]:
     headers = _auth_headers_from_token(token)
-    async with httpx.AsyncClient(timeout=AGGREGATE_HTTP_TIMEOUT_SECONDS) as client:
+    with httpx.AsyncClient(timeout=AGGREGATE_HTTP_TIMEOUT_SECONDS) as client:
         for base_url in urls:
             url = f"{base_url}{path}"
             try:
-                response = await client.post(url, headers=headers, params=params)
+                response = client.post(url, headers=headers, params=params)
                 if response.status_code == 200:
                     return response.json(), base_url, None
                 logger.warning("dvs agent fanout post non-200 status=%s url=%s", response.status_code, url)
@@ -1434,7 +1143,7 @@ async def _fanout_post_json(urls: list[str], *, path: str, token: str, params: d
     return None, None, {"attempted_url": None, "error_kind": "no_target", "status_code": None, "message": "no target responded"}
 
 
-async def _kill_agent_process_impl(
+def _kill_agent_process_impl(
     pid: int,
     db: Session = Depends(get_db),
     user_and_token=Depends(get_current_user),
@@ -1496,32 +1205,32 @@ async def _kill_agent_process_impl(
 
 
 @router.post("/agent-observability/processes/{pid}/kill", response_model=AgentProcessKillResponse)
-async def kill_agent_process(
+def kill_agent_process(
     pid: int,
     db: Session = Depends(get_db),
     user_and_token=Depends(get_current_user),
 ):
-    return await _kill_agent_process_impl(pid=pid, db=db, user_and_token=user_and_token)
+    return _kill_agent_process_impl(pid=pid, db=db, user_and_token=user_and_token)
 
 
 @internal_observability_router.post("/agent-observability/processes/{pid}/kill", response_model=AgentProcessKillResponse, include_in_schema=False)
-async def kill_internal_agent_process(
+def kill_internal_agent_process(
     pid: int,
     db: Session = Depends(get_db),
     user_and_token=Depends(get_current_user),
 ):
-    return await _kill_agent_process_impl(pid=pid, db=db, user_and_token=user_and_token)
+    return _kill_agent_process_impl(pid=pid, db=db, user_and_token=user_and_token)
 
 
 @router.post("/agent-observability/aggregate/processes/{pid}/kill", response_model=AgentProcessKillResponse)
-async def kill_agent_aggregate_process(
+def kill_agent_aggregate_process(
     pid: int,
     db: Session = Depends(get_db),
     user_and_token=Depends(get_current_user),
 ):
     user, token = user_and_token
     ensure_admin_user(user)
-    snapshot = await _build_agent_aggregate_snapshot(token, db)
+    snapshot = _build_agent_aggregate_snapshot(token, db)
     matched = [row for row in snapshot["processes"] if int(row.get("pid") or -1) == pid]
     if not matched:
         return AgentProcessKillResponse(requested=1, matched=0, succeeded=0, failed=0, skipped=1, items=[])
@@ -1572,7 +1281,7 @@ async def kill_agent_aggregate_process(
         },
         task_id=row.get("task_id"),
     )
-    result, _, error_detail = await _fanout_post_json(
+    result, _, error_detail = _fanout_post_json(
         _aggregate_base_urls(target_worker),
         path=f"/agent-observability/processes/{pid}/kill",
         token=token,
@@ -1592,7 +1301,7 @@ async def kill_agent_aggregate_process(
 
 
 @router.post("/agent-observability/processes/kill-all-orphans", response_model=AgentProcessKillResponse)
-async def kill_all_orphan_processes(
+def kill_all_orphan_processes(
     db: Session = Depends(get_db),
     user_and_token=Depends(get_current_user),
 ):
@@ -1641,13 +1350,13 @@ async def kill_all_orphan_processes(
 
 
 @router.post("/agent-observability/aggregate/processes/kill-all-orphans", response_model=AgentProcessKillResponse)
-async def kill_all_agent_aggregate_orphans(
+def kill_all_agent_aggregate_orphans(
     db: Session = Depends(get_db),
     user_and_token=Depends(get_current_user),
 ):
     user, token = user_and_token
     ensure_admin_user(user)
-    snapshot = await _build_agent_aggregate_snapshot(token, db)
+    snapshot = _build_agent_aggregate_snapshot(token, db)
     killable = [row for row in snapshot["processes"] if row.get("owner_kind") == "residual" and row.get("kill_allowed")]
     cluster_snapshot = build_worker_cluster_snapshot(db, project_id=None)
     worker_by_pod = {str(worker.pod_name or ""): worker for worker in cluster_snapshot.workers}
@@ -1681,7 +1390,7 @@ async def kill_all_agent_aggregate_orphans(
         if target_worker is None:
             items.append({"pid": int(row.get("pid") or 0), "pgid": row.get("pgid"), "status": "failed", "reason": "target pod not found in cluster snapshot"})
             continue
-        result, _, error_detail = await _fanout_post_json(
+        result, _, error_detail = _fanout_post_json(
             _aggregate_base_urls(target_worker),
             path=f"/agent-observability/processes/{int(row.get('pid') or 0)}/kill",
             token=token,
@@ -1708,13 +1417,13 @@ async def kill_all_agent_aggregate_orphans(
 
 
 @router.post("/agent-observability/aggregate/processes/kill-all-suspected-orphans", response_model=AgentProcessKillResponse)
-async def kill_all_agent_aggregate_suspected_orphans(
+def kill_all_agent_aggregate_suspected_orphans(
     db: Session = Depends(get_db),
     user_and_token=Depends(get_current_user),
 ):
     user, token = user_and_token
     ensure_admin_user(user)
-    snapshot = await _build_agent_aggregate_snapshot(token, db)
+    snapshot = _build_agent_aggregate_snapshot(token, db)
     killable = [row for row in snapshot["processes"] if row.get("owner_kind") == "unknown" and row.get("kill_allowed")]
     cluster_snapshot = build_worker_cluster_snapshot(db, project_id=None)
     worker_by_pod = {str(worker.pod_name or ""): worker for worker in cluster_snapshot.workers}
@@ -1749,7 +1458,7 @@ async def kill_all_agent_aggregate_suspected_orphans(
         if target_worker is None:
             items.append({"pid": int(row.get("pid") or 0), "pgid": row.get("pgid"), "status": "failed", "reason": "target pod not found in cluster snapshot"})
             continue
-        result, _, error_detail = await _fanout_post_json(
+        result, _, error_detail = _fanout_post_json(
             _aggregate_base_urls(target_worker),
             path=f"/agent-observability/processes/{int(row.get('pid') or 0)}/kill",
             token=token,

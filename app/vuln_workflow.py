@@ -1,7 +1,6 @@
 """Single-worker dataflow taint tracking + vulnerability mining workflow."""
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
 import re
@@ -148,7 +147,7 @@ class DataflowVulnWorkflow:
         graph_db_path: Path | None = None,
         vuln_output_root: Path | None = None,
         on_event: Callable[[SwarmEvent], None] | None = None,
-        cancel_event: asyncio.Event | None = None,
+        cancel_event: threading.Event | None = None,
         # session 继承相关参数
         parent_session_file: str | None = None,       # 父函数完成后的 worker session（fork 源）
         sessions_archive_dir: Path | None = None,     # 全局归档目录 run/sessions/

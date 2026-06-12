@@ -101,7 +101,7 @@ def _extract_json(text: str) -> dict[str, Any]:
     return {}
 
 
-async def run_tracker(
+def run_tracker(
     tracker_type: str,
     context: dict[str, Any],
     *,
@@ -121,7 +121,7 @@ async def run_tracker(
     ctx = dict(context)
     ctx.setdefault("tainted_nonlocal_json", json.dumps(ctx.get("tainted_nonlocal") or [], ensure_ascii=False, indent=2))
     prompt = prompt_template.format(**ctx)
-    result = await run_agent(
+    result = run_agent(
         prompt=prompt,
         model=model,
         tools=tools,

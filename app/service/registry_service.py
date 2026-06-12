@@ -17,7 +17,7 @@ class RegistryService:
     def __init__(self):
         self._cfg = get_service_yaml().registry
         self._running = False
-        self._task: Optional[asyncio.Task] = None
+        self._task: Optional[threading.Thread] = None
 
     def _register_url(self) -> str:
         return f"{self._cfg.menu_service_url}/api/menu/register"
@@ -47,12 +47,12 @@ class RegistryService:
             },
         }
 
-    async def register(self) -> bool:
+    def register(self) -> bool:
         if not self._cfg.enabled:
             return True
         try:
-            async with httpx.AsyncClient(timeout=10) as client:
-                resp = await client.post(self._register_url(), json=self._payload())
+            with httpx.Client(timeout=10) as client:
+                resp = client.post(self._register_url(), json=self._payload())
             ok = resp.status_code in (200, 201)
             if not ok:
                 logger.warning("menu register failed: %s %s", resp.status_code, resp.text[:200])
@@ -61,33 +61,34 @@ class RegistryService:
             logger.warning("menu register error: %s", exc)
             return False
 
-    async def heartbeat(self) -> bool:
+    def heartbeat(self) -> bool:
         try:
-            async with httpx.AsyncClient(timeout=10) as client:
-                resp = await client.post(self._heartbeat_url())
+            with httpx.Client(timeout=10) as client:
+                resp = client.post(self._heartbeat_url())
             if resp.status_code == 404:
-                await self.register()
+                self.register()
                 return False
             return resp.status_code == 200
         except Exception:
             return False
 
-    async def _loop(self) -> None:
+    def _loop(self) -> None:
         while self._running:
-            await self.heartbeat()
-            await asyncio.sleep(self._cfg.heartbeat_interval_seconds)
+            self.heartbeat()
+            time.sleep(self._cfg.heartbeat_interval_seconds)
 
     def start(self) -> None:
         if not self._cfg.enabled:
             return
         self._running = True
-        self._task = asyncio.create_task(self._loop(), name="registry_heartbeat")
+        self._task = threading.Thread(target=self._loop, name="registry_heartbeat", daemon=True)
+        self._task.start()
         logger.info("Registry heartbeat started (interval=%ds)", self._cfg.heartbeat_interval_seconds)
 
     def stop(self) -> None:
         self._running = False
-        if self._task and not self._task.done():
-            self._task.cancel()
+        if self._task and self._task.is_alive():
+            self._task.join(timeout=5.0)
 
 
 _registry_service: RegistryService | None = None

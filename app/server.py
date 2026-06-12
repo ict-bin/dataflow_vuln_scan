@@ -29,25 +29,26 @@
 
 from __future__ import annotations
 
-import asyncio
+import threading
 import contextlib
+import queue
 import json
 import logging
 import os
 import time
-from contextlib import asynccontextmanager
+from contextlib import contextmanager
 from threading import Lock
 from typing import Any, Callable
 
 import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
-from fastapi.concurrency import run_in_threadpool
+
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
-from sse_starlette.sse import EventSourceResponse
+from fastapi.responses import StreamingResponse
 
 from .build_info import build_service_meta
 from .config import build_task_config, get_service_yaml, load_service_config
@@ -111,12 +112,12 @@ def _aggregate_metrics_rows():
     return parse_prometheus_metrics(render_summary_metrics())
 
 
-async def _control_plane_loop_monitor() -> None:
+def _control_plane_loop_monitor() -> None:
     global _loop_lag_seconds, _loop_lag_exceeded_total, _control_plane_last_tick_at
     interval = 1.0
     while True:
         started = time.monotonic()
-        await asyncio.sleep(interval)
+        time.sleep(interval)
         now = time.monotonic()
         lag = max(0.0, now - started - interval)
         _loop_lag_seconds = lag
@@ -139,8 +140,8 @@ class TaskEntry:
         self.prompt = prompt
         self.result: TaskResult | None = None
         self.events: list[dict] = []
-        self.queues: list[asyncio.Queue] = []
-        self.done = asyncio.Event()
+        self.queues: list[queue.Queue] = []
+        self.done = threading.Event()
         self.callback_url: str | None = None
 
 
@@ -153,35 +154,36 @@ def _forbidden_for_role(feature: str) -> HTTPException:
 
 # ─── Lifespan ────────────────────────────────────────────────────────────────
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # --- startup ---
+# @asynccontextmanager replaced with on_event
+def _on_startup():
     global _probe_shutdown, _probe_started_at
     _probe_shutdown = False
     _probe_started_at = time.time()
     if not _external_probe_process_enabled():
         _ensure_probe_server_started()
-    await get_runtime_bootstrap().start(app)
-    lag_task = asyncio.create_task(_control_plane_loop_monitor(), name="dvs_control_plane_loop_monitor")
+    get_runtime_bootstrap().start(app)
+    lag_thread = threading.Thread(target=_control_plane_loop_monitor, name="dvs_control_plane_loop_monitor", daemon=True)
+    lag_thread.start()
+    app.state._lag_thread = lag_thread
 
-    yield
-    # --- shutdown ---
+def _on_shutdown():
+    global _probe_shutdown
     _probe_shutdown = True
-    lag_task.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await lag_task
-    await get_runtime_bootstrap().stop()
+    lag_thread = getattr(app.state, '_lag_thread', None)
+    if lag_thread:
+        lag_thread.join(timeout=5.0)
+    get_runtime_bootstrap().stop()
     if not _external_probe_process_enabled():
         _stop_probe_server()
-
-
-app = FastAPI(title="dataflow_vuln_scan", version="2.0.0", lifespan=lifespan)
+app = FastAPI(title="dataflow_vuln_scan", version="2.0.0")
+app.add_event_handler("startup", _on_startup)
+app.add_event_handler("shutdown", _on_shutdown)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 get_runtime_bootstrap().install_internal_observability_router(app)
 
 
 @app.middleware("http")
-async def collect_request_metrics(request, call_next):
+def collect_request_metrics(request, call_next):
     started = time.perf_counter()
     response = None
     route = request.scope.get("route")
@@ -189,7 +191,7 @@ async def collect_request_metrics(request, call_next):
     normalized_route = normalize_http_route(str(path))
     observe_http_request_inflight(request.method, normalized_route, 1)
     try:
-        response = await call_next(request)
+        response = call_next(request)
         return response
     finally:
         status_code = response.status_code if response is not None else 500
@@ -214,37 +216,34 @@ def _get_svc_config():
 
 @app.get("/metrics")
 @app.get("/api/app/dataflow-vuln-scan/metrics", include_in_schema=False)
-async def metrics():
+def metrics():
     return PlainTextResponse(render_local_metrics(), media_type="text/plain; version=0.0.4; charset=utf-8")
 
 
 @app.get("/api/app/dataflow-vuln-scan/metrics/aggregate", include_in_schema=False)
-async def aggregate_metrics():
+def aggregate_metrics():
     return PlainTextResponse(render_aggregate_metrics(), media_type="text/plain; version=0.0.4; charset=utf-8")
 
 
 @app.get("/api/app/dataflow-vuln-scan/metrics/summary", include_in_schema=False)
-async def metrics_summary():
-    return await run_in_threadpool(
-        _cached_summary,
+def metrics_summary():
+    return _cached_summary(
         "summary",
         lambda: build_generic_observability_summary(_aggregate_metrics_rows(), title="数据流漏洞挖掘"),
     )
 
 
 @app.get("/api/app/dataflow-vuln-scan/metrics/rest-api-summary", include_in_schema=False)
-async def metrics_rest_api_summary():
-    return await run_in_threadpool(
-        _cached_summary,
+def metrics_rest_api_summary():
+    return _cached_summary(
         "rest-api-summary",
         lambda: build_rest_api_summary(_aggregate_metrics_rows()),
     )
 
 
 @app.get("/api/app/dataflow-vuln-scan/metrics/ai-summary", include_in_schema=False)
-async def metrics_ai_summary():
-    return await run_in_threadpool(
-        _cached_summary,
+def metrics_ai_summary():
+    return _cached_summary(
         "ai-summary",
         lambda: build_ai_summary(_aggregate_metrics_rows(), coverage_text="数据流漏洞挖掘 AI 指标覆盖 trace / round / review / judge 相关调用。"),
     )
@@ -262,7 +261,7 @@ class AnalyseRequest(BaseModel):
 
 @app.get("/health")
 @app.get("/api/app/dataflow-vuln-scan/health")
-async def health():
+def health():
     return _probe_payload()
 
 
@@ -392,7 +391,7 @@ def _stop_probe_server() -> None:
 
 @app.get("/ready")
 @app.get("/api/app/dataflow-vuln-scan/ready")
-async def ready():
+def ready():
     payload = _probe_payload()
     ready_ok = bool(payload["readiness_ok"])
     payload["status"] = "ready" if ready_ok else "not_ready"
@@ -402,7 +401,7 @@ async def ready():
 
 
 @app.post("/analyse", status_code=202)
-async def submit_analyse(body: AnalyseRequest):
+def submit_analyse(body: AnalyseRequest):
     """提交分析任务。只需一句话 prompt。"""
     if not PUBLIC_API_ENABLED:
         raise _forbidden_for_role("legacy submit API")
@@ -422,7 +421,7 @@ async def submit_analyse(body: AnalyseRequest):
         for q in entry.queues:
             try:
                 q.put_nowait(d)
-            except asyncio.QueueFull:
+            except queue.QueueFull:
                 pass
 
     orch = Orchestrator(config=cfg, on_event=on_event)
@@ -430,9 +429,9 @@ async def submit_analyse(body: AnalyseRequest):
     entry.callback_url = body.callback_url or None
     _tasks[task_id] = entry
 
-    async def _run():
+    def _run():
         try:
-            entry.result = await orch.execute_recursive(task_id)
+            entry.result = orch.execute_recursive(task_id)
         except Exception as e:
             entry.result = TaskResult(
                 task_id=task_id, status=TaskStatus.ERROR,
@@ -445,15 +444,15 @@ async def submit_analyse(body: AnalyseRequest):
             for q in entry.queues:
                 try:
                     q.put_nowait(done_data)
-                except asyncio.QueueFull:
+                except queue.QueueFull:
                     pass
             entry.done.set()
             if entry.callback_url and entry.result:
-                await _notify(entry)
-            await asyncio.sleep(CLEANUP_DELAY)
+                _notify(entry)
+            time.sleep(CLEANUP_DELAY)
             _tasks.pop(task_id, None)
 
-    asyncio.create_task(_run())
+    threading.Thread(target=_run, daemon=True).start()
     return {
         "task_id": task_id,
         "source_file": cfg.source_file,
@@ -464,12 +463,12 @@ async def submit_analyse(body: AnalyseRequest):
     }
 
 
-async def _notify(entry: TaskEntry):
+def _notify(entry: TaskEntry):
     if not entry.callback_url or not entry.result:
         return
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            await client.post(entry.callback_url, json={
+        with httpx.Client(timeout=30) as client:
+            client.post(entry.callback_url, json={
                 "task_id": entry.task_id,
                 "status": entry.result.status.value,
                 "duration_ms": entry.result.total_duration_ms,
@@ -480,7 +479,7 @@ async def _notify(entry: TaskEntry):
 
 
 @app.get("/task/{task_id}")
-async def get_task(task_id: str):
+def get_task(task_id: str):
     if not PUBLIC_API_ENABLED:
         raise _forbidden_for_role("legacy task API")
     entry = _tasks.get(task_id)
@@ -492,16 +491,16 @@ async def get_task(task_id: str):
 
 
 @app.get("/task/{task_id}/stream")
-async def stream_task(task_id: str):
+def stream_task(task_id: str):
     if not PUBLIC_API_ENABLED:
         raise _forbidden_for_role("legacy task stream API")
     entry = _tasks.get(task_id)
     if not entry:
         raise HTTPException(404, "Task not found")
-    queue: asyncio.Queue = asyncio.Queue(maxsize=1000)
+    queue: queue.Queue = queue.Queue(maxsize=1000)
     entry.queues.append(queue)
 
-    async def gen():
+    def gen():
         for evt in entry.events:
             yield {"data": json.dumps(evt, ensure_ascii=False)}
         if entry.result:
@@ -510,21 +509,23 @@ async def stream_task(task_id: str):
         try:
             while True:
                 try:
-                    evt = await asyncio.wait_for(queue.get(), timeout=30)
+                    evt = queue.get(timeout=30)
                     yield {"data": json.dumps(evt, ensure_ascii=False)}
                     if evt.get("type") == "done":
                         return
-                except asyncio.TimeoutError:
+                except queue.Empty:
                     yield {"comment": "keepalive"}
         finally:
             if queue in entry.queues:
                 entry.queues.remove(queue)
 
-    return EventSourceResponse(gen())
+    def _sse_gen():
+        yield from gen()
+    return StreamingResponse(_sse_gen(), media_type="text/event-stream")
 
 
 @app.post("/task/{task_id}/abort")
-async def abort_task(task_id: str):
+def abort_task(task_id: str):
     if not PUBLIC_API_ENABLED:
         raise _forbidden_for_role("legacy task abort API")
     entry = _tasks.get(task_id)
@@ -537,7 +538,7 @@ async def abort_task(task_id: str):
 
 
 @app.get("/tasks")
-async def list_tasks():
+def list_tasks():
     if not PUBLIC_API_ENABLED:
         raise _forbidden_for_role("legacy task list API")
     return {"tasks": [

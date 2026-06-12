@@ -28,12 +28,12 @@ def extract_bearer_token(authorization: Optional[str]) -> str:
     return token
 
 
-async def _validate_token(token: str, project_id: Optional[str] = None) -> dict:
+def _validate_token(token: str, project_id: Optional[str] = None) -> dict:
     cfg = get_service_yaml().auth_service
     params = {"project_id": project_id} if project_id else None
     try:
-        async with httpx.AsyncClient(timeout=cfg.timeout) as client:
-            response = await client.post(
+        with httpx.Client(timeout=cfg.timeout) as client:
+            response = client.post(
                 cfg.validate_url,
                 headers={"Authorization": f"Bearer {token}"},
                 params=params,
@@ -49,12 +49,12 @@ async def _validate_token(token: str, project_id: Optional[str] = None) -> dict:
     return response.json()
 
 
-async def get_current_user(
+def get_current_user(
     authorization: Optional[str] = Header(None, alias="Authorization"),
 ) -> Tuple[Dict, str]:
     token = extract_bearer_token(authorization)
     try:
-        user = await _validate_token(token)
+        user = _validate_token(token)
     except TokenInvalidError as exc:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
     except AuthServiceError as exc:
@@ -62,9 +62,9 @@ async def get_current_user(
     return user, token
 
 
-async def ensure_project_access(project_id: str, token: str) -> Dict:
+def ensure_project_access(project_id: str, token: str) -> Dict:
     try:
-        return await _validate_token(token, project_id=project_id)
+        return _validate_token(token, project_id=project_id)
     except TokenInvalidError as exc:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
     except AuthServiceError as exc:

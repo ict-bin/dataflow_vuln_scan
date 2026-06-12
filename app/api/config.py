@@ -24,7 +24,7 @@ class ConfigSaveRequest(BaseModel):
 
 
 @router.get("/config")
-async def get_config(project_id: str = Query(...), db: Session = Depends(get_db)):
+def get_config(project_id: str = Query(...), db: Session = Depends(get_db)):
     try:
         return get_config_service().get_config(db, project_id)
     except SQLAlchemyError as exc:
@@ -33,7 +33,7 @@ async def get_config(project_id: str = Query(...), db: Session = Depends(get_db)
 
 
 @router.put("/config")
-async def save_config(body: ConfigSaveRequest, db: Session = Depends(get_db)):
+def save_config(body: ConfigSaveRequest, db: Session = Depends(get_db)):
     try:
         return get_config_service().save_config(db, body.project_id, body.config)
     except SQLAlchemyError as exc:

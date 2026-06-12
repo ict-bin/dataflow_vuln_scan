@@ -345,7 +345,7 @@ def mark_ambiguous(sem: FollowupSemantics) -> bool:
     )
 
 
-async def analyze_with_llm_fallback(
+def analyze_with_llm_fallback(
     sem: FollowupSemantics,
     *,
     source_root: str,
@@ -374,7 +374,7 @@ async def analyze_with_llm_fallback(
 仅输出 JSON，不要 Markdown。
 """
     try:
-        result = await runner(
+        result = runner(
             prompt=prompt,
             model=model,
             tools=tools,

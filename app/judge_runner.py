@@ -27,7 +27,7 @@ class JudgeMixin:
         except Exception:
             return str(session_file).replace("\\", "/")
 
-    async def _run_merge_agent(
+    def _run_merge_agent(
         self,
         root_function: str,
         dataflow_files: list[tuple[str, str]],
@@ -83,7 +83,7 @@ class JudgeMixin:
 
         w_cfg = cfg.workers.agents[0] if cfg.workers.agents else AgentInstanceConfig(model="")
         merge_session_file = str(Path(cwd) / "sessions" / f"merge-{re.sub(r'[^A-Za-z0-9_.-]+', '_', root_function)}.jsonl")
-        ar = await run_agent(
+        ar = run_agent(
             prompt=merge_prompt,
             model=w_cfg.model,
             tools=["read", "write", "bash"],
@@ -129,7 +129,7 @@ class JudgeMixin:
     # ═══════════════════════════════════════════════════════════════════════
 
 
-    async def _run_judge_evaluation(
+    def _run_judge_evaluation(
         self,
         judge_idx: int,
         judge_cfg,
@@ -221,7 +221,7 @@ class JudgeMixin:
 
         # ═══ 步骤1:并行评判所有 Worker(每个 Worker 独立上下文)═════════
 
-        async def _eval_one_worker(w: WorkerResult) -> tuple[WorkerEvaluation, object]:
+        def _eval_one_worker(w: WorkerResult) -> tuple[WorkerEvaluation, object]:
             # 结构性问题:直接生成 fail,不调用 LLM
             if w.df_issues:
                 issues_text = "\n".join(w.df_issues)
@@ -245,7 +245,7 @@ class JudgeMixin:
                 dataflow_path=f"{w.worker_id}-dataflow.md",
             )
             eval_session_file = str(j_dir / f"{jid}-{w.worker_id}-round-{rnd_num:03d}-eval.jsonl")
-            ar = await run_agent(
+            ar = run_agent(
                 prompt=eval_prompt, **base_kwargs, session_file=eval_session_file)
             parsed = _parse_eval_md(ar.output)
             ev = WorkerEvaluation(
@@ -266,7 +266,8 @@ class JudgeMixin:
             )
             return ev, ar.token_usage
 
-        eval_pairs = await asyncio.gather(*[_eval_one_worker(w) for w in round_workers])
+        # Run eval_one_worker for each worker in serial (already sync after conversion)
+        eval_pairs = [_eval_one_worker(w) for w in round_workers]
         for ev, tokens in eval_pairs:
             j_result.evaluations.append(ev)
             j_result.token_usage += tokens
@@ -280,7 +281,7 @@ class JudgeMixin:
 
             # 独立上下文
             summary_session_file = str(j_dir / f"{jid}-round-{rnd_num:03d}-summary.jsonl")
-            ar = await run_agent(
+            ar = run_agent(
                 prompt=summary_prompt, **base_kwargs, session_file=summary_session_file)
             j_result.token_usage += ar.token_usage
             j_result.session_file = self._session_relpath(sess_dir.parent, summary_session_file)

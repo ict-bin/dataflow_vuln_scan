@@ -21,7 +21,8 @@ Session 文件结构:
 
 from __future__ import annotations
 
-import asyncio
+import asyncio  # REMOVE_ME
+import threading
 import json
 import os
 import re
@@ -609,7 +610,7 @@ class PerTaintWorkflow:
         dep: int = 0,
         max_depth: int = 5,
         on_event: Callable | None = None,
-        cancel_event: asyncio.Event | None = None,
+        cancel_event: threading.Event | None = None,
     ):
         self.cfg = cfg
         self.func_name = func_name
@@ -670,7 +671,7 @@ class PerTaintWorkflow:
 
     def _raise_if_cancelled(self) -> None:
         if self._is_cancelled():
-            raise asyncio.CancelledError("taint workflow cancelled")
+            raise Exception("taint workflow cancelled")
 
     def _emit(self, etype: str, **data):
         if self.on_event:
@@ -715,7 +716,7 @@ class PerTaintWorkflow:
         except Exception:
             return str(session_file).replace("\\", "/")
 
-    async def run(self) -> TaskResult:
+    def run(self) -> TaskResult:
         """主执行循环。"""
         cfg = self.cfg
         max_rounds = cfg.max_rounds if cfg.max_rounds > 0 else 20
@@ -776,7 +777,7 @@ class PerTaintWorkflow:
         # Concurrency limit: taint sessions share the same worker slot.
         # Max parallel taint pi processes = worker_count (from config).
         _taint_concurrency = max(1, self.cfg.worker_count)
-        _taint_sem = asyncio.Semaphore(_taint_concurrency)
+        _taint_sem = threading.Semaphore(_taint_concurrency)
 
         for rnd in range(1, max_rounds + 1):
             self._raise_if_cancelled()
@@ -798,8 +799,8 @@ class PerTaintWorkflow:
             self._emit("round_start", round=rnd)
 
             # ── Phase 2: 并行 taint sessions（受 _taint_sem 并发限制）──────────
-            async def run_taint(param: str) -> tuple[str, object]:
-                async with _taint_sem:
+            def run_taint(param: str) -> tuple[str, object]:
+                with _taint_sem:
                     self._raise_if_cancelled()
                     fb = taint_feedbacks.get(param, "")
                     prompt = _build_taint_prompt(
@@ -812,7 +813,7 @@ class PerTaintWorkflow:
                                worker_id=f"worker-taint-{_safe_param(param)}",
                                model=self.worker_model, round=rnd,
                                function=f"{self.func_name}[{param}]")
-                    res = await run_agent(
+                    res = run_agent(
                         prompt=prompt,
                         post_skill_prompt=post_skill,
                         **self._agent_kwargs(self.taint_sess[param])
@@ -825,9 +826,10 @@ class PerTaintWorkflow:
                                tokens_out=res.token_usage.output)
                     return (param, res)
 
-            taint_results_raw = await asyncio.gather(*[
+            # Run taint analysis for each param in serial
+            taint_results_raw = [
                 run_taint(p) for p in self.taint_params
-            ])
+            ]
             self._raise_if_cancelled()
             taint_results: dict[str, object] = dict(taint_results_raw)
             for _taint_result in taint_results.values():
@@ -852,7 +854,7 @@ class PerTaintWorkflow:
             self._emit("worker_start", worker_id="worker-summary",
                        model=self.worker_model, round=rnd,
                        function=f"{self.func_name}[summary]")
-            summary_result = await run_agent(
+            summary_result = run_agent(
                 prompt=summary_prompt,
                 post_skill_prompt=summary_post,
                 **self._agent_kwargs(self.summary_sess)
@@ -903,7 +905,7 @@ class PerTaintWorkflow:
             self._emit("judge_start", judge_id="judge-0",
                        model=self.judge_model, round=rnd,
                        function=self.func_name)
-            judge_result = await run_agent(
+            judge_result = run_agent(
                 prompt=eval_prompt,
                 **self._agent_kwargs(judge_session_file, is_judge=True)
             )

@@ -198,7 +198,7 @@ def build_intake_payload(
     }
 
 
-async def report_finding_to_intake(
+def report_finding_to_intake(
     *,
     project_id: str,
     task_id: str,
@@ -231,8 +231,8 @@ async def report_finding_to_intake(
         taint_path_report_path=taint_path_report_path,
     )
     try:
-        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
-            response = await client.post(
+        with httpx.Client(timeout=DEFAULT_TIMEOUT) as client:
+            response = client.post(
                 url,
                 headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
                 json=payload,

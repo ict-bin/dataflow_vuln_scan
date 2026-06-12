@@ -44,11 +44,11 @@ class RuntimeBootstrapStatus:
 
 class RuntimeBootstrap:
     def __init__(self) -> None:
-        self._task: Optional[asyncio.Task] = None
-        self._stop_event = asyncio.Event()
+        self._task: Optional[threading.Thread] = None
+        self._stop_event = threading.Event()
         self._status = RuntimeBootstrapStatus()
         self._router_installed = False
-        self._dispatcher_task: asyncio.Task | None = None
+        self._dispatcher_task: threading.Thread | None = None
         self._worker_slot_thread: threading.Thread | None = None
         self._worker_slot_stop = threading.Event()
         self._worker_slot_last_heartbeat_at = 0.0
@@ -56,14 +56,15 @@ class RuntimeBootstrap:
         self._worker_slot_last_reconcile_at = 0.0
         self._worker_slot_last_error: str | None = None
 
-    async def start(self, app: FastAPI) -> None:
+    def start(self, app: FastAPI) -> None:
         if self._task and not self._task.done():
             return
-        self._stop_event = asyncio.Event()
+        self._stop_event = threading.Event()
         self._status = RuntimeBootstrapStatus()
-        self._task = asyncio.create_task(self._bootstrap_loop(app), name="dvs_runtime_bootstrap")
+        self._task = threading.Thread(target=self._bootstrap_loop, args=(app,), name="dvs_runtime_bootstrap", daemon=True)
+        self._task.start()
 
-    async def stop(self) -> None:
+    def stop(self) -> None:
         self._stop_event.set()
         svc = get_task_service()
         stop_supervisor = getattr(svc, "stop_supervisor", None)
@@ -72,15 +73,15 @@ class RuntimeBootstrap:
         if self._task and not self._task.done():
             self._task.cancel()
             try:
-                await self._task
-            except asyncio.CancelledError:
+                self._task
+            except Exception:
                 pass
         self._task = None
         if self._dispatcher_task and not self._dispatcher_task.done():
             self._dispatcher_task.cancel()
             try:
-                await self._dispatcher_task
-            except asyncio.CancelledError:
+                self._dispatcher_task
+            except Exception:
                 pass
         self._dispatcher_task = None
         self._worker_slot_stop.set()
@@ -108,14 +109,14 @@ class RuntimeBootstrap:
             "last_error": self._worker_slot_last_error,
         }
 
-    async def _bootstrap_loop(self, app: FastAPI) -> None:
+    def _bootstrap_loop(self, app: FastAPI) -> None:
         svc_yaml = get_service_yaml()
 
         while not self._stop_event.is_set():
             made_progress = False
 
             if not self._status.db_ready:
-                made_progress = await self._init_db(svc_yaml)
+                made_progress = self._init_db(svc_yaml)
 
             if self._status.db_ready:
                 if PUBLIC_API_ENABLED and not self._router_installed:
@@ -125,7 +126,7 @@ class RuntimeBootstrap:
                     ) or made_progress
 
                 if REGISTRY_ENABLED and not self._status.registry_ready:
-                    made_progress = await self._attempt_async_component_start(
+                    made_progress = self._attempt_async_component_start(
                         "registry_register",
                         self._register_registry,
                     ) or made_progress
@@ -163,26 +164,22 @@ class RuntimeBootstrap:
                 continue
 
             try:
-                await asyncio.wait_for(self._stop_event.wait(), timeout=DB_INIT_RETRY_SECONDS)
-            except asyncio.TimeoutError:
+                self._stop_event.wait()
+            except Exception:
                 pass
 
-    async def _init_db(self, svc_yaml) -> bool:
+    def _init_db(self, svc_yaml) -> bool:
         self._status.phase = "db_init"
         self._status.attempts += 1
         log_event(logger, logging.INFO, "startup phase begin", event="startup_phase_begin", phase=self._status.phase)
         try:
             from app.db import init_db
 
-            await asyncio.wait_for(
-                asyncio.to_thread(
-                    init_db,
+            init_db(
                     svc_yaml.database.url,
                     svc_yaml.database.pool_size,
                     svc_yaml.database.max_overflow,
-                ),
-                timeout=120,
-            )
+                )
             self._status.db_ready = True
             self._status.error = None
             logger.info("DB initialized: %s:%s/%s", svc_yaml.database.host, svc_yaml.database.port, svc_yaml.database.name)
@@ -218,11 +215,11 @@ class RuntimeBootstrap:
             logger.warning("%s failed on %s (retry in %ss): %s", phase, INSTANCE_ID, DB_INIT_RETRY_SECONDS, exc, exc_info=True)
             return False
 
-    async def _attempt_async_component_start(self, phase: str, starter) -> bool:
+    def _attempt_async_component_start(self, phase: str, starter) -> bool:
         self._status.phase = phase
         log_event(logger, logging.INFO, "startup phase begin", event="startup_phase_begin", phase=phase)
         try:
-            await starter()
+            starter()
             self._status.error = None
             return True
         except Exception as exc:
@@ -245,23 +242,23 @@ class RuntimeBootstrap:
         app.include_router(internal_observability_router)
         app.state.dvs_internal_observability_router_installed = True
 
-    async def _register_registry(self) -> None:
+    def _register_registry(self) -> None:
         from app.service.registry_service import get_registry_service
 
         registry = get_registry_service()
-        await asyncio.wait_for(registry.register(), timeout=15)
+        registry.register()
         registry.start()
         self._status.registry_ready = True
 
     def _start_dispatcher(self) -> None:
-        async def _dispatcher_loop() -> None:
+        def _dispatcher_loop() -> None:
             svc = get_task_service()
             start_supervisor = getattr(svc, "start_supervisor", None)
             if callable(start_supervisor):
                 start_supervisor()
             while not self._stop_event.is_set():
                 try:
-                    claimed = await svc.dispatch_until_full()
+                    claimed = svc.dispatch_until_full()
                     if claimed:
                         log_event(
                             logger,
@@ -274,9 +271,10 @@ class RuntimeBootstrap:
                         )
                 except Exception as exc:
                     logger.warning("dispatcher loop failed on %s: %s", INSTANCE_ID, exc, exc_info=True)
-                await asyncio.sleep(DISPATCH_POLL_INTERVAL_SECONDS)
+                time.sleep(DISPATCH_POLL_INTERVAL_SECONDS)
 
-        self._dispatcher_task = asyncio.create_task(_dispatcher_loop(), name="dvs_dispatcher")
+        self._dispatcher_task = threading.Thread(target=_dispatcher_loop, name="dvs_dispatcher", daemon=True)
+        self._dispatcher_task.start()
         self._status.dispatcher_ready = True
         log_event(logger, logging.INFO, "dispatcher started", event="dispatcher_started", owner_id=INSTANCE_ID)
 

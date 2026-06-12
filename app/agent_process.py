@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import os
 import pathlib
@@ -27,9 +26,9 @@ def find_pi_command() -> list[str]:
     )
 
 
-def process_group_id(proc: asyncio.subprocess.Process) -> int | None:
+def process_group_id(pid: int) -> int | None:
     try:
-        return os.getpgid(proc.pid)
+        return os.getpgid(pid)
     except ProcessLookupError:
         return None
     except Exception:
@@ -372,13 +371,13 @@ def cleanup_worker_runtime_processes(
 
 @dataclass
 class AgentProcessHandle:
-    proc: asyncio.subprocess.Process
+    proc: subprocess.Popen
     label: str
     logger: Callable[[str], None]
     pgid: int | None
 
     @classmethod
-    async def spawn(
+    def spawn(
         cls,
         *args: str,
         cwd: str,
@@ -389,8 +388,8 @@ class AgentProcessHandle:
         logger: Callable[[str], None],
         label: str,
     ) -> "AgentProcessHandle":
-        proc = await asyncio.create_subprocess_exec(
-            *args,
+        proc = subprocess.Popen(
+            args,
             cwd=cwd,
             env=env,
             stdout=stdout,
@@ -398,9 +397,9 @@ class AgentProcessHandle:
             stdin=stdin,
             start_new_session=True,
         )
-        return cls(proc=proc, label=label, logger=logger, pgid=process_group_id(proc))
+        return cls(proc=proc, label=label, logger=logger, pgid=process_group_id(proc.pid))
 
-    async def terminate_tree(
+    def terminate_tree(
         self,
         *,
         reason: str,
@@ -408,7 +407,7 @@ class AgentProcessHandle:
         kill_timeout: float = 5.0,
         force_if_group_still_exists: bool = True,
     ) -> None:
-        if self.proc.returncode is not None:
+        if self.proc.poll() is not None:
             if force_if_group_still_exists and process_group_exists(self.pgid):
                 self.logger(
                     f"cleaning leaked pi process group [{self.label}] "
@@ -417,7 +416,7 @@ class AgentProcessHandle:
                 with contextlib.suppress(ProcessLookupError):
                     os.killpg(self.pgid, signal.SIGKILL)
             with contextlib.suppress(Exception):
-                await asyncio.wait_for(self.proc.wait(), timeout=1.0)
+                self.proc.wait(timeout=1.0)
             return
 
         if self.pgid is not None:
@@ -432,12 +431,11 @@ class AgentProcessHandle:
                 f"terminating pi process [{self.label}] "
                 f"reason={reason} pid={self.proc.pid} pgid=unavailable"
             )
-            with contextlib.suppress(ProcessLookupError):
-                self.proc.terminate()
+            self.proc.terminate()
 
         try:
-            await asyncio.wait_for(self.proc.wait(), timeout=term_timeout)
-        except asyncio.TimeoutError:
+            self.proc.wait(timeout=term_timeout)
+        except subprocess.TimeoutExpired:
             pass
         except ProcessLookupError:
             return
@@ -457,8 +455,7 @@ class AgentProcessHandle:
                 f"force killing pi process [{self.label}] "
                 f"reason={reason} pid={self.proc.pid} pgid=unavailable"
             )
-            with contextlib.suppress(ProcessLookupError):
-                self.proc.kill()
+            self.proc.kill()
 
         with contextlib.suppress(Exception):
-            await asyncio.wait_for(self.proc.wait(), timeout=kill_timeout)
+            self.proc.wait(timeout=kill_timeout)

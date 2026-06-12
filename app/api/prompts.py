@@ -45,7 +45,7 @@ class PromptUpdateRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 @router.get("/prompts")
-async def list_prompts(
+def list_prompts(
     category: Optional[str] = None,
     is_default: Optional[bool] = None,
     is_enabled: Optional[bool] = None,
@@ -60,17 +60,17 @@ async def list_prompts(
 
 
 @router.post("/prompts", status_code=201)
-async def create_prompt(body: PromptCreateRequest, db: Session = Depends(get_db)):
+def create_prompt(body: PromptCreateRequest, db: Session = Depends(get_db)):
     return get_prompt_service().create_prompt(db, **body.model_dump())
 
 
 @router.get("/prompts/{prompt_id}")
-async def get_prompt(prompt_id: str, db: Session = Depends(get_db)):
+def get_prompt(prompt_id: str, db: Session = Depends(get_db)):
     return get_prompt_service().get_prompt(db, prompt_id)
 
 
 @router.put("/prompts/{prompt_id}")
-async def update_prompt(
+def update_prompt(
     prompt_id: str, body: PromptUpdateRequest, db: Session = Depends(get_db)
 ):
     return get_prompt_service().update_prompt(
@@ -79,12 +79,12 @@ async def update_prompt(
 
 
 @router.delete("/prompts/{prompt_id}", status_code=204)
-async def delete_prompt(prompt_id: str, db: Session = Depends(get_db)):
+def delete_prompt(prompt_id: str, db: Session = Depends(get_db)):
     get_prompt_service().delete_prompt(db, prompt_id)
 
 
 @router.post("/prompts/{prompt_id}/clone", status_code=201)
-async def clone_prompt(
+def clone_prompt(
     prompt_id: str,
     new_name: Optional[str] = None,
     db: Session = Depends(get_db),

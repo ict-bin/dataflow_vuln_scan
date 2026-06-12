@@ -416,7 +416,7 @@ def find_service_config() -> str:
     )
 
 
-async def main():
+def main():
     if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
         print("""用法:
   python3 cli.py "对 xxx.c 的 yyy 函数完成数据流漏洞挖掘"
@@ -486,7 +486,7 @@ async def main():
 
     renderer = CliRenderer(quiet=quiet)
     orch = Orchestrator(config=cfg, on_event=renderer)
-    result = await orch.execute_recursive()
+    result = orch.execute_recursive()
 
     # 如果渲染器没触发 task_end（异常情况），补一个摘要
     if result.status.value not in ("passed",) or renderer._func_count == 0:
@@ -498,4 +498,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

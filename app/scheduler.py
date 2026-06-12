@@ -17,7 +17,8 @@ context built by previous calls.
 """
 from __future__ import annotations
 
-import asyncio
+import queue
+import threading
 import hashlib
 import json
 import logging
@@ -160,7 +161,7 @@ class SlotContext:
     sessions_dir: Path
     model: str
     tools: list[str]
-    cancel_event: asyncio.Event | None
+    cancel_event: threading.Event | None
     run_timeout_seconds: float | int
     pi_max_retries: int
     pi_retry_delay: float
@@ -189,12 +190,12 @@ class Slot:
             return taint_ctx
         return f"{taint_ctx}\n\n# 调用链上已累积的校验\n{summary}"
 
-    async def execute_sequential_chain(
+    def execute_sequential_chain(
         self,
         p0_followups: list,
         ctx: SlotContext,
         executor,  # Callable[[CalleeRef, SlotContext, TaintState], TaintState]
-        bfs_queue: asyncio.Queue,
+        bfs_queue: queue.Queue,
     ) -> TaintState:
         """Execute P0 followups sequentially, dispatching P2 to BFS queue.
 
@@ -223,7 +224,7 @@ class Slot:
             )
 
             # Execute
-            sub_state = await executor(fup, ctx)
+            sub_state = executor(fup, ctx)
             self.taint_state.merge(sub_state)
 
             # Cache the result
@@ -248,6 +249,6 @@ def _normalize_taint_signature(tainted_params: str | list[str]) -> str:
     )))
 
 
-async def _noop_executor(fup: Any, ctx: SlotContext) -> TaintState:
+def _noop_executor(fup: Any, ctx: SlotContext) -> TaintState:
     """Placeholder executor — returns empty state."""
     return TaintState()

@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Callable
 
 
-async def run_agent_dryrun(
+def run_agent_dryrun(
     prompt: str,
     *,
     cwd: str = ".",
@@ -26,7 +26,7 @@ async def run_agent_dryrun(
     """Dryrun: skip model calls, write mock files, verify control flow."""
     from .runner import AgentResult
 
-    await asyncio.sleep(0.05)   # simulate async yield
+    time.sleep(0.05)   # simulate async yield
 
     cwd_path = Path(os.path.abspath(cwd))
     result = AgentResult()
