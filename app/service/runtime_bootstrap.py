@@ -57,7 +57,7 @@ class RuntimeBootstrap:
         self._worker_slot_last_error: str | None = None
 
     def start(self, app: FastAPI) -> None:
-        if self._task and not self._task.done():
+        if self._task and self._task.is_alive():
             return
         self._stop_event = threading.Event()
         self._status = RuntimeBootstrapStatus()
@@ -70,19 +70,11 @@ class RuntimeBootstrap:
         stop_supervisor = getattr(svc, "stop_supervisor", None)
         if callable(stop_supervisor):
             stop_supervisor()
-        if self._task and not self._task.done():
-            self._task.cancel()
-            try:
-                self._task
-            except Exception as _e:
-                logger.warning("unexpected error in runtime_bootstrap.py: %s", _e, exc_info=True)
+        if self._task and self._task.is_alive():
+            self._task.join(timeout=5.0)
         self._task = None
-        if self._dispatcher_task and not self._dispatcher_task.done():
-            self._dispatcher_task.cancel()
-            try:
-                self._dispatcher_task
-            except Exception as _e:
-                logger.warning("unexpected error in runtime_bootstrap.py: %s", _e, exc_info=True)
+        if self._dispatcher_task and self._dispatcher_task.is_alive():
+            self._dispatcher_task.join(timeout=5.0)
         self._dispatcher_task = None
         self._worker_slot_stop.set()
         self._worker_slot_thread = None
@@ -98,7 +90,7 @@ class RuntimeBootstrap:
         return asdict(self._status)
 
     def dispatcher_running(self) -> bool:
-        return bool(self._dispatcher_task and not self._dispatcher_task.done())
+        return bool(self._dispatcher_task and self._dispatcher_task.is_alive())
 
     def worker_slot_status(self) -> dict[str, object]:
         return {
