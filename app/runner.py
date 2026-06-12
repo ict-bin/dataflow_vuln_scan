@@ -495,6 +495,37 @@ def _run_with_api_retry(
             # Wait for stdout reader to finish
             stdout_thread.join(timeout=timeout_seconds or 3600)
 
+            # If pi completed LLM inference (stopReason: stop/end_turn) but
+            # hasn't exited yet, close stdin so pi detects EOF and sends agent_end
+            if getattr(result, '_rpc_completed', False) and not agent_ended:
+                try:
+                    if proc.stdin and not proc.stdin.closed:
+                        proc.stdin.close()
+                except Exception:
+                    pass
+                # Give pi time to process EOF and emit agent_end, then drain stdout
+                import threading as _thr
+                def _drain_and_wait():
+                    nonlocal agent_ended
+                    try:
+                        assert proc.stdout is not None
+                        _buf = b''
+                        while True:
+                            _chunk = proc.stdout.read(4096)
+                            if not _chunk:
+                                break
+                            _buf += _chunk
+                            while b'\n' in _buf:
+                                _l, _buf = _buf.split(b'\n', 1)
+                                if _process_line(_l.decode('utf-8', errors='replace'), result, on_stream, _mark_activity, result_lock):
+                                    agent_ended = True
+                                    return
+                    except Exception:
+                        pass
+                _drain_t = _thr.Thread(target=_drain_and_wait, daemon=True)
+                _drain_t.start()
+                _drain_t.join(timeout=10.0)
+
             if read_error is not None:
                 if isinstance(read_error, TimeoutError):
                     _log_warn("agent stdout read timed out")
@@ -748,6 +779,13 @@ def _process_line(
                         result.error = err_msg
                 else:
                     result.error = err_msg
+
+            # RPC mode: pi stays alive waiting for next prompt.
+            # When LLM completes (stop/end_turn), signal stdin close
+            # so pi detects EOF and sends agent_end.
+            stop_reason = msg.get("stopReason", "")
+            if stop_reason in ("stop", "end_turn"):
+                result._rpc_completed = True
 
     return False
 
