@@ -344,14 +344,9 @@ class DataflowVulnWorkflow:
         retry_used = 0
         _JSON_RETRY_MAX = 3
         _JSON_RETRY_PROMPT = (
-            "请直接回复一个完整的 JSON 对象（不要 Markdown 代码块，不要其他文字），"
-            "格式严格为: "
-            '{"function":"...","source_file":"...","taints":[{"symbol":"...","kind":"...","line":"...","description":"..."}],'
-            '"edges":[{"from":"...","to":"...","line":"...","operation":"...","evidence":"...",'
-            '"sanitizer":"","sanitizer_effect":"none","termination_reason":""}],'
-            '"followups":[{"file":"...","function":"...","line":"...","tainted_params":["..."],'
-            '"reason":"...","dispatch_kind":"direct_call","tainted_nonlocal":[],"validations":[]}],'
-            '"termination":{"terminated":false,"reason":"..."}}'
+            "[系统反馈] 上一轮回复缺少符合格式的 taint-graph JSON 对象。"
+            "请直接输出完整的 JSON，不要 Markdown 包裹，不要额外文字: "
+            '{"function":"...","source_file":"...","taints":[...],"edges":[...],"followups":[...],"termination":{...}}'
         )
         while not isinstance(graph, dict) and retry_used < _JSON_RETRY_MAX:
             if self._cancelled():
@@ -361,8 +356,8 @@ class DataflowVulnWorkflow:
                        function=self.func_name, reason="missing taint graph JSON")
             res = run_agent(
                 prompt=_JSON_RETRY_PROMPT, model=acfg.model,
-                tools=[],  # 重试不需要工具，直接输出 JSON
-                cwd=str(self.ws), session_file=session_file, system_prompt="",
+                tools=acfg.tools or self.cfg.workers.default_tools,
+                cwd=str(self.ws), session_file=session_file, system_prompt=system_prompt,
                 cancel_event=self.cancel_event,
                 run_timeout_seconds=min(self.cfg.agent_run_timeout_seconds or 300, 120),
                 pi_max_retries=1, pi_retry_delay=2,
