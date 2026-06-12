@@ -1414,8 +1414,6 @@ class Orchestrator(JudgeMixin):
                     break
                 try:
                     process_item(item)
-                except Exception:
-                    return
                 except Exception as e:
                     # item layout: (func_name, src_file, line_hint, task_cfg, tid, dep, ..., followup_id, context_id)
                     err_tid = item[4] if len(item) > 4 else "?"

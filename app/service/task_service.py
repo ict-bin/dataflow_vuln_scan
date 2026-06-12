@@ -1999,64 +1999,6 @@ class TaskService:
                       status=terminal_status)
             self._cleanup_worker_runtime(label=f"task_terminal:{task_id}", task_id=task_id, reason="task_terminal_committed")
 
-        except Exception:
-            from app.metrics import observe_local_event
-
-            observe_local_event("task_finished", "cancelled")
-            orch = orch_holder.get("orch")
-            if orch is not None:
-                orch.abort()
-            cleaned = cleanup_task_agent_processes(
-                logger.warning,
-                label=f"task_cancelled:{task_id}",
-                task_id=task_id,
-                task_root=task_root_path,
-                run_root=epoch_run_root_path,
-                worker_id=WORKER_ID,
-            )
-            log_event(logger, logging.INFO, "task execution cancelled", event="task_execution_cancelled",
-                      task_id=task_id, owner_id=WORKER_ID, epoch=epoch, control_version=control_version,
-                      cleaned_groups=cleaned)
-            try:
-                if ctx is not None and ctx.termination_reason == "lease_lost":
-                    recovered = _recover_running_task_for_cleanup(
-                        db,
-                        task_id=task_id,
-                        owner_id=WORKER_ID,
-                        epoch=epoch,
-                        control_version=control_version,
-                        reason="lease_lost_cancelled",
-                    )
-                    log_event(logger, logging.WARNING, "cancelled task requeued after lease loss",
-                              event="task_requeued_after_lease_lost", task_id=task_id,
-                              owner_id=WORKER_ID, epoch=epoch, control_version=control_version,
-                              recovered=recovered)
-                    return
-                cancelled_row = db.query(AppDvsTask).filter_by(task_id=task_id).first()
-                if cancelled_row is not None:
-                    _record_task_event(
-                        db,
-                        row=cancelled_row,
-                        event_type="task_execution_cancelled",
-                        message="任务执行已取消",
-                        level="warning",
-                        status=cancelled_row.status,
-                        worker_id=WORKER_ID,
-                        execution_owner_id=WORKER_ID,
-                        execution_epoch=epoch,
-                        control_version=control_version,
-                        dispatch_status=cancelled_row.dispatch_status,
-                        payload={
-                            "owner_id": WORKER_ID,
-                            "epoch": epoch,
-                            "control_version": control_version,
-                            "cleanup_groups": cleaned,
-                        },
-                    )
-                    db.commit()
-            except Exception:
-                db.rollback()
-            pass
         except Exception as exc:
             from app.metrics import observe_local_event
 
