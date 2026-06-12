@@ -176,8 +176,14 @@ def _on_shutdown():
     if not _external_probe_process_enabled():
         _stop_probe_server()
 app = FastAPI(title="dataflow_vuln_scan", version="2.0.0")
-app.add_event_handler("startup", _on_startup)
-app.add_event_handler("shutdown", _on_shutdown)
+
+@app.on_event("startup")
+def _on_startup_event():
+    _on_startup()
+
+@app.on_event("shutdown")
+def _on_shutdown_event():
+    _on_shutdown()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 get_runtime_bootstrap().install_internal_observability_router(app)
 
