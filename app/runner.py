@@ -131,7 +131,7 @@ def _run_with_context_overflow_recovery(
         if on_stream:
             on_stream(f"\n⚠️ {msg}\n")
         compaction_args = _build_args(
-            _COMPACTION_TRIGGER_PROMPT, model, tools, thinking_level, session_file,
+            pi_cmd, model, tools, thinking_level, session_file,
         )
         _run_with_pi_retry(
             args=compaction_args,
@@ -215,7 +215,7 @@ def run_agent(
         return r
 
     model = _resolve_pi_model(model)
-    args = _build_args(prompt, model, tools, thinking_level, session_file)
+    args = _build_args(pi_cmd, model, tools, thinking_level, session_file)
     cwd = os.path.abspath(cwd)
     env = _build_agent_env(cwd=cwd, env=env, task_context=task_context)
 

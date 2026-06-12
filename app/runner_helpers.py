@@ -294,7 +294,7 @@ def _terminate_pi_process_tree(
 # ─── Argument building ────────────────────────────────────────────────────────
 
 def _build_args(
-    prompt: str,
+    pi_cmd: list[str],
     model: str,
     tools: list[str],
     thinking_level: str,
@@ -306,20 +306,24 @@ def _build_args(
     task_pi_dir: str | None = None,
     task_context: dict | None = None,
 ) -> list[str]:
-    args = ["-p", prompt, "-m", model]
-    for tool in tools:
-        args.extend(["--tools", tool])
-    args.extend(["--thinking-level", thinking_level])
-    if task_pi_dir:
-        args.extend(["--agent-dir", task_pi_dir])
+    """Build pi RPC mode launch arguments."""
+    args = [*pi_cmd, "--mode", "rpc"]
     if session_file and not no_session:
         args.extend(["--session", session_file])
     if no_session:
         args.append("--no-session")
+    if model:
+        args.extend(["--model", model])
+    if tools:
+        args.extend(["--tools", ",".join(tools)])
+    if thinking_level and thinking_level != "off":
+        args.extend(["--thinking-level", thinking_level])
     if post_skill_prompt:
         args.extend(["--post-skill-prompt", post_skill_prompt])
     if max_turns is not None and max_turns > 0:
         args.extend(["--max-turns", str(max_turns)])
+    if task_pi_dir:
+        args.extend(["--agent-dir", task_pi_dir])
     if task_context:
         context_json = json.dumps(task_context, ensure_ascii=False)
         args.extend(["--task-context", context_json])
