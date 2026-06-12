@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Optional
 
 from sqlalchemy.orm import Session, load_only
+from sqlalchemy import func
 from sqlalchemy.orm.attributes import flag_modified
 
 from app.config import build_task_config
