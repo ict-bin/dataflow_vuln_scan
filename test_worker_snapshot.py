@@ -1,5 +1,6 @@
 import sys
 import unittest
+from datetime import timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -9,6 +10,7 @@ from sqlalchemy.orm import sessionmaker
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from app.db.models import AppDvsTask, AppDvsWorkerSlot, Base
+from app.service.task_service import TaskService
 from app.service.worker_snapshot import build_worker_cluster_snapshot
 from app.time_utils import now_local
 
@@ -170,6 +172,27 @@ class WorkerSnapshotTests(unittest.TestCase):
             self.assertEqual(1, snapshot.worker_count)
             self.assertFalse(snapshot.workers[0].healthy)
             self.assertEqual("stale_owner", snapshot.workers[0].source)
+        finally:
+            db.close()
+
+    def test_list_tasks_includes_canonical_execution_owner_fields(self):
+        now = now_local()
+        self._insert_task(
+            task_id="dvs_owned",
+            status="running",
+            execution_owner_id="pod-a:1234",
+            execution_lease_until=now + timedelta(minutes=5),
+            execution_heartbeat_at=now,
+            dispatch_status="running",
+        )
+        db = self._session()
+        try:
+            payload = TaskService().list_tasks(db, project_id="p1", page=1, per_page=10)
+            row = next(item for item in payload["items"] if item["task_id"] == "dvs_owned")
+            self.assertEqual("pod-a:1234", row["execution_owner_id"])
+            self.assertIsNotNone(row["execution_lease_until"])
+            self.assertIsNotNone(row["execution_heartbeat_at"])
+            self.assertEqual("running", row["dispatch_status"])
         finally:
             db.close()
 
