@@ -22,6 +22,7 @@ from app.api import tasks as tasks_api
 from app.db.models import AppDvsTask, AppDvsTaskEvent, Base
 from app.models import AgentInstanceConfig, RoleConfig, TaskConfig
 from app.orchestrator import Orchestrator
+from app.service import task_events as task_events_module
 from app.service import task_service as task_service_module
 from app.service.task_service import TaskService
 
@@ -138,6 +139,38 @@ class TaskTimelineTests(unittest.TestCase):
             self.assertEqual("task_started", timeline["events"][0]["event_type"])
             self.assertEqual("task_created", timeline["events"][-1]["event_type"])
             self.assertEqual(row.project_id, timeline["events"][0]["project_id"])
+        finally:
+            db.close()
+
+    def test_task_timeline_auto_trims_oldest_events_when_limit_exceeded(self):
+        task_id = self._create_task()
+        db = self._session()
+        try:
+            row = db.query(AppDvsTask).filter_by(task_id=task_id).first()
+            with patch.object(task_events_module, "DB_TIMELINE_EVENT_LIMIT", 3):
+                for idx in range(4):
+                    task_events_module._record_task_event(
+                        db,
+                        row=row,
+                        event_type=f"task_dispatched_{idx}",
+                        message=f"event-{idx}",
+                        source="dfa",
+                        status="running",
+                        dedupe_key=f"trim-{idx}",
+                    )
+                db.commit()
+
+            rows = (
+                db.query(AppDvsTaskEvent)
+                .filter_by(task_id=task_id)
+                .order_by(AppDvsTaskEvent.created_at.asc(), AppDvsTaskEvent.id.asc())
+                .all()
+            )
+            self.assertEqual(3, len(rows))
+            self.assertEqual(
+                ["task_dispatched_1", "task_dispatched_2", "task_dispatched_3"],
+                [row.event_type for row in rows],
+            )
         finally:
             db.close()
 

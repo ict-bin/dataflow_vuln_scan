@@ -16,6 +16,7 @@ from app.time_utils import isoformat_local
 logger = logging.getLogger("dvs.task_events")
 
 TASK_EVENT_SOURCE_DVS = "dvs"
+DB_TIMELINE_EVENT_LIMIT = 10_000
 
 
 def _fit_event_message(raw: object, *, limit: int = 400) -> str:
@@ -106,6 +107,39 @@ def _build_task_event_response(event: AppDvsTaskEvent) -> dict[str, object]:
     }
 
 
+def _trim_task_timeline_events(db: Session, task_id: str, *, limit: int | None = None) -> int:
+    normalized_limit = max(0, int(DB_TIMELINE_EVENT_LIMIT if limit is None else limit))
+    if normalized_limit <= 0:
+        return 0
+    total = int(
+        db.query(AppDvsTaskEvent)
+        .filter(AppDvsTaskEvent.task_id == task_id)
+        .count()
+        or 0
+    )
+    trim_count = max(0, total - normalized_limit)
+    if trim_count <= 0:
+        return 0
+    old_event_ids = [
+        row.id
+        for row in (
+            db.query(AppDvsTaskEvent.id)
+            .filter(AppDvsTaskEvent.task_id == task_id)
+            .order_by(AppDvsTaskEvent.created_at.asc(), AppDvsTaskEvent.id.asc())
+            .limit(trim_count)
+            .all()
+        )
+    ]
+    if not old_event_ids:
+        return 0
+    deleted = (
+        db.query(AppDvsTaskEvent)
+        .filter(AppDvsTaskEvent.id.in_(old_event_ids))
+        .delete(synchronize_session=False)
+    )
+    return int(deleted or 0)
+
+
 def _record_task_event(
     db: Session,
     *,
@@ -181,4 +215,5 @@ def _record_task_event(
             event_dedupe_key,
         )
         return db.query(AppDvsTaskEvent).filter(AppDvsTaskEvent.dedupe_key == event_dedupe_key).first()
+    _trim_task_timeline_events(db, row.task_id)
     return event
