@@ -14,6 +14,7 @@ from typing import Any, Callable, Iterable
 
 from sqlalchemy import func
 
+from .copy_utils import safe_copy2, safe_copyfile
 from .config import load_system_prompts, resolve_system_prompt
 from .models import AgentInstanceConfig, RoundResult, SwarmEvent, TaskConfig, TaskResult, TaskStatus, TokenUsage, WorkerResult
 from .runner import run_agent
@@ -243,7 +244,7 @@ class DataflowVulnWorkflow:
             if dst.exists() or dst.is_symlink():
                 continue
             try:
-                shutil.copy2(src, dst)
+                safe_copy2(src, dst)
             except OSError:
                 pass
 
@@ -305,7 +306,7 @@ class DataflowVulnWorkflow:
             and self.parent_session_file != session_file
         ):
             try:
-                shutil.copyfile(self.parent_session_file, session_file)
+                safe_copyfile(self.parent_session_file, session_file)
                 self._emit(
                     "session_forked",
                     parent_session=self.parent_session_file,
@@ -424,7 +425,7 @@ class DataflowVulnWorkflow:
             fork_session = self.sessions / f"vuln-mining-{_safe_name(self.func_name)}.jsonl"
         try:
             if base_session and Path(base_session).exists():
-                shutil.copyfile(base_session, fork_session)
+                safe_copyfile(base_session, fork_session)
         except OSError:
             pass
         fork_id = "fork_" + hashlib.sha1((self.run_id + str(fork_session) + "vuln").encode()).hexdigest()[:16]
@@ -472,7 +473,8 @@ class DataflowVulnWorkflow:
             report_path.write_text(f"# {item.get('title') or finding_id}\n\n## 位置\n- 文件: `{finding_source_file}`\n- 函数: `{finding_function_name}`\n- 行号: `{finding_line or 'unknown'}`\n\n## 摘要\n{item.get('summary','')}\n\n## 证据\n{item.get('evidence','')}\n\n## 可利用性\n{item.get('exploitability','')}\n", encoding="utf-8")
             taint_report_path.write_text(dataflow_text, encoding="utf-8")
             try:
-                if fork_session.exists(): shutil.copyfile(fork_session, fdir / "context.jsonl")
+                if fork_session.exists():
+                    safe_copyfile(fork_session, fdir / "context.jsonl")
             except OSError:
                 (fdir / "context.jsonl").write_text("", encoding="utf-8")
             rec = VulnFindingRecord(finding_id=finding_id, run_id=self.run_id, node_id=node, source_file=finding_source_file, function_name=finding_function_name, line=finding_line, vuln_type=str(item.get("vuln_type") or "unknown"), severity=str(item.get("severity") or "unknown"), title=str(item.get("title") or finding_id), summary=str(item.get("summary") or ""), evidence=str(item.get("evidence") or ""), exploitability=str(item.get("exploitability") or ""), confidence=float(item.get("confidence") or 0), output_dir=str(fdir))
@@ -599,7 +601,7 @@ class DataflowVulnWorkflow:
         final_output_root.mkdir(parents=True, exist_ok=True)
         final_sqlite_path = final_output_root / "vuln-scan.sqlite"
         try:
-            shutil.copyfile(self.store.db_path, final_sqlite_path)
+            safe_copyfile(self.store.db_path, final_sqlite_path)
         except OSError:
             pass
         result.upstream_entry_metadata = dict(result.upstream_entry_metadata or {})

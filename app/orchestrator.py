@@ -22,6 +22,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Callable
 
+from .copy_utils import safe_copy2
 from .config import load_system_prompts, resolve_system_prompt
 from .models import (
     AgentInstanceConfig,
@@ -456,7 +457,7 @@ class Orchestrator(JudgeMixin):
                     if _sess_src.exists():
                         try:
                             import shutil as _shu
-                            _shu.copy2(str(_sess_src), str(rnd_workers_dir / f"{wid}-session.jsonl"))
+                            safe_copy2(str(_sess_src), str(rnd_workers_dir / f"{wid}-session.jsonl"))
                         except OSError:
                             pass
 
@@ -1557,7 +1558,7 @@ class Orchestrator(JudgeMixin):
         _out_sqlite = output_path / "vuln-scan.sqlite"
         if _run_sqlite.exists() and _run_sqlite != _out_sqlite:
             try:
-                shutil.copy2(_run_sqlite, _out_sqlite)
+                safe_copy2(_run_sqlite, _out_sqlite)
             except OSError as _e:
                 logger.warning("archive: failed to copy vuln-scan.sqlite: %s", _e)
         _run_vulns = _shared / "vulnerabilities"
@@ -1573,7 +1574,7 @@ class Orchestrator(JudgeMixin):
         _out_manifest = output_path / "artifact-manifest.json"
         if _run_manifest.exists() and _run_manifest != _out_manifest:
             try:
-                shutil.copy2(_run_manifest, _out_manifest)
+                safe_copy2(_run_manifest, _out_manifest)
             except OSError:
                 pass
 

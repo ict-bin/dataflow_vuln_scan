@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session, load_only
 from sqlalchemy import func
 from sqlalchemy.orm.attributes import flag_modified
 
+from app.copy_utils import safe_copy2
 from app.config import build_task_config
 from app.db import is_retryable_db_error
 from app.db.models import AppDvsTask, AppDvsTaskEvent
@@ -86,11 +87,11 @@ def _materialize_task_pi_runtime(*, task_root: str, agent_task_key: dict | None)
     models_src = Path(os.environ.get("PI_MODELS_JSON") or (global_pi_dir / "models.json"))
     settings_src = global_pi_dir / "settings.json"
     if models_src.is_file():
-        shutil.copy2(models_src, task_pi_dir / "models.json")
+        safe_copy2(models_src, task_pi_dir / "models.json")
     else:
         (task_pi_dir / "models.json").write_text(json.dumps({"providers": {}}, ensure_ascii=False, indent=2), encoding="utf-8")
     if settings_src.is_file():
-        shutil.copy2(settings_src, task_pi_dir / "settings.json")
+        safe_copy2(settings_src, task_pi_dir / "settings.json")
     elif not (task_pi_dir / "settings.json").exists():
         (task_pi_dir / "settings.json").write_text("{}", encoding="utf-8")
     (task_pi_dir / "auth.json").write_text(
