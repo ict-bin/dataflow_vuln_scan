@@ -49,6 +49,7 @@ from .runner_helpers import (
     _write_temp_markdown,
     _find_pi_command,
     _resolve_pi_model,
+    _should_emit_api_retry_event,
     _should_retry,
 )
 
@@ -663,9 +664,13 @@ def _run_with_api_retry(
                 continue
             rate_limit_streak = 0
             api_attempt += 1
-            can_retry = (max_retries == -1) or (api_attempt <= max_retries)
+            can_retry = True
             if can_retry:
                 delay = _backoff(retry_delay, api_attempt)
+                result.retry_delay_seconds = int(delay)
+                result.consecutive_api_retry_count = int(api_attempt)
+                result.api_retry_reason = str(result.error or "").strip()[:500] or None
+                result.api_retry_event_due = _should_emit_api_retry_event(api_attempt, delay)
                 label = f"{api_attempt}/{_fmt_max(max_retries)}"
                 _log_warn(f"API error [{label}], retry in {delay:.0f}s: {(result.error or '')[:200]}")
                 if on_stream:
@@ -674,10 +679,6 @@ def _run_with_api_retry(
                     result.error = (result.error or "") + " [cancelled during api retry backoff]"
                     return result
                 continue
-            else:
-                _log_error(f"API retries exhausted [{api_attempt}/{max_retries}]: {(result.error or '')[:200]}")
-                result.error = (result.error or "") + f" [API retries exhausted: {api_attempt} failures]"
-                return result
 
         # Non-zero exit with error
         if result.exit_code != 0 and result.error:

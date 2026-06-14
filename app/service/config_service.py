@@ -37,7 +37,7 @@ _FALLBACK_DEFAULT_CONFIG: Dict[str, Any] = {
     "max_rounds_exceeded_review_strategy": "treat_as_passed",
     "min_rounds": 2,
     "pass_threshold": "majority",
-    "agent_max_retries": 100,
+    "agent_max_retries": -1,
     "agent_retry_delay": 30,
     "agent_run_timeout_seconds": 1800,
     "agent_timeout_retry_enabled": True,

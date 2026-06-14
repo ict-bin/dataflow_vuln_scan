@@ -1453,6 +1453,7 @@ class TaskService:
                             "task_end": "result_materialized",
                             "error": "task_runtime_error",
                             "task_rate_limited_retrying": "task_rate_limited_retrying",
+                            "task_api_retrying": "task_api_retrying",
                         }.get(event_type, event_type)
                         if event_type == "trace_start":
                             depth = int(event_data.get("depth") or 0)
@@ -1472,6 +1473,7 @@ class TaskService:
                             "result_materialized": "任务结果已产出",
                             "task_runtime_error": str(event_data.get("error") or "分析过程中出现错误"),
                             "task_rate_limited_retrying": "智能体请求被 429 限流，30 秒后自动重试",
+                            "task_api_retrying": "智能体 API 错误，已进入无限重试",
                         }.get(mapped_event_type, f"运行事件: {mapped_event_type}")
                         _record_task_event(
                             event_db,

@@ -70,6 +70,9 @@ class AgentResult:
         self.consecutive_rate_limit_count: int = 0
         self.retry_delay_seconds: int = 0
         self.rate_limit_event_due: bool = False
+        self.api_retry_event_due: bool = False
+        self.consecutive_api_retry_count: int = 0
+        self.api_retry_reason: str | None = None
 
 
 class _PiProcessError(Exception):
@@ -136,6 +139,12 @@ def _sleep_with_cancel(delay: float, cancel_event: threading.Event | None) -> bo
         return False
     cancelled = cancel_event.wait(timeout=delay)
     return cancelled
+
+
+def _should_emit_api_retry_event(consecutive_retries: int, delay_seconds: float) -> bool:
+    retries = max(0, int(consecutive_retries or 0))
+    delay = max(0.0, float(delay_seconds or 0))
+    return delay >= 30.0 and retries > 0 and retries % 10 == 0
 
 
 def _cmd_preview(args: list[str]) -> str:

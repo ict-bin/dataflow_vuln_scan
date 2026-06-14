@@ -346,6 +346,16 @@ class DataflowVulnWorkflow:
                 consecutive_rate_limit_count=int(getattr(res, "consecutive_rate_limit_count", 0) or 0),
                 model=acfg.model,
             )
+        if getattr(res, "api_retry_event_due", False):
+            self._emit(
+                "task_api_retrying",
+                stage="vuln_worker",
+                function=self.func_name,
+                retry_delay_seconds=int(getattr(res, "retry_delay_seconds", 30) or 30),
+                consecutive_api_retry_count=int(getattr(res, "consecutive_api_retry_count", 0) or 0),
+                reason=str(getattr(res, "api_retry_reason", "") or ""),
+                model=acfg.model,
+            )
         self._emit("worker_done", worker_id="worker-0", output=res.output[:300], tokens_in=res.token_usage.input, tokens_out=res.token_usage.output)
         total_tokens = TokenUsage(); total_tokens += res.token_usage
 

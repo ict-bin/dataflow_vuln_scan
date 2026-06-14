@@ -880,6 +880,16 @@ class PerTaintWorkflow:
                     consecutive_rate_limit_count=int(getattr(summary_result, "consecutive_rate_limit_count", 0) or 0),
                     model=self.worker_model,
                 )
+            if getattr(summary_result, "api_retry_event_due", False):
+                self._emit(
+                    "task_api_retrying",
+                    stage="taint_summary",
+                    function=self.func_name,
+                    retry_delay_seconds=int(getattr(summary_result, "retry_delay_seconds", 30) or 30),
+                    consecutive_api_retry_count=int(getattr(summary_result, "consecutive_api_retry_count", 0) or 0),
+                    reason=str(getattr(summary_result, "api_retry_reason", "") or ""),
+                    model=self.worker_model,
+                )
             self._raise_if_cancelled()
             self._emit("worker_done", worker_id="worker-summary",
                        output=summary_result.output[:200],
@@ -938,6 +948,16 @@ class PerTaintWorkflow:
                     http_status=429,
                     retry_delay_seconds=int(getattr(judge_result, "retry_delay_seconds", 30) or 30),
                     consecutive_rate_limit_count=int(getattr(judge_result, "consecutive_rate_limit_count", 0) or 0),
+                    model=self.judge_model,
+                )
+            if getattr(judge_result, "api_retry_event_due", False):
+                self._emit(
+                    "task_api_retrying",
+                    stage="taint_judge",
+                    function=self.func_name,
+                    retry_delay_seconds=int(getattr(judge_result, "retry_delay_seconds", 30) or 30),
+                    consecutive_api_retry_count=int(getattr(judge_result, "consecutive_api_retry_count", 0) or 0),
+                    reason=str(getattr(judge_result, "api_retry_reason", "") or ""),
                     model=self.judge_model,
                 )
             self._raise_if_cancelled()
