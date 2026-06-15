@@ -86,10 +86,15 @@ def _materialize_task_pi_runtime(*, task_root: str, agent_task_key: dict | None)
     global_pi_dir = Path(os.environ.get("PI_CODING_AGENT_DIR", "/root/.pi/agent"))
     models_src = Path(os.environ.get("PI_MODELS_JSON") or (global_pi_dir / "models.json"))
     settings_src = global_pi_dir / "settings.json"
+
+    # ── models.json：复制全局配置，并将所有 provider 的 apiKey 替换为任务级密钥 ──
+    models_path = task_pi_dir / "models.json"
     if models_src.is_file():
-        safe_copy2(models_src, task_pi_dir / "models.json")
+        safe_copy2(models_src, models_path)
     else:
-        (task_pi_dir / "models.json").write_text(json.dumps({"providers": {}}, ensure_ascii=False, indent=2), encoding="utf-8")
+        models_path.write_text(json.dumps({"providers": {}}, ensure_ascii=False, indent=2), encoding="utf-8")
+    _inject_api_key(models_path, secret)
+
     if settings_src.is_file():
         safe_copy2(settings_src, task_pi_dir / "settings.json")
     elif not (task_pi_dir / "settings.json").exists():
@@ -109,6 +114,31 @@ def _materialize_task_pi_runtime(*, task_root: str, agent_task_key: dict | None)
         encoding="utf-8",
     )
     return str(task_pi_dir), "task_scoped"
+
+
+def _inject_api_key(models_path: Path, secret: str) -> None:
+    """将 models.json 中所有 provider 的 apiKey 替换为任务级密钥。"""
+    try:
+        data = json.loads(models_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return
+    providers = data.get("providers") if isinstance(data, dict) else None
+    if not isinstance(providers, dict):
+        return
+    injected = 0
+    for _provider_key, provider_cfg in providers.items():
+        if isinstance(provider_cfg, dict):
+            provider_cfg["apiKey"] = secret
+            injected += 1
+    if injected > 0:
+        models_path.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        logger.info(
+            "injected task-scoped apiKey into %d providers in %s",
+            injected, models_path,
+        )
 
 
 def _read_json_file(path: Path | None) -> dict[str, Any] | None:
