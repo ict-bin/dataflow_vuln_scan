@@ -2,7 +2,7 @@
     "max_rounds": 3,
     "max_rounds_exceeded_review_strategy": "treat_as_passed",
     "min_rounds": 2,
-    "pass_threshold": "majority",
+    "pass_threshold": 0,
     "agent_max_retries": -1,
     "agent_retry_delay": 30,
     "pi_max_retries": -1,
@@ -17,17 +17,19 @@
         "default_thinking_level": "off",
         "agents": [
             { "model": "MiniMax/MiniMax-M2.5" }
-        ]
+        ],
+        "stage_models": {}
     },
 
     "judges": {
         "default_tools": ["read", "bash", "find"],
         "system_prompt_dir": "/opt/dataflow_vuln_scan/prompts/judges",
         "default_thinking_level": "off",
-        "agents": []
+        "agents": [],
+        "stage_models": {}
     },
 
-    "output_dir": "/data/output",
-    "archive_dir": "/data/output",
-    "result_dir": "/data/output"
+    "output_dir": "/data/app/secflow-app-dataflow-vuln-scan",
+    "archive_dir": "/data/app/secflow-app-dataflow-vuln-scan",
+    "result_dir": "/data/app/secflow-app-dataflow-vuln-scan"
 }

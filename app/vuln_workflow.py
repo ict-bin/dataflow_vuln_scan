@@ -15,6 +15,7 @@ from typing import Any, Callable, Iterable
 from sqlalchemy import func
 
 from .copy_utils import safe_copy2, safe_copyfile
+from .agent_runtime_events import emit_agent_runtime_events
 from .config import load_system_prompts, resolve_system_prompt
 from .models import AgentInstanceConfig, RoundResult, SwarmEvent, TaskConfig, TaskResult, TaskStatus, TokenUsage, WorkerResult
 from .runner import run_agent
@@ -333,7 +334,8 @@ class DataflowVulnWorkflow:
                 "task_id": self.task_id,
                 "task_root": str(self.out_dir.parent),
                 "task_run_root": str(self.out_dir),
-                "task_pi_dir": getattr(self.cfg, "task_pi_dir", ""),
+                "task_pi_dir": self.cfg.role_pi_dir("workers"),
+                "agent_role": "workers",
             },
         )
         if getattr(res, "rate_limit_event_due", False):
@@ -356,6 +358,14 @@ class DataflowVulnWorkflow:
                 reason=str(getattr(res, "api_retry_reason", "") or ""),
                 model=acfg.model,
             )
+        emit_agent_runtime_events(
+            self._emit,
+            result=res,
+            stage="vuln_worker",
+            role="workers",
+            model=acfg.model,
+            extra={"function": self.func_name, "depth": self.dep},
+        )
         self._emit("worker_done", worker_id="worker-0", output=res.output[:300], tokens_in=res.token_usage.input, tokens_out=res.token_usage.output)
         total_tokens = TokenUsage(); total_tokens += res.token_usage
 
@@ -384,7 +394,7 @@ class DataflowVulnWorkflow:
                 pi_max_retries=1, pi_retry_delay=2,
                 max_retries=1, retry_delay=2,
                 task_context={"task_id": self.task_id, "task_root": str(self.out_dir.parent),
-                              "task_run_root": str(self.out_dir), "task_pi_dir": getattr(self.cfg, "task_pi_dir", "")},
+                              "task_run_root": str(self.out_dir), "task_pi_dir": self.cfg.role_pi_dir("workers"), "agent_role": "workers"},
             )
             if getattr(res, "rate_limit_event_due", False):
                 self._emit(
@@ -396,6 +406,14 @@ class DataflowVulnWorkflow:
                     consecutive_rate_limit_count=int(getattr(res, "consecutive_rate_limit_count", 0) or 0),
                     model=acfg.model,
                 )
+            emit_agent_runtime_events(
+                self._emit,
+                result=res,
+                stage="vuln_worker_json_retry",
+                role="workers",
+                model=acfg.model,
+                extra={"function": self.func_name, "attempt": retry_used},
+            )
             total_tokens += res.token_usage
             graph = _extract_json_from_text(res.output)
 
@@ -464,8 +482,17 @@ class DataflowVulnWorkflow:
                 "task_id": self.task_id,
                 "task_root": str(self.out_dir.parent),
                 "task_run_root": str(self.out_dir),
-                "task_pi_dir": getattr(self.cfg, "task_pi_dir", ""),
+                "task_pi_dir": self.cfg.role_pi_dir("workers"),
+                "agent_role": "workers",
             },
+        )
+        emit_agent_runtime_events(
+            self._emit,
+            result=output,
+            stage="vulnerability_mining",
+            role="workers",
+            model=acfg.model,
+            extra={"function": self.func_name, "fork_purpose": "vulnerability_mining"},
         )
         parsed = _extract_json_from_text(output.output, "findings") or {"findings": []}
         self.store.add_context_fork(fork_id=fork_id, run_id=self.run_id, purpose="vulnerability_mining", session_file=str(fork_session), node_id=node, status="completed" if not output.error else "error")

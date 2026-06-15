@@ -32,6 +32,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
+from .agent_runtime_events import emit_agent_runtime_events
 from .models import (
     AgentInstanceConfig,
     CalleeRef,
@@ -685,6 +686,7 @@ class PerTaintWorkflow:
         model = self.judge_model if is_judge else self.worker_model
         tools = self.judge_tools if is_judge else self.worker_tools
         sys_prompt = self.judge_system_prompt if is_judge else self.system_prompt
+        role_name = "judges" if is_judge else "workers"
         return dict(
             model=model,
             tools=tools,
@@ -706,7 +708,8 @@ class PerTaintWorkflow:
                 "task_id": self.task_id,
                 "task_root": str(self.out_dir.parent) if self.out_dir else "",
                 "task_run_root": str(self.out_dir) if self.out_dir else str(self.ws),
-                "task_pi_dir": getattr(self.cfg, "task_pi_dir", ""),
+                "task_pi_dir": self.cfg.role_pi_dir(role_name),
+                "agent_role": role_name,
             },
         )
 
@@ -829,6 +832,14 @@ class PerTaintWorkflow:
                             consecutive_rate_limit_count=int(getattr(res, "consecutive_rate_limit_count", 0) or 0),
                             model=self.worker_model,
                         )
+                    emit_agent_runtime_events(
+                        self._emit,
+                        result=res,
+                        stage="taint_worker",
+                        role="workers",
+                        model=self.worker_model,
+                        extra={"function": self.func_name, "taint_param": param},
+                    )
                     self._raise_if_cancelled()
                     self._emit("worker_done",
                                worker_id=f"worker-taint-{_safe_param(param)}",
@@ -890,6 +901,14 @@ class PerTaintWorkflow:
                     reason=str(getattr(summary_result, "api_retry_reason", "") or ""),
                     model=self.worker_model,
                 )
+            emit_agent_runtime_events(
+                self._emit,
+                result=summary_result,
+                stage="taint_summary",
+                role="workers",
+                model=self.worker_model,
+                extra={"function": self.func_name},
+            )
             self._raise_if_cancelled()
             self._emit("worker_done", worker_id="worker-summary",
                        output=summary_result.output[:200],
@@ -960,6 +979,14 @@ class PerTaintWorkflow:
                     reason=str(getattr(judge_result, "api_retry_reason", "") or ""),
                     model=self.judge_model,
                 )
+            emit_agent_runtime_events(
+                self._emit,
+                result=judge_result,
+                stage="taint_judge",
+                role="judges",
+                model=self.judge_model,
+                extra={"function": self.func_name},
+            )
             self._raise_if_cancelled()
             self._emit("judge_done", judge_id="judge-0",
                        output=judge_result.output[:200],

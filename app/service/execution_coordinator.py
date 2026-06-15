@@ -10,6 +10,14 @@ from app.db.models import AppDvsTask
 from app.runtime_context import LEASE_TTL_SECONDS
 from app.time_utils import now_local
 
+_AUTO_RECOVERY_FLAG_KEYS = {
+    "_auto_recovered_pending",
+    "_auto_recovered_reason",
+    "_auto_recovered_previous_owner_id",
+    "_auto_recovered_previous_epoch",
+    "_auto_recovered_marked_at",
+}
+
 
 @dataclass
 class ClaimedTask:
@@ -60,6 +68,53 @@ def _with_clean_restart_flag(config: Any, *, reason: str, previous_owner_id: str
     return cfg
 
 
+def _with_auto_recovery_flag(config: Any, *, reason: str, previous_owner_id: str | None, previous_epoch: int | None) -> dict[str, Any]:
+    import datetime as _dt
+    if isinstance(config, str):
+        try:
+            config = json.loads(config)
+        except Exception:
+            config = {}
+    cfg = dict(config) if isinstance(config, dict) else {}
+    cfg["_auto_recovered_pending"] = True
+    cfg["_auto_recovered_reason"] = str(reason or "").strip()
+    cfg["_auto_recovered_previous_owner_id"] = str(previous_owner_id or "").strip()
+    cfg["_auto_recovered_previous_epoch"] = int(previous_epoch or 0)
+    cfg["_auto_recovered_marked_at"] = _dt.datetime.now().isoformat()
+    return cfg
+
+
+def _clear_auto_recovery_flag(config: Any) -> dict[str, Any]:
+    if isinstance(config, str):
+        try:
+            config = json.loads(config)
+        except Exception:
+            config = {}
+    cfg = dict(config) if isinstance(config, dict) else {}
+    for key in _AUTO_RECOVERY_FLAG_KEYS:
+        cfg.pop(key, None)
+    return cfg
+
+
+def _auto_recovery_payload(config: Any) -> dict[str, Any] | None:
+    if isinstance(config, str):
+        try:
+            config = json.loads(config)
+        except Exception:
+            config = {}
+    if not isinstance(config, dict):
+        return None
+    if not bool(config.get("_auto_recovered_pending")):
+        return None
+    return {
+        "pending": True,
+        "reason": str(config.get("_auto_recovered_reason") or "").strip(),
+        "previous_owner_id": str(config.get("_auto_recovered_previous_owner_id") or "").strip() or None,
+        "previous_epoch": int(config.get("_auto_recovered_previous_epoch") or 0),
+        "marked_at": str(config.get("_auto_recovered_marked_at") or "").strip() or None,
+    }
+
+
 def _clean_restart_update_fields(row: AppDvsTask | None, *, reason: str) -> dict:
     """Build SQLAlchemy update dict for a clean restart."""
     import datetime as _dt
@@ -79,6 +134,12 @@ def _clean_restart_update_fields(row: AppDvsTask | None, *, reason: str) -> dict
     base_cfg["_restart_previous_owner_id"] = str(row.execution_owner_id or "") if row else ""
     base_cfg["_restart_previous_epoch"] = int(row.execution_epoch or 0) if row else 0
     base_cfg["_restart_marked_at"] = now_iso
+    base_cfg = _with_auto_recovery_flag(
+        base_cfg,
+        reason=reason,
+        previous_owner_id=str(row.execution_owner_id or "") if row else "",
+        previous_epoch=int(row.execution_epoch or 0) if row else 0,
+    )
     return {
         AppDvsTask.task_config_json: base_cfg,
         AppDvsTask.result_json: None,
@@ -91,8 +152,14 @@ def _clean_restart_update_fields(row: AppDvsTask | None, *, reason: str) -> dict
 
 
 def _mark_row_clean_restart(row: AppDvsTask, *, reason: str, previous_owner_id: str | None = None, previous_epoch: int | None = None) -> None:
-    row.task_config_json = _with_clean_restart_flag(
+    cfg = _with_clean_restart_flag(
         row.task_config_json,
+        reason=reason,
+        previous_owner_id=previous_owner_id if previous_owner_id is not None else row.execution_owner_id,
+        previous_epoch=previous_epoch if previous_epoch is not None else int(row.execution_epoch or 0),
+    )
+    row.task_config_json = _with_auto_recovery_flag(
+        cfg,
         reason=reason,
         previous_owner_id=previous_owner_id if previous_owner_id is not None else row.execution_owner_id,
         previous_epoch=previous_epoch if previous_epoch is not None else int(row.execution_epoch or 0),
@@ -106,13 +173,20 @@ def _mark_row_clean_restart(row: AppDvsTask, *, reason: str, previous_owner_id: 
 
 
 def _clean_restart_update_fields(row: AppDvsTask, *, reason: str) -> dict:
+    cfg = _with_clean_restart_flag(
+        row.task_config_json,
+        reason=reason,
+        previous_owner_id=row.execution_owner_id,
+        previous_epoch=int(row.execution_epoch or 0),
+    )
+    cfg = _with_auto_recovery_flag(
+        cfg,
+        reason=reason,
+        previous_owner_id=row.execution_owner_id,
+        previous_epoch=int(row.execution_epoch or 0),
+    )
     return {
-        AppDvsTask.task_config_json: _with_clean_restart_flag(
-            row.task_config_json,
-            reason=reason,
-            previous_owner_id=row.execution_owner_id,
-            previous_epoch=int(row.execution_epoch or 0),
-        ),
+        AppDvsTask.task_config_json: cfg,
         AppDvsTask.result_json: None,
         AppDvsTask.stages_json: None,
         AppDvsTask.latest_abnormal_reason_json: None,

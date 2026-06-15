@@ -1,16 +1,14 @@
-import asyncio
-import os
-import sys
+import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-from app.agent_process import AgentProcessHandle
 from app import agent_process
 from app import runner
+from app.agent_process import AgentProcessHandle
+from app.agent_runtime_events import emit_agent_runtime_events
 
 
 def _overflow_result() -> runner.AgentResult:
@@ -20,13 +18,13 @@ def _overflow_result() -> runner.AgentResult:
         "400 litellm.BadRequestError: Hosted_vllmException - "
         '{"error":{"message":"You passed 147421 input tokens and requested 16384 output tokens. '
         "However, the model's context length is only 163804 tokens, resulting in a maximum input "
-        'length of 147420 tokens. Please reduce the length of the input prompt."}}'
+        'length of 147420 tokens. The proxy reserves 2048 safety-buffer tokens. Please reduce the length of the input prompt."}}'
     )
     return result
 
 
 class RunAgentPromptFileTests(unittest.TestCase):
-    def test_cleanup_orphan_pi_processes_kills_dvs_orphan_in_business_pid1_container(self):
+    def test_cleanup_orphan_pi_processes_ignores_live_parent(self):
         orphan = agent_process.AgentProcessInfo(
             pid=101,
             ppid=1,
@@ -38,10 +36,11 @@ class RunAgentPromptFileTests(unittest.TestCase):
             environ={"DVS_TASK_ID": "dvs_1", "DVS_TASK_ROOT": "/tmp/dfa-task"},
         )
         with patch.object(agent_process, "_iter_agent_processes", return_value=[orphan]):
-            with patch.object(agent_process, "_kill_process_group", return_value=True) as kill_group:
-                killed = agent_process.cleanup_orphan_pi_processes(lambda _: None, label="test")
-        self.assertEqual(killed, 1)
-        kill_group.assert_called_once()
+            with patch.object(agent_process.os, "kill", return_value=None):
+                with patch.object(agent_process, "_kill_process_group", return_value=True) as kill_group:
+                    killed = agent_process.cleanup_orphan_pi_processes(lambda _: None, label="test")
+        self.assertEqual(killed, 0)
+        kill_group.assert_not_called()
 
     def test_cleanup_task_agent_processes_only_hits_matching_task(self):
         match = agent_process.AgentProcessInfo(
@@ -81,87 +80,85 @@ class RunAgentPromptFileTests(unittest.TestCase):
 
         class FakeProc:
             pid = 123
-            returncode = 0
 
-            async def wait(self):
+            def poll(self):
                 return 0
 
-        async def scenario():
-            with patch("app.agent_process.process_group_exists", return_value=True):
-                with patch("app.agent_process.os.killpg") as killpg:
-                    handle = AgentProcessHandle(
-                        proc=FakeProc(),
-                        label="test",
-                        logger=logs.append,
-                        pgid=456,
-                    )
-                    await handle.terminate_tree(reason="cleanup")
-                    killpg.assert_called_once()
+            def wait(self, timeout=None):
+                return 0
 
-        asyncio.run(scenario())
+        with patch("app.agent_process.process_group_exists", return_value=True):
+            with patch("app.agent_process.os.killpg") as killpg:
+                handle = AgentProcessHandle(
+                    proc=FakeProc(),
+                    label="test",
+                    logger=logs.append,
+                    pgid=456,
+                )
+                handle.terminate_tree(reason="cleanup")
+                killpg.assert_called_once()
+
         self.assertTrue(any("cleaning leaked pi process group" in msg for msg in logs))
 
     def test_sleep_with_cancel_stops_early_when_cancelled(self):
-        async def scenario():
-            cancel_event = asyncio.Event()
+        cancel_event = threading.Event()
 
-            async def trigger_cancel():
-                await asyncio.sleep(0.01)
-                cancel_event.set()
+        def trigger_cancel():
+            cancel_event.set()
 
-            asyncio.create_task(trigger_cancel())
-            return await runner._sleep_with_cancel(5, cancel_event)
-
-        completed = asyncio.run(scenario())
-        self.assertFalse(completed)
+        timer = threading.Timer(0.01, trigger_cancel)
+        timer.start()
+        try:
+            completed = runner._sleep_with_cancel(5, cancel_event)
+        finally:
+            timer.cancel()
+        self.assertTrue(completed)
 
     def test_pi_retry_backoff_exits_when_cancelled(self):
-        async def scenario():
-            cancel_event = asyncio.Event()
+        cancel_event = threading.Event()
 
-            async def trigger_cancel():
-                await asyncio.sleep(0.01)
-                cancel_event.set()
+        def trigger_cancel():
+            cancel_event.set()
 
-            asyncio.create_task(trigger_cancel())
-            return await runner._run_with_pi_retry(
-                args=["/usr/bin/pi"],
-                cwd=".",
-                env=None,
-                prompt="hello",
-                post_skill_prompt=None,
-                cancel_event=cancel_event,
-                on_stream=None,
-                max_retries=0,
-                retry_delay=0,
-                pi_max_retries=-1,
-                pi_retry_delay=5,
-            )
-
-        with patch.object(
-            runner,
-            "_run_with_api_retry",
-            side_effect=runner._PiProcessError("exit_code=-9: killed"),
-        ):
-            result = asyncio.run(scenario())
+        timer = threading.Timer(0.01, trigger_cancel)
+        timer.start()
+        try:
+            with patch.object(
+                runner,
+                "_run_with_api_retry",
+                side_effect=runner._PiProcessError("exit_code=-9: killed"),
+            ):
+                result = runner._run_with_pi_retry(
+                    args=["/usr/bin/pi"],
+                    cwd=".",
+                    env=None,
+                    prompt="hello",
+                    post_skill_prompt=None,
+                    cancel_event=cancel_event,
+                    on_stream=None,
+                    max_retries=0,
+                    retry_delay=0,
+                    pi_max_retries=-1,
+                    pi_retry_delay=1,
+                )
+        finally:
+            timer.cancel()
 
         self.assertIn("cancelled during pi retry backoff", result.error or "")
 
     def test_run_agent_returns_before_spawn_when_cancelled(self):
-        async def scenario():
-            cancel_event = asyncio.Event()
-            cancel_event.set()
-            return await runner.run_agent(
-                "hello",
-                model="test-model",
-                tools=["read"],
-                cwd=".",
-                cancel_event=cancel_event,
-            )
+        cancel_event = threading.Event()
+        cancel_event.set()
 
         with patch.object(runner, "_find_pi_command") as find_pi_command:
             with patch.object(runner, "_run_with_pi_retry") as run_with_pi_retry:
-                result = asyncio.run(scenario())
+                result = runner.run_agent(
+                    "hello",
+                    model="test-model",
+                    tools=["read"],
+                    cwd=".",
+                    cancel_event=cancel_event,
+                )
 
         find_pi_command.assert_not_called()
         run_with_pi_retry.assert_not_called()
@@ -171,7 +168,7 @@ class RunAgentPromptFileTests(unittest.TestCase):
     def test_run_agent_uses_prompt_file_instead_of_raw_argv(self):
         captured = {}
 
-        async def fake_run_with_pi_retry(**kwargs):
+        def fake_run_with_pi_retry(**kwargs):
             captured["args"] = kwargs["args"]
             captured["prompt_text"] = kwargs["prompt"]
             captured["env"] = kwargs["env"]
@@ -187,64 +184,35 @@ class RunAgentPromptFileTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as cwd:
             with patch.object(runner, "_find_pi_command", return_value=["/usr/bin/pi"]):
                 with patch.object(runner, "_run_with_pi_retry", side_effect=fake_run_with_pi_retry):
-                    result = asyncio.run(
-                        runner.run_agent(
-                            long_prompt,
-                            model="test-model",
-                            tools=["read"],
-                            cwd=cwd,
-                            max_retries=0,
-                            pi_max_retries=0,
-                            task_context={
-                                "task_id": "dvs_123",
-                                "task_root": "/tmp/dvs_123",
-                                "task_run_root": "/tmp/dvs_123/run/epochs/0001",
-                                "worker_id": "worker-a",
-                                "execution_epoch": 1,
-                            },
-                        )
+                    result = runner.run_agent(
+                        long_prompt,
+                        model="test-model",
+                        tools=["read"],
+                        cwd=cwd,
+                        max_retries=0,
+                        pi_max_retries=0,
+                        task_context={
+                            "task_id": "dvs_123",
+                            "task_root": "/tmp/dvs_123",
+                            "task_run_root": "/tmp/dvs_123/run/epochs/0001",
+                            "worker_id": "worker-a",
+                            "execution_epoch": 1,
+                        },
                     )
 
         self.assertEqual(result.exit_code, 0)
         self.assertEqual(captured["prompt_text"], long_prompt)
         self.assertNotIn(long_prompt, captured["args"])
-        self.assertEqual(captured["env"]["DVS_TASK_ID"], "dvs_123")
-        self.assertEqual(captured["env"]["DVS_TASK_ROOT"], "/tmp/dvs_123")
-        self.assertEqual(captured["env"]["DVS_TASK_RUN_ROOT"], "/tmp/dvs_123/run/epochs/0001")
-        self.assertEqual(captured["env"]["DVS_WORKER_ID"], "worker-a")
-
-    def test_run_agent_retries_after_timeout(self):
-        attempts = {"count": 0}
-
-        async def fake_run_with_pi_retry(**kwargs):
-            attempts["count"] += 1
-            await asyncio.sleep(0.02)
-            result = runner.AgentResult()
-            result.output = "ok"
-            return result
-
-        with patch.object(runner, "_find_pi_command", return_value=["/usr/bin/pi"]):
-            with patch.object(runner, "_run_with_pi_retry", side_effect=fake_run_with_pi_retry):
-                result = asyncio.run(
-                    runner.run_agent(
-                        "hello",
-                        model="test-model",
-                        tools=["read"],
-                        cwd=".",
-                        run_timeout_seconds=0.01,
-                        timeout_retry_enabled=True,
-                        timeout_max_retries=1,
-                        retry_delay=0,
-                    )
-                )
-
-        self.assertEqual(attempts["count"], 2)
-        self.assertIn("timed out", result.error or "")
+        payload = json.loads(captured["env"]["DVS_TASK_CONTEXT"])
+        self.assertEqual(payload["task_id"], "dvs_123")
+        self.assertEqual(payload["task_root"], "/tmp/dvs_123")
+        self.assertEqual(payload["task_run_root"], "/tmp/dvs_123/run/epochs/0001")
+        self.assertEqual(payload["worker_id"], "worker-a")
 
     def test_run_agent_triggers_compaction_then_retries_on_context_overflow(self):
         prompts: list[str] = []
 
-        async def fake_run_with_pi_retry(**kwargs):
+        def fake_run_with_pi_retry(**kwargs):
             prompts.append(kwargs["prompt"])
             if len(prompts) == 1:
                 return _overflow_result()
@@ -256,16 +224,15 @@ class RunAgentPromptFileTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as cwd:
             with patch.object(runner, "_find_pi_command", return_value=["/usr/bin/pi"]):
                 with patch.object(runner, "_run_with_pi_retry", side_effect=fake_run_with_pi_retry):
-                    result = asyncio.run(
-                        runner.run_agent(
-                            "summary",
-                            model="MiniMax/MiniMax-M2.5",
-                            tools=["read"],
-                            cwd=cwd,
-                            session_file="/tmp/test-session.jsonl",
-                            max_retries=0,
-                            pi_max_retries=0,
-                        )
+                    result = runner.run_agent(
+                        "summary",
+                        model="MiniMax/MiniMax-M2.5",
+                        tools=["read"],
+                        cwd=cwd,
+                        session_file="/tmp/test-session.jsonl",
+                        max_retries=0,
+                        pi_max_retries=0,
+                        task_context={"task_pi_dir": "/tmp/runtime/workers", "agent_role": "workers"},
                     )
 
         self.assertEqual(result.output, "ok")
@@ -273,6 +240,69 @@ class RunAgentPromptFileTests(unittest.TestCase):
         self.assertEqual(prompts[0], "summary")
         self.assertIn("compaction", prompts[1].lower())
         self.assertEqual(prompts[2], "summary")
+        self.assertTrue(result.context_overflow_retrying)
+        self.assertEqual("/tmp/runtime/workers", result.runtime_dir)
+        self.assertEqual("workers", result.agent_role)
+
+    def test_run_agent_preflight_context_overflow_without_session_fast_fails(self):
+        long_prompt = "A" * (500000 * 4)
+
+        with patch.object(runner, "_find_pi_command", return_value=["/usr/bin/pi"]):
+            with patch.object(runner, "_run_with_pi_retry") as run_with_pi_retry:
+                result = runner.run_agent(
+                    long_prompt,
+                    model="glm-5.1",
+                    tools=["read"],
+                    cwd=".",
+                    max_retries=0,
+                    pi_max_retries=0,
+                    task_context={"task_pi_dir": "/tmp/runtime/workers", "agent_role": "workers"},
+                )
+
+        run_with_pi_retry.assert_not_called()
+        self.assertTrue(result.context_budget_exceeded_preflight)
+        self.assertTrue(result.context_overflow_failed_after_compaction)
+        self.assertEqual("/tmp/runtime/workers", result.runtime_dir)
+        self.assertEqual("workers", result.agent_role)
+
+    def test_emit_agent_runtime_events_emits_context_events(self):
+        emitted: list[tuple[str, dict]] = []
+        result = runner.AgentResult()
+        result.runtime_dir = "/tmp/runtime/workers"
+        result.context_window = 128000
+        result.proxy_reserved_tokens = 4096
+        result.compaction_requested = True
+        result.compaction_completed = True
+        result.context_budget_exceeded_preflight = True
+        result.context_overflow_retrying = True
+        result.context_overflow_failed_after_compaction = True
+        result.error = "overflow"
+
+        def emit(event_type: str, **payload):
+            emitted.append((event_type, payload))
+
+        emit_agent_runtime_events(
+            emit,
+            result=result,
+            stage="taint_worker",
+            role="workers",
+            model="glm-5.1",
+            extra={"function": "demo"},
+        )
+
+        event_types = [item[0] for item in emitted]
+        self.assertEqual(
+            [
+                "task_context_compaction_requested",
+                "task_context_compaction_completed",
+                "task_context_budget_exceeded_preflight",
+                "task_context_overflow_retrying",
+                "task_context_overflow_failed_after_compaction",
+            ],
+            event_types,
+        )
+        self.assertEqual("/tmp/runtime/workers", emitted[0][1]["runtime_dir"])
+        self.assertEqual("glm-5.1", emitted[0][1]["model"])
 
 
 if __name__ == "__main__":

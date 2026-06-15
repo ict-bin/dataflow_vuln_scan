@@ -101,6 +101,10 @@ class ExecutionCoordinatorTests(unittest.TestCase):
             self.assertEqual(row.status, "pending")
             self.assertEqual(row.dispatch_status, "leased")
             self.assertEqual(row.execution_epoch, 4)
+            self.assertTrue(row.task_config_json["_auto_recovered_pending"])
+            self.assertEqual("claim_expired_running", row.task_config_json["_auto_recovered_reason"])
+            self.assertEqual("pod-old", row.task_config_json["_auto_recovered_previous_owner_id"])
+            self.assertEqual(3, row.task_config_json["_auto_recovered_previous_epoch"])
         finally:
             db.close()
 
@@ -208,6 +212,10 @@ class ExecutionCoordinatorTests(unittest.TestCase):
             self.assertIsNone(row.execution_owner_id)
             self.assertIsNone(row.execution_lease_until)
             self.assertIsNone(row.execution_heartbeat_at)
+            self.assertTrue(row.task_config_json["_auto_recovered_pending"])
+            self.assertEqual("owner_cleanup", row.task_config_json["_auto_recovered_reason"])
+            self.assertEqual("pod-a", row.task_config_json["_auto_recovered_previous_owner_id"])
+            self.assertEqual(2, row.task_config_json["_auto_recovered_previous_epoch"])
         finally:
             db.close()
 
@@ -242,9 +250,13 @@ class ExecutionCoordinatorTests(unittest.TestCase):
             self.assertEqual(rows["dvs_missing_owner"].status, "pending")
             self.assertEqual(rows["dvs_missing_owner"].dispatch_status, "pending")
             self.assertIsNone(rows["dvs_missing_owner"].execution_owner_id)
+            self.assertTrue(rows["dvs_missing_owner"].task_config_json["_auto_recovered_pending"])
+            self.assertEqual("missing_owner", rows["dvs_missing_owner"].task_config_json["_auto_recovered_reason"])
             self.assertEqual(rows["dvs_expired_lease"].status, "pending")
             self.assertEqual(rows["dvs_expired_lease"].dispatch_status, "pending")
             self.assertIsNone(rows["dvs_expired_lease"].execution_owner_id)
+            self.assertTrue(rows["dvs_expired_lease"].task_config_json["_auto_recovered_pending"])
+            self.assertEqual("expired_lease", rows["dvs_expired_lease"].task_config_json["_auto_recovered_reason"])
         finally:
             db.close()
 

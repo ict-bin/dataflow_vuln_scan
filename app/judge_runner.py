@@ -8,6 +8,7 @@ import os
 import re
 from pathlib import Path
 
+from .agent_runtime_events import emit_agent_runtime_events
 from .models import (
     AgentInstanceConfig, JudgeRoundResult, JudgeSummary,
     TaskConfig, WorkerEvaluation, WorkerResult, TokenUsage,
@@ -102,8 +103,17 @@ class JudgeMixin:
                 "task_id": result.task_id,
                 "task_root": str(Path(cwd).resolve().parent),
                 "task_run_root": str(Path(cwd).resolve()),
-                "task_pi_dir": getattr(cfg, "task_pi_dir", ""),
+                "task_pi_dir": cfg.role_pi_dir("workers"),
+                "agent_role": "workers",
             },
+        )
+        emit_agent_runtime_events(
+            self._emit,
+            result=ar,
+            stage="merge",
+            role="workers",
+            model=w_cfg.model,
+            extra={"function": root_function},
         )
 
         result.total_tokens += ar.token_usage
@@ -189,7 +199,8 @@ class JudgeMixin:
                 "task_id": result.task_id,
                 "task_root": str(sess_dir.parent.resolve().parent),
                 "task_run_root": str(sess_dir.parent.resolve()),
-                "task_pi_dir": getattr(cfg, "task_pi_dir", ""),
+                "task_pi_dir": cfg.role_pi_dir("judges"),
+                "agent_role": "judges",
             },
         }
 
@@ -247,6 +258,14 @@ class JudgeMixin:
             eval_session_file = str(j_dir / f"{jid}-{w.worker_id}-round-{rnd_num:03d}-eval.jsonl")
             ar = run_agent(
                 prompt=eval_prompt, **base_kwargs, session_file=eval_session_file)
+            emit_agent_runtime_events(
+                self._emit,
+                result=ar,
+                stage="judge_eval",
+                role="judges",
+                model=judge_cfg.model,
+                extra={"judge_id": jid, "worker_id": w.worker_id, "round": rnd_num},
+            )
             parsed = _parse_eval_md(ar.output)
             ev = WorkerEvaluation(
                 worker_id=w.worker_id,
@@ -283,6 +302,14 @@ class JudgeMixin:
             summary_session_file = str(j_dir / f"{jid}-round-{rnd_num:03d}-summary.jsonl")
             ar = run_agent(
                 prompt=summary_prompt, **base_kwargs, session_file=summary_session_file)
+            emit_agent_runtime_events(
+                self._emit,
+                result=ar,
+                stage="judge_summary",
+                role="judges",
+                model=judge_cfg.model,
+                extra={"judge_id": jid, "round": rnd_num},
+            )
             j_result.token_usage += ar.token_usage
             j_result.session_file = self._session_relpath(sess_dir.parent, summary_session_file)
 

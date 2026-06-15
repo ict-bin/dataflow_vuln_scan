@@ -73,6 +73,15 @@ class AgentResult:
         self.api_retry_event_due: bool = False
         self.consecutive_api_retry_count: int = 0
         self.api_retry_reason: str | None = None
+        self.agent_role: str | None = None
+        self.runtime_dir: str | None = None
+        self.context_window: int = 0
+        self.proxy_reserved_tokens: int = 0
+        self.compaction_requested: bool = False
+        self.compaction_completed: bool = False
+        self.context_budget_exceeded_preflight: bool = False
+        self.context_overflow_retrying: bool = False
+        self.context_overflow_failed_after_compaction: bool = False
 
 
 class _PiProcessError(Exception):
@@ -137,8 +146,20 @@ def _sleep_with_cancel(delay: float, cancel_event: threading.Event | None) -> bo
     if cancel_event is None:
         time.sleep(delay)
         return False
-    cancelled = cancel_event.wait(timeout=delay)
-    return cancelled
+    waiter = getattr(cancel_event, "wait", None)
+    if waiter is None:
+        time.sleep(delay)
+        return False
+    try:
+        cancelled = waiter(timeout=delay)
+        return bool(cancelled)
+    except TypeError:
+        deadline = time.monotonic() + max(0.0, float(delay))
+        while time.monotonic() < deadline:
+            if getattr(cancel_event, "is_set", lambda: False)():
+                return True
+            time.sleep(0.05)
+        return bool(getattr(cancel_event, "is_set", lambda: False)())
 
 
 def _should_emit_api_retry_event(consecutive_retries: int, delay_seconds: float) -> bool:
@@ -174,35 +195,52 @@ def _single_input_token_limit(context_window: int) -> int:
     return max(4096, int(context_window * _SINGLE_INPUT_CONTEXT_RATIO))
 
 
+def _effective_context_limit(context_window: int, proxy_reserved_tokens: int = 0) -> int:
+    reserve = max(int(proxy_reserved_tokens or 0), 4096)
+    response_headroom = 4096
+    return max(1, int(context_window) - reserve - response_headroom)
+
+
+def _preflight_context_token_limit(context_window: int, proxy_reserved_tokens: int = 0) -> int:
+    return max(1, int(_effective_context_limit(context_window, proxy_reserved_tokens) * _SINGLE_INPUT_CONTEXT_RATIO))
+
+
 # ─── Context overflow detection ───────────────────────────────────────────────
 
 def _parse_context_overflow_details(error_text: str | None) -> dict[str, int]:
-    if not error_text:
-        return {}
-    details: dict[str, int] = {}
-    m = re.search(r"prompt\s+token\s+count.*?(\d[\d,]*)", error_text, re.IGNORECASE)
-    if m:
+    text = str(error_text or "")
+    details = {
+        "input_tokens": 0,
+        "actual_input_tokens": 0,
+        "requested_output_tokens": 0,
+        "context_length": 0,
+        "provider_reported_context_length": 0,
+        "max_input_tokens": 0,
+        "proxy_reserved_tokens": 0,
+    }
+    if not text:
+        return details
+    patterns = {
+        "input_tokens": r"passed\s+(\d[\d,]*)\s+input tokens",
+        "actual_input_tokens": r"input has\s+(\d[\d,]*)\s+tokens",
+        "requested_output_tokens": r"requested\s+(\d[\d,]*)\s+output tokens",
+        "context_length": r"context length is only\s+(\d[\d,]*)\s+tokens",
+        "provider_reported_context_length": r"maximum context length is\s+(\d[\d,]*)\s+tokens",
+        "max_input_tokens": r"maximum input length(?: of)?\s+(\d[\d,]*)\s+tokens",
+        "proxy_reserved_tokens": r"reserves\s+(\d[\d,]*)\s+safety-buffer tokens",
+    }
+    for key, pattern in patterns.items():
+        match = re.search(pattern, text, re.IGNORECASE)
+        if not match:
+            continue
         try:
-            details["prompt_tokens"] = int(m.group(1).replace(",", ""))
+            details[key] = int(match.group(1).replace(",", ""))
         except ValueError:
-            pass
-    m = re.search(r"max.*?(?:context|model).*?(?:length|tokens)[^\d]*(\d[\d,]*)", error_text, re.IGNORECASE)
-    if m:
-        try:
-            details["max_tokens"] = int(m.group(1).replace(",", ""))
-        except ValueError:
-            pass
-    if "too long" in error_text.lower() or "exceed" in error_text.lower():
-        m = re.search(r"(\d[\d,]*)\s*(?:tokens?|length)", error_text)
-        if m:
-            try:
-                val = int(m.group(1).replace(",", ""))
-                if "prompt_tokens" not in details:
-                    details["prompt_tokens"] = val
-                if "max_tokens" not in details:
-                    details["max_tokens"] = val
-            except ValueError:
-                pass
+            continue
+    if details["provider_reported_context_length"] and not details["context_length"]:
+        details["context_length"] = details["provider_reported_context_length"]
+    if details["actual_input_tokens"] and not details["input_tokens"]:
+        details["input_tokens"] = details["actual_input_tokens"]
     return details
 
 
@@ -210,11 +248,15 @@ def _is_context_overflow_error(error_text: str | None) -> bool:
     if not error_text:
         return False
     lower = error_text.lower()
+    details = _parse_context_overflow_details(error_text)
+    if details.get("context_length", 0) > 0:
+        return True
     indicators = [
         "context length", "context_length", "context window",
         "maximum context length", "too long", "token limit",
         "max tokens", "reduce the length", "prompt is too long",
         "exceeds model", "context size", "4097",
+        "prefill_context_length_exceeded", "input has", "safety-buffer",
     ]
     return any(indicator in lower for indicator in indicators)
 
@@ -227,10 +269,15 @@ def _format_context_overflow_failure(
     error_text: str | None,
 ) -> str:
     details = _parse_context_overflow_details(error_text)
-    context_window = _model_context_window(model)
+    context_window = details.get("context_length") or _model_context_window(model)
     estimated = _single_input_token_estimate(system_prompt, prompt, post_skill_prompt)
-    limit = _single_input_token_limit(context_window)
-    limit_info = f"model_limit={context_window}, input_limit={limit}, estimated={estimated}"
+    proxy_reserved_tokens = details.get("proxy_reserved_tokens", 0)
+    effective_limit = _effective_context_limit(context_window, proxy_reserved_tokens)
+    limit = _preflight_context_token_limit(context_window, proxy_reserved_tokens)
+    limit_info = (
+        f"model_limit={context_window}, effective_limit={effective_limit}, "
+        f"preflight_limit={limit}, estimated={estimated}, proxy_reserved_tokens={proxy_reserved_tokens}"
+    )
     if details:
         detail_str = ", ".join(f"{k}={v}" for k, v in sorted(details.items()))
         limit_info += f", api_reported=({detail_str})"

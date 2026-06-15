@@ -16,7 +16,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from sqlalchemy.orm import Session, load_only
 from sqlalchemy import func
@@ -31,6 +31,8 @@ from app.models import SwarmEvent, TaskStatus
 from app.orchestrator import Orchestrator
 from app.runtime_context import HEARTBEAT_INTERVAL_SECONDS, WORKER_ID, MAX_LOCAL_RUNNING_TASKS
 from app.service.execution_coordinator import (
+    _auto_recovery_payload,
+    _clear_auto_recovery_flag,
     begin_execution_if_owner,
     claim_one_runnable_task,
     commit_terminal_state_if_owner,
@@ -70,6 +72,26 @@ _RUNNING_TASK_LOCK = threading.RLock()
 _running_tasks: dict[str, "_RunningTaskContext"] = {}
 
 
+def _restart_payload(row: AppDvsTask, *, previous_status: str, previous_error: str | None, previous_epoch: int, reason: str) -> dict[str, Any]:
+    return {
+        "reason": reason,
+        "previous_status": previous_status,
+        "previous_error": previous_error,
+        "execution_epoch_before": previous_epoch,
+        "execution_epoch_after": int(row.execution_epoch or 0),
+        "control_version": int(row.control_version or 0),
+    }
+_PI_RUNTIME_ROLES = ("workers", "judges")
+_PI_COMPACTION_SETTINGS = {
+    "defaultThinkingLevel": "off",
+    "compaction": {
+        "enabled": True,
+        "reserveTokens": 8192,
+        "keepRecentTokens": 50000,
+    },
+}
+
+
 def _task_agent_key(task_config_json: dict | None) -> dict | None:
     if not isinstance(task_config_json, dict):
         return None
@@ -77,43 +99,126 @@ def _task_agent_key(task_config_json: dict | None) -> dict | None:
     return payload if isinstance(payload, dict) else None
 
 
-def _materialize_task_pi_runtime(*, task_root: str, agent_task_key: dict | None) -> tuple[str | None, str]:
+def _merge_pi_settings(base_settings: dict[str, Any] | None) -> dict[str, Any]:
+    payload = dict(base_settings) if isinstance(base_settings, dict) else {}
+    payload["defaultThinkingLevel"] = _PI_COMPACTION_SETTINGS["defaultThinkingLevel"]
+    compaction = payload.get("compaction")
+    merged_compaction = dict(compaction) if isinstance(compaction, dict) else {}
+    merged_compaction.update(_PI_COMPACTION_SETTINGS["compaction"])
+    payload["compaction"] = merged_compaction
+    return payload
+
+
+def _collect_role_models(role_config: Any) -> set[str]:
+    models: set[str] = set()
+    default_model = str(getattr(role_config, "default_model", "") or "").strip()
+    if default_model:
+        models.add(default_model)
+    for agent in getattr(role_config, "agents", []) or []:
+        model = str(getattr(agent, "model", "") or "").strip()
+        if model:
+            models.add(model)
+    stage_models = getattr(role_config, "stage_models", None)
+    if isinstance(stage_models, dict):
+        for value in stage_models.values():
+            model = str(value or "").strip()
+            if model:
+                models.add(model)
+    return models
+
+
+def _model_identifier_variants(model_name: str) -> set[str]:
+    raw = str(model_name or "").strip()
+    lowered = raw.lower()
+    variants = {raw, lowered}
+    if "/" in raw:
+        suffix = raw.split("/", 1)[1].strip()
+        variants.update({suffix, suffix.lower()})
+    return {item for item in variants if item}
+
+
+def _build_role_models_json(
+    base_models: dict[str, Any] | None,
+    *,
+    role_config: Any,
+    secret: str,
+) -> dict[str, Any]:
+    payload = json.loads(json.dumps(base_models if isinstance(base_models, dict) else {"providers": {}}))
+    providers = payload.get("providers")
+    if not isinstance(providers, dict):
+        payload["providers"] = {}
+        providers = payload["providers"]
+    allowed_models = _collect_role_models(role_config)
+    allowed_variants: set[str] = set()
+    for model_name in allowed_models:
+        allowed_variants.update(_model_identifier_variants(model_name))
+    filtered_providers: dict[str, Any] = {}
+    for provider_key, provider_cfg in providers.items():
+        if not isinstance(provider_cfg, dict):
+            continue
+        provider_copy = dict(provider_cfg)
+        models = provider_cfg.get("models")
+        if isinstance(models, list):
+            kept_models = []
+            for item in models:
+                if not isinstance(item, dict):
+                    continue
+                model_id = str(item.get("id") or item.get("name") or "").strip()
+                if not model_id:
+                    continue
+                model_variants = _model_identifier_variants(model_id)
+                provider_qualified = {f"{provider_key}/{variant}" for variant in model_variants}
+                if allowed_variants.intersection(model_variants.union(provider_qualified)):
+                    kept_models.append(dict(item))
+            provider_copy["models"] = kept_models
+            if not kept_models:
+                continue
+        if secret:
+            provider_copy["apiKey"] = secret
+        filtered_providers[provider_key] = provider_copy
+    payload["providers"] = filtered_providers
+    return payload
+
+
+def _materialize_task_pi_runtime(*, task_root: str, agent_task_key: dict | None, cfg: Any) -> tuple[dict[str, str], str]:
+    task_pi_dirs: dict[str, str] = {}
+    if not task_root:
+        return task_pi_dirs, "task_scoped"
     secret = str((agent_task_key or {}).get("secret") or "").strip()
-    if not secret or not task_root:
-        return None, "global"
-    task_pi_dir = Path(task_root) / ".pi" / "agent"
-    task_pi_dir.mkdir(parents=True, exist_ok=True)
     global_pi_dir = Path(os.environ.get("PI_CODING_AGENT_DIR", "/root/.pi/agent"))
     models_src = Path(os.environ.get("PI_MODELS_JSON") or (global_pi_dir / "models.json"))
     settings_src = global_pi_dir / "settings.json"
-
-    # ── models.json：复制全局配置，并将所有 provider 的 apiKey 替换为任务级密钥 ──
-    models_path = task_pi_dir / "models.json"
-    if models_src.is_file():
-        safe_copy2(models_src, models_path)
-    else:
-        models_path.write_text(json.dumps({"providers": {}}, ensure_ascii=False, indent=2), encoding="utf-8")
-    _inject_api_key(models_path, secret)
-
-    if settings_src.is_file():
-        safe_copy2(settings_src, task_pi_dir / "settings.json")
-    elif not (task_pi_dir / "settings.json").exists():
-        (task_pi_dir / "settings.json").write_text("{}", encoding="utf-8")
-    (task_pi_dir / "auth.json").write_text(
-        json.dumps(
-            {
-                "agent_task_key_id": str((agent_task_key or {}).get("id") or "").strip() or None,
-                "agent_task_key_name": str((agent_task_key or {}).get("name") or "").strip() or None,
-                "agent_task_key_prefix": str((agent_task_key or {}).get("prefix") or "").strip() or None,
-                "agent_task_key_secret": secret,
-                "agent_task_key_source": str((agent_task_key or {}).get("source") or "").strip() or None,
-            },
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
-    return str(task_pi_dir), "task_scoped"
+    base_models = _read_json_file(models_src)
+    base_settings = _read_json_file(settings_src)
+    merged_settings = _merge_pi_settings(base_settings)
+    auth_payload = {
+        "agent_task_key_id": str((agent_task_key or {}).get("id") or "").strip() or None,
+        "agent_task_key_name": str((agent_task_key or {}).get("name") or "").strip() or None,
+        "agent_task_key_prefix": str((agent_task_key or {}).get("prefix") or "").strip() or None,
+        "agent_task_key_secret": secret or None,
+        "agent_task_key_source": str((agent_task_key or {}).get("source") or "").strip() or "default",
+    }
+    runtime_root = Path(task_root) / ".pi" / "agents"
+    runtime_root.mkdir(parents=True, exist_ok=True)
+    for role_name in _PI_RUNTIME_ROLES:
+        role_dir = runtime_root / role_name
+        role_dir.mkdir(parents=True, exist_ok=True)
+        role_config = getattr(cfg, role_name, None)
+        role_models = _build_role_models_json(base_models, role_config=role_config, secret=secret)
+        (role_dir / "models.json").write_text(
+            json.dumps(role_models, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        (role_dir / "settings.json").write_text(
+            json.dumps(merged_settings, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        (role_dir / "auth.json").write_text(
+            json.dumps(auth_payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        task_pi_dirs[role_name] = str(role_dir)
+    return task_pi_dirs, "task_scoped"
 
 
 def _inject_api_key(models_path: Path, secret: str) -> None:
@@ -142,9 +247,11 @@ def _inject_api_key(models_path: Path, secret: str) -> None:
 
 
 def _read_json_file(path: Path | None) -> dict[str, Any] | None:
-    if path is None or not path.is_file():
+    if path is None:
         return None
     try:
+        if not path.is_file():
+            return None
         payload = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return None
@@ -168,8 +275,10 @@ def _build_role_runtime_summary(
     role_name: str,
     role_config: Any,
     *,
+    runtime_dir: str | None,
     models_json: dict[str, Any] | None,
     settings_json: dict[str, Any] | None,
+    auth_json: dict[str, Any] | None,
 ) -> dict[str, Any]:
     agents = []
     for index, agent in enumerate(getattr(role_config, "agents", []) or []):
@@ -183,6 +292,7 @@ def _build_role_runtime_summary(
         agents.append(payload)
     summary = {
         "role_name": role_name,
+        "runtime_dir": str(runtime_dir or "").strip() or None,
         "default_model": str(getattr(role_config, "default_model", "") or "").strip() or None,
         "default_tools": list(getattr(role_config, "default_tools", []) or []),
         "default_thinking_level": str(getattr(role_config, "default_thinking_level", "") or "").strip() or None,
@@ -191,6 +301,7 @@ def _build_role_runtime_summary(
         "agents": agents,
         "models_json": models_json,
         "settings_json": settings_json,
+        "auth_json": auth_json,
     }
     stage_models = getattr(role_config, "stage_models", None)
     if isinstance(stage_models, dict) and stage_models:
@@ -202,25 +313,44 @@ def _build_runtime_config_snapshots(
     *,
     cfg: Any,
     agent_task_key: dict | None,
-    task_pi_dir: str | None,
+    task_pi_dirs: dict[str, str] | None,
     agent_runtime_mode: str,
 ) -> tuple[dict[str, Any] | None, dict[str, Any], dict[str, Any], dict[str, Any]]:
     frozen_at = isoformat_local(now_local()) or datetime.utcnow().isoformat()
-    runtime_dir = Path(task_pi_dir) if task_pi_dir else Path(os.environ.get("PI_CODING_AGENT_DIR", "/root/.pi/agent"))
-    models_path = Path(os.environ.get("PI_MODELS_JSON")) if not task_pi_dir and os.environ.get("PI_MODELS_JSON") else (runtime_dir / "models.json")
-    settings_path = runtime_dir / "settings.json"
-    models_json = _read_json_file(models_path)
-    settings_json = _read_json_file(settings_path)
     agent_auth_json = _normalize_agent_auth_snapshot(agent_task_key)
-
     role_config_snapshot = {
         "workers": cfg.workers.model_dump(mode="json"),
         "judges": cfg.judges.model_dump(mode="json"),
     }
-    provider_runtime_summary = {
-        "workers": _build_role_runtime_summary("workers", cfg.workers, models_json=models_json, settings_json=settings_json),
-        "judges": _build_role_runtime_summary("judges", cfg.judges, models_json=models_json, settings_json=settings_json),
-    }
+    role_runtime_dirs = dict(task_pi_dirs or {})
+    runtime_files: dict[str, Any] = {}
+    provider_runtime_summary: dict[str, Any] = {}
+    llm_roles: dict[str, Any] = {}
+    for role_name in _PI_RUNTIME_ROLES:
+        runtime_dir = str(role_runtime_dirs.get(role_name) or cfg.role_pi_dir(role_name) or "").strip()
+        runtime_path = Path(runtime_dir) if runtime_dir else None
+        models_json = _read_json_file(runtime_path / "models.json") if runtime_path else None
+        settings_json = _read_json_file(runtime_path / "settings.json") if runtime_path else None
+        auth_json = _read_json_file(runtime_path / "auth.json") if runtime_path else None
+        runtime_files[role_name] = {
+            "models_json": models_json,
+            "settings_json": settings_json,
+            "auth_json": auth_json,
+        }
+        role_config = getattr(cfg, role_name)
+        provider_runtime_summary[role_name] = _build_role_runtime_summary(
+            role_name,
+            role_config,
+            runtime_dir=runtime_dir,
+            models_json=models_json,
+            settings_json=settings_json,
+            auth_json=auth_json,
+        )
+        llm_roles[role_name] = {
+            "config": role_config_snapshot.get(role_name),
+            "runtime_dir": runtime_dir or None,
+            "runtime_files": runtime_files[role_name],
+        }
     llm_binding_snapshot = {
         "version": 1,
         "frozen_at": frozen_at,
@@ -232,11 +362,8 @@ def _build_runtime_config_snapshots(
             "secret": str((agent_task_key or {}).get("secret") or "").strip() or None,
             "source": str((agent_task_key or {}).get("source") or "").strip() or None,
         } if isinstance(agent_task_key, dict) else None,
-        "runtime_files": {
-            "models_json": models_json,
-            "settings_json": settings_json,
-        },
-        "roles": role_config_snapshot,
+        "runtime_files": runtime_files,
+        "roles": llm_roles,
     }
     return agent_auth_json, role_config_snapshot, provider_runtime_summary, llm_binding_snapshot
 
@@ -249,6 +376,16 @@ def _task_config_snapshot_payload(task_config_json: dict | None) -> dict[str, ob
         "provider_runtime_summary": task_config.get("provider_runtime_summary") if isinstance(task_config.get("provider_runtime_summary"), dict) else None,
         "llm_binding_snapshot": task_config.get("llm_binding_snapshot") if isinstance(task_config.get("llm_binding_snapshot"), dict) else None,
     }
+
+
+def _agent_runtime_mode_from_task_config(task_config_json: dict | None) -> str:
+    task_config = task_config_json if isinstance(task_config_json, dict) else {}
+    llm_binding_snapshot = task_config.get("llm_binding_snapshot")
+    if isinstance(llm_binding_snapshot, dict):
+        candidate = str(llm_binding_snapshot.get("agent_runtime_mode") or "").strip()
+        if candidate:
+            return candidate
+    return "task_scoped"
 
 
 def _run_db_write_with_retries(label: str, operation, *, attempts: int | None = None):
@@ -951,6 +1088,7 @@ class TaskService:
             )
             claimed_row = db.query(AppDvsTask).filter_by(task_id=claimed.task_id).first()
             if claimed_row is not None:
+                auto_recovery = _auto_recovery_payload(claimed_row.task_config_json)
                 _record_task_event(
                     db,
                     row=claimed_row,
@@ -969,6 +1107,31 @@ class TaskService:
                         "dispatch_status": claimed.dispatch_status,
                     },
                 )
+                if auto_recovery is not None:
+                    _record_task_event(
+                        db,
+                        row=claimed_row,
+                        event_type="task_auto_recovered",
+                        message="任务已由系统自动恢复并重新认领执行",
+                        level="warning",
+                        status=claimed_row.status,
+                        execution_epoch=claimed.epoch,
+                        control_version=claimed.control_version,
+                        dispatch_status=claimed.dispatch_status,
+                        worker_id=WORKER_ID,
+                        execution_owner_id=WORKER_ID,
+                        payload={
+                            "reason": auto_recovery.get("reason"),
+                            "previous_status": "running",
+                            "previous_error": claimed_row.error,
+                            "previous_owner_id": auto_recovery.get("previous_owner_id"),
+                            "lease_epoch_before": int(auto_recovery.get("previous_epoch") or 0),
+                            "lease_epoch_after": int(claimed.epoch or 0),
+                            "control_version": int(claimed.control_version or 0),
+                        },
+                    )
+                    claimed_row.task_config_json = _clear_auto_recovery_flag(claimed_row.task_config_json)
+                    db.add(claimed_row)
                 db.commit()
             return claimed.task_id
         finally:
@@ -1331,6 +1494,9 @@ class TaskService:
     def restart_task(self, db: Session, task_id: str) -> dict:
         """在原任务ID上重置并重新执行（SA 模式：in-place restart）。"""
         row = self._get_or_404(db, task_id)
+        previous_status = str(row.status or "")
+        previous_error = str(row.error or "").strip() or None
+        previous_epoch = int(row.execution_epoch or 0)
         self.request_cancel(task_id, reason="restart_requested")
         self._cleanup_worker_runtime(label=f"task_restart:{task_id}", task_id=task_id, reason="restart_requested_before_pending")
         task_root = _task_root(row)
@@ -1384,8 +1550,13 @@ class TaskService:
             control_version=int(row.control_version or 0),
             dispatch_status=row.dispatch_status,
             payload={
-                "control_version": int(row.control_version or 0),
-                "execution_epoch": int(row.execution_epoch or 0),
+                **_restart_payload(
+                    row,
+                    previous_status=previous_status,
+                    previous_error=previous_error,
+                    previous_epoch=previous_epoch,
+                    reason="restart_requested",
+                ),
                 "deleted_event_count": deleted_events,
                 "run_dir_removed": run_dir_removed,
                 "output_dir_removed": output_dir_removed,
@@ -1594,6 +1765,11 @@ class TaskService:
                             "error": "task_runtime_error",
                             "task_rate_limited_retrying": "task_rate_limited_retrying",
                             "task_api_retrying": "task_api_retrying",
+                            "task_context_compaction_requested": "task_context_compaction_requested",
+                            "task_context_compaction_completed": "task_context_compaction_completed",
+                            "task_context_budget_exceeded_preflight": "task_context_budget_exceeded_preflight",
+                            "task_context_overflow_retrying": "task_context_overflow_retrying",
+                            "task_context_overflow_failed_after_compaction": "task_context_overflow_failed_after_compaction",
                         }.get(event_type, event_type)
                         if event_type == "trace_start":
                             depth = int(event_data.get("depth") or 0)
@@ -1614,6 +1790,11 @@ class TaskService:
                             "task_runtime_error": str(event_data.get("error") or "分析过程中出现错误"),
                             "task_rate_limited_retrying": "智能体请求被 429 限流，30 秒后自动重试",
                             "task_api_retrying": "智能体 API 错误，已进入无限重试",
+                            "task_context_compaction_requested": "智能体上下文超限，已请求会话压缩",
+                            "task_context_compaction_completed": "智能体会话压缩已完成",
+                            "task_context_budget_exceeded_preflight": "智能体请求在发送前已判定超出上下文预算",
+                            "task_context_overflow_retrying": "智能体上下文超限，压缩后正在重试",
+                            "task_context_overflow_failed_after_compaction": "智能体上下文压缩后仍超出预算，请求已终止",
                         }.get(mapped_event_type, f"运行事件: {mapped_event_type}")
                         _record_task_event(
                             event_db,
@@ -1897,11 +2078,13 @@ class TaskService:
 
             cfg = build_task_config(svc, row.prompt_content, cwd=row.source_root_path or row.input_path)
             agent_task_key = _task_agent_key(tcfg)
-            task_pi_dir, agent_runtime_mode = _materialize_task_pi_runtime(
+            task_pi_dirs, agent_runtime_mode = _materialize_task_pi_runtime(
                 task_root=task_root_path or "",
                 agent_task_key=agent_task_key,
+                cfg=cfg,
             )
-            cfg.task_pi_dir = task_pi_dir or ""
+            cfg.task_pi_dirs = dict(task_pi_dirs)
+            cfg.task_pi_dir = cfg.role_pi_dir("workers")
             (
                 agent_auth_json,
                 role_config_snapshot,
@@ -1910,7 +2093,7 @@ class TaskService:
             ) = _build_runtime_config_snapshots(
                 cfg=cfg,
                 agent_task_key=agent_task_key,
-                task_pi_dir=task_pi_dir,
+                task_pi_dirs=task_pi_dirs,
                 agent_runtime_mode=agent_runtime_mode,
             )
             row.task_config_json = {
@@ -1980,8 +2163,8 @@ class TaskService:
             _record_task_event(
                 db,
                 row=row,
-                event_type="task_agent_runtime_materialized" if task_pi_dir else "task_agent_runtime_fallback_to_global",
-                message="已生成任务级 PI runtime" if task_pi_dir else "未提供任务级 key，回退到全局 PI runtime",
+                event_type="task_agent_runtime_materialized",
+                message="已生成任务级角色 PI runtime",
                 status=row.status,
                 dispatch_status=row.dispatch_status,
                 payload={
@@ -1989,6 +2172,9 @@ class TaskService:
                     "agent_task_key_prefix": str((agent_task_key or {}).get("prefix") or "").strip() or None,
                     "agent_task_key_source": str((agent_task_key or {}).get("source") or "").strip() or None,
                     "agent_runtime_mode": agent_runtime_mode,
+                    "role_runtime_dirs": dict(task_pi_dirs),
+                    "workers": dict(task_pi_dirs).get("workers"),
+                    "judges": dict(task_pi_dirs).get("judges"),
                 },
             )
             db.commit()
@@ -2472,7 +2658,7 @@ class TaskService:
             "has_agent_task_key": bool(str((((row.task_config_json or {}).get("agent_task_key") or {}).get("secret") or "")).strip()),
             "agent_task_key_id": str((((row.task_config_json or {}).get("agent_task_key") or {}).get("id") or "")).strip() or None,
             "agent_task_key_prefix": str((((row.task_config_json or {}).get("agent_task_key") or {}).get("prefix") or "")).strip() or None,
-            "agent_runtime_mode": "task_scoped" if bool(str((((row.task_config_json or {}).get("agent_task_key") or {}).get("secret") or "")).strip()) else "global",
+            "agent_runtime_mode": _agent_runtime_mode_from_task_config(row.task_config_json),
             **_task_config_snapshot_payload(row.task_config_json),
         }
 

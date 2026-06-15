@@ -114,6 +114,7 @@ class TaskConfig(BaseModel):
     task_name: str = Field(default="", description="SecFlow 任务名称，用于漏洞疑点上报元数据")
     cwd: str = Field(default="/data/target", description="待分析文件所在目录")
     task_pi_dir: str = Field(default="", description="任务级 PI runtime 目录")
+    task_pi_dirs: dict[str, str] = Field(default_factory=dict, description="按角色划分的任务级 PI runtime 目录")
 
     # 服务配置部分（从 ServiceConfig 合并）
     max_rounds: int = Field(default=3)
@@ -145,6 +146,14 @@ class TaskConfig(BaseModel):
     @property
     def judge_count(self) -> int:
         return 0
+
+    def role_pi_dir(self, role: str) -> str:
+        role_key = str(role or "").strip().lower()
+        role_dirs = self.task_pi_dirs if isinstance(self.task_pi_dirs, dict) else {}
+        candidate = str(role_dirs.get(role_key) or "").strip()
+        if candidate:
+            return candidate
+        return str(self.task_pi_dir or "").strip()
 
 
 # ─── Token 统计 ───────────────────────────────────────────────────────────────

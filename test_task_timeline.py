@@ -226,8 +226,86 @@ class TaskTimelineTests(unittest.TestCase):
             self.assertEqual("task_retried", events[0]["event_type"])
             self.assertEqual(3, events[0]["control_version"])
             self.assertEqual("pending", events[0]["dispatch_status"])
+            self.assertEqual("restart_requested", events[0]["payload"]["reason"])
+            self.assertEqual("failed", events[0]["payload"]["previous_status"])
+            self.assertEqual(4, events[0]["payload"]["execution_epoch_before"])
+            self.assertEqual(5, events[0]["payload"]["execution_epoch_after"])
+            self.assertFalse(any(item["event_type"] == "task_auto_recovered" for item in events))
         finally:
             db.close()
+
+    def test_dispatch_once_does_not_record_task_auto_recovered_for_normal_pending_task(self):
+        task_id = self._create_task()
+        started: list[tuple[str, int, int]] = []
+
+        def fake_thread_runner(service, claimed_task_id, epoch, control_version):
+            started.append((claimed_task_id, epoch, control_version))
+
+        previous_runner = task_service_module._run_execute_task_in_thread
+        try:
+            task_service_module._run_execute_task_in_thread = fake_thread_runner
+            claimed = self.service.dispatch_once()
+            self.assertEqual(task_id, claimed)
+
+            db = self._session()
+            try:
+                timeline = self.service.get_task_timeline(db, task_id)
+                event_types = [item["event_type"] for item in timeline["events"]]
+                self.assertIn("task_leased", event_types)
+                self.assertNotIn("task_auto_recovered", event_types)
+            finally:
+                db.close()
+        finally:
+            task_service_module._run_execute_task_in_thread = previous_runner
+
+    def test_dispatch_once_records_task_auto_recovered_and_clears_flag(self):
+        task_id = self._create_task()
+        db = self._session()
+        try:
+            row = db.query(AppDvsTask).filter_by(task_id=task_id).first()
+            row.status = "pending"
+            row.execution_epoch = 3
+            row.control_version = 7
+            row.task_config_json = {
+                "_auto_recovered_pending": True,
+                "_auto_recovered_reason": "expired_lease",
+                "_auto_recovered_previous_owner_id": "worker-old",
+                "_auto_recovered_previous_epoch": 2,
+                "_auto_recovered_marked_at": "2026-01-01T00:00:00",
+            }
+            db.commit()
+        finally:
+            db.close()
+
+        started: list[tuple[str, int, int]] = []
+
+        def fake_thread_runner(service, claimed_task_id, epoch, control_version):
+            started.append((claimed_task_id, epoch, control_version))
+
+        previous_runner = task_service_module._run_execute_task_in_thread
+        try:
+            task_service_module._run_execute_task_in_thread = fake_thread_runner
+            claimed = self.service.dispatch_once()
+            self.assertEqual(task_id, claimed)
+
+            db = self._session()
+            try:
+                timeline = self.service.get_task_timeline(db, task_id)
+                event_types = [item["event_type"] for item in timeline["events"]]
+                self.assertIn("task_auto_recovered", event_types)
+                auto_event = next(item for item in timeline["events"] if item["event_type"] == "task_auto_recovered")
+                self.assertEqual("expired_lease", auto_event["payload"]["reason"])
+                self.assertEqual("running", auto_event["payload"]["previous_status"])
+                self.assertEqual("worker-old", auto_event["payload"]["previous_owner_id"])
+                self.assertEqual(2, auto_event["payload"]["lease_epoch_before"])
+                self.assertEqual(4, auto_event["payload"]["lease_epoch_after"])
+
+                refreshed = db.query(AppDvsTask).filter_by(task_id=task_id).first()
+                self.assertFalse((refreshed.task_config_json or {}).get("_auto_recovered_pending"))
+            finally:
+                db.close()
+        finally:
+            task_service_module._run_execute_task_in_thread = previous_runner
 
     def test_resume_task_records_task_resumed_event(self):
         task_id = self._create_task()

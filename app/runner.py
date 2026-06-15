@@ -42,8 +42,8 @@ from .runner_helpers import (
     _model_context_window,
     _normalize_timeout_seconds,
     _parse_context_overflow_details,
+    _preflight_context_token_limit,
     _single_input_token_estimate,
-    _single_input_token_limit,
     _sleep_with_cancel,
     _terminate_pi_process_tree,
     _write_temp_markdown,
@@ -103,7 +103,67 @@ def _run_with_context_overflow_recovery(
     pi_max_retries: int,
     pi_retry_delay: float,
     timeout_seconds: float | None = None,
+    agent_role: str | None = None,
+    runtime_dir: str | None = None,
 ) -> AgentResult:
+    context_window = _model_context_window(model)
+    preflight_limit = _preflight_context_token_limit(context_window, 0)
+    single_input_tokens = _single_input_token_estimate(system_prompt, prompt, post_skill_prompt)
+    if single_input_tokens > preflight_limit:
+        preflight_result = AgentResult()
+        preflight_result.agent_role = agent_role
+        preflight_result.runtime_dir = runtime_dir
+        preflight_result.context_window = context_window
+        preflight_result.context_budget_exceeded_preflight = True
+        if session_file:
+            compaction_args = _build_args(
+                pi_cmd, model, tools, thinking_level, session_file,
+            )
+            compaction_result = _run_with_pi_retry(
+                args=compaction_args,
+                cwd=cwd,
+                env=env,
+                prompt=_COMPACTION_TRIGGER_PROMPT,
+                post_skill_prompt=None,
+                cancel_event=cancel_event,
+                on_stream=None,
+                max_retries=max_retries,
+                retry_delay=retry_delay,
+                pi_max_retries=pi_max_retries,
+                pi_retry_delay=pi_retry_delay,
+                timeout_seconds=timeout_seconds,
+            )
+            preflight_result.compaction_requested = True
+            preflight_result.compaction_completed = not bool(compaction_result.error)
+            single_input_tokens = _single_input_token_estimate(system_prompt, prompt, post_skill_prompt)
+            if single_input_tokens <= preflight_limit:
+                result = _run_with_pi_retry(
+                    args=args,
+                    cwd=cwd,
+                    env=env,
+                    prompt=prompt,
+                    post_skill_prompt=post_skill_prompt,
+                    cancel_event=cancel_event,
+                    on_stream=on_stream,
+                    max_retries=max_retries,
+                    retry_delay=retry_delay,
+                    pi_max_retries=pi_max_retries,
+                    pi_retry_delay=pi_retry_delay,
+                    timeout_seconds=timeout_seconds,
+                )
+                result.agent_role = agent_role
+                result.runtime_dir = runtime_dir
+                result.context_window = context_window
+                result.context_budget_exceeded_preflight = True
+                result.compaction_requested = True
+                result.compaction_completed = preflight_result.compaction_completed
+                return result
+        preflight_result.context_overflow_failed_after_compaction = True
+        preflight_result.error = _format_context_overflow_failure(
+            model, system_prompt, prompt, post_skill_prompt, "preflight_context_length_exceeded",
+        )
+        return preflight_result
+
     result = _run_with_pi_retry(
         args=args,
         cwd=cwd,
@@ -118,13 +178,19 @@ def _run_with_context_overflow_recovery(
         pi_retry_delay=pi_retry_delay,
         timeout_seconds=timeout_seconds,
     )
+    result.agent_role = agent_role
+    result.runtime_dir = runtime_dir
+    result.context_window = context_window
     if not _is_context_overflow_error(result.error):
         return result
 
     overflow = _parse_context_overflow_details(result.error)
     context_window = overflow.get("context_length") or _model_context_window(model)
+    proxy_reserved_tokens = overflow.get("proxy_reserved_tokens", 0)
+    result.context_window = context_window
+    result.proxy_reserved_tokens = proxy_reserved_tokens
     single_input_tokens = _single_input_token_estimate(system_prompt, prompt, post_skill_prompt)
-    single_input_limit = _single_input_token_limit(context_window)
+    single_input_limit = _preflight_context_token_limit(context_window, proxy_reserved_tokens)
     compaction_attempted = False
 
     if session_file:
@@ -153,17 +219,20 @@ def _run_with_context_overflow_recovery(
             pi_retry_delay=pi_retry_delay,
             timeout_seconds=timeout_seconds,
         )
+        result.compaction_requested = True
+        result.compaction_completed = True
 
     if single_input_tokens > single_input_limit:
         result.error = _format_context_overflow_failure(
             model, system_prompt, prompt, post_skill_prompt, result.error,
         )
+        result.context_overflow_failed_after_compaction = True
         return result
 
     if not session_file:
         return result
 
-    return _run_with_pi_retry(
+    retry_result = _run_with_pi_retry(
         args=args, cwd=cwd, env=env, prompt=prompt,
         post_skill_prompt=post_skill_prompt,
         cancel_event=cancel_event, on_stream=on_stream,
@@ -171,6 +240,14 @@ def _run_with_context_overflow_recovery(
         pi_max_retries=pi_max_retries, pi_retry_delay=pi_retry_delay,
         timeout_seconds=timeout_seconds,
     )
+    retry_result.agent_role = agent_role
+    retry_result.runtime_dir = runtime_dir
+    retry_result.context_window = context_window
+    retry_result.proxy_reserved_tokens = proxy_reserved_tokens
+    retry_result.compaction_requested = compaction_attempted
+    retry_result.compaction_completed = compaction_attempted
+    retry_result.context_overflow_retrying = True
+    return retry_result
 
 
 # ─── Public interface ─────────────────────────────────────────────────────────
@@ -204,6 +281,8 @@ def run_agent(
         return _dr(prompt, cwd=cwd, session_file=session_file,
                    post_skill_prompt=post_skill_prompt, on_stream=on_stream)
 
+    task_context = task_context or {}
+
     if cancel_event and cancel_event.is_set():
         r = AgentResult()
         r.error = "cancelled"
@@ -224,6 +303,8 @@ def run_agent(
     args = _build_args(pi_cmd, model, tools, thinking_level, session_file)
     cwd = os.path.abspath(cwd)
     env = _build_agent_env(cwd=cwd, env=env, task_context=task_context)
+    runtime_dir = str(task_context.get("task_pi_dir") or "").strip() or None
+    agent_role = str(task_context.get("agent_role") or task_context.get("role_kind") or "").strip() or None
 
     if system_prompt.strip():
         _sp_path = os.path.join(os.path.abspath(cwd), ".system_prompt.md")
@@ -247,6 +328,8 @@ def run_agent(
                 max_retries=max_retries, retry_delay=retry_delay,
                 pi_max_retries=pi_max_retries, pi_retry_delay=pi_retry_delay,
                 timeout_seconds=timeout_seconds,
+                agent_role=agent_role,
+                runtime_dir=runtime_dir,
             )
         except TimeoutError:
             timeout_failures += 1
