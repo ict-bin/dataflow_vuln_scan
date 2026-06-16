@@ -224,10 +224,16 @@ class DataflowVulnWorkflow:
         # 仅把真实源码文件逐个 symlink 进 workspace；新产物只能落在 workspace 自身。
         artifact_names = {"tainted.list", "taintvars.json", "taint-graph.json", "vuln-scan.sqlite", "artifact-manifest.json"}
         artifact_prefixes = ("dataflow-", "taint-flow-")
-        skip_dirs = {".git", ".svn", ".hg", "run", "output", "sessions", "workspace-worker-0", "workspace-worker-1", "__pycache__"}
+        # 只跳过 target_dir 根层级下的产物目录，避免误伤源码树中同名的子目录
+        # （例如逆向还原的源码常有 2/output/librmonlib-ppc_rtos.c 这样的路径）
+        skip_top_dirs = {".git", ".svn", ".hg", "run", "output", "sessions",
+                         "workspace-worker-0", "workspace-worker-1", "__pycache__"}
         def _skip(path: Path) -> bool:
-            if any(part in skip_dirs or part.startswith("workspace-worker-") for part in path.relative_to(target_dir).parts[:-1]):
-                return True
+            parts = path.relative_to(target_dir).parts
+            if parts and parts[:-1]:
+                top = parts[0]
+                if top in skip_top_dirs or top.startswith("workspace-worker-"):
+                    return True
             name = path.name
             return name in artifact_names or any(name.startswith(prefix) for prefix in artifact_prefixes) or name.endswith((".jsonl", ".lock", ".backup"))
         for src in target_dir.rglob("*"):
