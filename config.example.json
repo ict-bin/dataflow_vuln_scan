@@ -1,14 +1,17 @@
 {
-    "max_rounds": 3,
+    "max_rounds": -1,
     "max_rounds_exceeded_review_strategy": "treat_as_passed",
-    "min_rounds": 2,
+    "min_rounds": 1,
     "pass_threshold": 0,
     "agent_max_retries": -1,
     "agent_retry_delay": 30,
+    "agent_run_timeout_seconds": 1800,
+    "agent_timeout_retry_enabled": true,
+    "agent_timeout_max_retries": 20,
     "pi_max_retries": -1,
     "pi_retry_delay": 10,
     "max_trace_depth": 5,
-    "deep_trace_enabled": false,
+    "deep_trace_enabled": true,
     "callee_concurrency": -1,
 
     "workers": {
@@ -16,7 +19,7 @@
         "system_prompt_dir": "/opt/dataflow_vuln_scan/prompts/workers",
         "default_thinking_level": "off",
         "agents": [
-            { "model": "MiniMax/MiniMax-M2.5" }
+            { "model": "gaiasec/auto" }
         ],
         "stage_models": {}
     },
