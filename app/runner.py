@@ -303,8 +303,6 @@ def run_agent(
     args = _build_args(pi_cmd, model, tools, thinking_level, session_file)
     cwd = os.path.abspath(cwd)
     env = _build_agent_env(cwd=cwd, env=env, task_context=task_context)
-    runtime_dir = str(task_context.get("task_pi_dir") or "").strip() or None
-    agent_role = str(task_context.get("agent_role") or task_context.get("role_kind") or "").strip() or None
 
     if system_prompt.strip():
         _sp_path = os.path.join(os.path.abspath(cwd), ".system_prompt.md")

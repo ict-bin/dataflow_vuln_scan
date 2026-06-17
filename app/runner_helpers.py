@@ -397,7 +397,6 @@ def _build_args(
     post_skill_prompt: str | None = None,
     max_turns: int | None = None,
     no_session: bool = False,
-    task_pi_dir: str | None = None,
     task_context: dict | None = None,
 ) -> list[str]:
     """Build pi RPC mode launch arguments."""
@@ -416,8 +415,6 @@ def _build_args(
         args.extend(["--post-skill-prompt", post_skill_prompt])
     if max_turns is not None and max_turns > 0:
         args.extend(["--max-turns", str(max_turns)])
-    if task_pi_dir:
-        args.extend(["--agent-dir", task_pi_dir])
     if task_context:
         context_json = json.dumps(task_context, ensure_ascii=False)
         args.extend(["--task-context", context_json])
@@ -452,7 +449,6 @@ def _build_agent_env(
     *,
     cwd: str,
     env: dict[str, str] | None,
-    task_pi_dir: str | None = None,
     task_context: dict | None = None,
 ) -> dict[str, str]:
     merged: dict[str, str] = dict(os.environ)
@@ -460,8 +456,6 @@ def _build_agent_env(
         merged.update(env)
     merged.setdefault("HOME", cwd)
     merged.setdefault("TMPDIR", os.path.join(cwd, "tmp"))
-    if task_pi_dir:
-        merged["PI_CODING_AGENT_DIR"] = task_pi_dir
     if task_context:
         merged["DVS_TASK_CONTEXT"] = json.dumps(task_context, ensure_ascii=False)
     return merged

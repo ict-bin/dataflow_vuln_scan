@@ -2078,13 +2078,10 @@ class TaskService:
 
             cfg = build_task_config(svc, row.prompt_content, cwd=row.source_root_path or row.input_path)
             agent_task_key = _task_agent_key(tcfg)
-            task_pi_dirs, agent_runtime_mode = _materialize_task_pi_runtime(
-                task_root=task_root_path or "",
-                agent_task_key=agent_task_key,
-                cfg=cfg,
-            )
-            cfg.task_pi_dirs = dict(task_pi_dirs)
-            cfg.task_pi_dir = cfg.role_pi_dir("workers")
+            secret = str((agent_task_key or {}).get("secret") or "").strip()
+            from app.service.pi_runtime import materialize_pi_runtime
+            materialize_pi_runtime(secret=secret)
+            agent_runtime_mode = "task_scoped" if secret else "global"
             (
                 agent_auth_json,
                 role_config_snapshot,
@@ -2093,7 +2090,7 @@ class TaskService:
             ) = _build_runtime_config_snapshots(
                 cfg=cfg,
                 agent_task_key=agent_task_key,
-                task_pi_dirs=task_pi_dirs,
+                task_pi_dirs={},
                 agent_runtime_mode=agent_runtime_mode,
             )
             row.task_config_json = {
