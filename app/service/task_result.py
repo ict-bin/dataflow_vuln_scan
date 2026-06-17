@@ -521,14 +521,13 @@ def _load_svc_config_from_db(db: Session, project_id: str) -> "object":
     try:
         from app.service.config_service import get_config_service
         from app.models import ServiceConfig as _ServiceConfig
-        cfg_dict = get_config_service().get_config()
+        cfg_dict = get_config_service().get_config(db)
         for _k in ("updated_at", "project_id"):
             cfg_dict.pop(_k, None)
         svc = _ServiceConfig(**cfg_dict)
         if not svc.workers.agents:
             logger.warning("global config has empty worker agents, falling back to file defaults")
-            fallback = _load_svc_config()
-            svc.workers = fallback.workers
+            svc.workers = _load_svc_config().workers
         svc.judges.agents = []
         return svc
     except Exception as _exc:
