@@ -326,8 +326,6 @@ def run_agent(
                 max_retries=max_retries, retry_delay=retry_delay,
                 pi_max_retries=pi_max_retries, pi_retry_delay=pi_retry_delay,
                 timeout_seconds=timeout_seconds,
-                agent_role=agent_role,
-                runtime_dir=runtime_dir,
             )
         except TimeoutError:
             timeout_failures += 1
