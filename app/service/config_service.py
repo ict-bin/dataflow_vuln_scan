@@ -114,14 +114,18 @@ def _normalize_config_blob(data: Dict[str, Any]) -> Dict[str, Any]:
 class ConfigService:
     def get_config(self, db: Session, project_id: str) -> dict:
         base_config = _load_runtime_default_config()
-        row = db.query(AppDvsProjectConfig).filter_by(project_id=project_id).first()
-        if row and row.config_json:
-            data = _deep_merge(base_config, row.config_json)
+        if project_id:
+            row = db.query(AppDvsProjectConfig).filter_by(project_id=project_id).first()
+            if row and row.config_json:
+                data = _deep_merge(base_config, row.config_json)
+            else:
+                data = dict(base_config)
+            data["updated_at"] = row.updated_at.isoformat() if (row and row.updated_at) else None
         else:
             data = dict(base_config)
+            data["updated_at"] = None
         data = _normalize_config_blob(data)
-        data["project_id"] = project_id
-        data["updated_at"] = row.updated_at.isoformat() if (row and row.updated_at) else None
+        data["project_id"] = project_id or ""
         return data
 
     def save_config(self, db: Session, project_id: str, config_data: dict) -> dict:

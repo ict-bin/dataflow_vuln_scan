@@ -24,9 +24,9 @@ class ConfigSaveRequest(BaseModel):
 
 
 @router.get("/config")
-def get_config(project_id: str = Query(...), db: Session = Depends(get_db)):
+def get_config(project_id: str = Query(default="", description="项目ID，为空时返回默认配置"), db: Session = Depends(get_db)):
     try:
-        return get_config_service().get_config(db, project_id)
+        return get_config_service().get_config(db, project_id or "")
     except SQLAlchemyError as exc:
         logger.error("get_config failed for project %s: %s", project_id, exc)
         raise HTTPException(status_code=503, detail="数据库暂时不可用，请稍后重试") from exc
