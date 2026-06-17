@@ -20,7 +20,7 @@ from app.models import normalize_max_rounds_exceeded_review_strategy
 
 logger = logging.getLogger("dvs.config_service")
 
-_CONFIG_CACHE_FILE = Path(os.environ.get("DVS_CONFIG_CACHE", "/tmp/dvs-global-config.json"))
+_CONFIG_CACHE_FILE = Path(os.environ.get("DVS_CONFIG_CACHE", "/data/app/secflow-app-dataflow-vuln-scan/global-config.json"))
 
 
 # ── deep merge helpers ────────────────────────────────────────────────────────
