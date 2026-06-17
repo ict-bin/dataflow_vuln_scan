@@ -137,7 +137,7 @@ class AppDvsPromptTemplate(Base):
 
 
 class AppDvsProjectConfig(Base):
-    """Per-project dataflow vulnerability mining configuration blob."""
+    """Global dataflow vulnerability mining configuration blob (project_id="" is the singleton)."""
     __tablename__ = "secflow_app_dvs_project_configs"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
