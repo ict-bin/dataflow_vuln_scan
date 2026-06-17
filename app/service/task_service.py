@@ -275,10 +275,8 @@ def _build_role_runtime_summary(
     role_name: str,
     role_config: Any,
     *,
-    runtime_dir: str | None,
     models_json: dict[str, Any] | None,
     settings_json: dict[str, Any] | None,
-    auth_json: dict[str, Any] | None,
 ) -> dict[str, Any]:
     agents = []
     for index, agent in enumerate(getattr(role_config, "agents", []) or []):
@@ -292,7 +290,6 @@ def _build_role_runtime_summary(
         agents.append(payload)
     summary = {
         "role_name": role_name,
-        "runtime_dir": str(runtime_dir or "").strip() or None,
         "default_model": str(getattr(role_config, "default_model", "") or "").strip() or None,
         "default_tools": list(getattr(role_config, "default_tools", []) or []),
         "default_thinking_level": str(getattr(role_config, "default_thinking_level", "") or "").strip() or None,
@@ -301,7 +298,6 @@ def _build_role_runtime_summary(
         "agents": agents,
         "models_json": models_json,
         "settings_json": settings_json,
-        "auth_json": auth_json,
     }
     stage_models = getattr(role_config, "stage_models", None)
     if isinstance(stage_models, dict) and stage_models:
@@ -322,34 +318,23 @@ def _build_runtime_config_snapshots(
         "workers": cfg.workers.model_dump(mode="json"),
         "judges": cfg.judges.model_dump(mode="json"),
     }
-    role_runtime_dirs = dict(task_pi_dirs or {})
-    runtime_files: dict[str, Any] = {}
+    global_pi = Path(os.environ.get("PI_CODING_AGENT_DIR", "/root/.pi/agent"))
+    models_json = _read_json_file(global_pi / "models.json")
+    settings_json = _read_json_file(global_pi / "settings.json")
+    runtime_files = {"models_json": models_json, "settings_json": settings_json}
     provider_runtime_summary: dict[str, Any] = {}
     llm_roles: dict[str, Any] = {}
     for role_name in _PI_RUNTIME_ROLES:
-        runtime_dir = str(role_runtime_dirs.get(role_name) or cfg.role_pi_dir(role_name) or "").strip()
-        runtime_path = Path(runtime_dir) if runtime_dir else None
-        models_json = _read_json_file(runtime_path / "models.json") if runtime_path else None
-        settings_json = _read_json_file(runtime_path / "settings.json") if runtime_path else None
-        auth_json = _read_json_file(runtime_path / "auth.json") if runtime_path else None
-        runtime_files[role_name] = {
-            "models_json": models_json,
-            "settings_json": settings_json,
-            "auth_json": auth_json,
-        }
         role_config = getattr(cfg, role_name)
         provider_runtime_summary[role_name] = _build_role_runtime_summary(
             role_name,
             role_config,
-            runtime_dir=runtime_dir,
             models_json=models_json,
             settings_json=settings_json,
-            auth_json=auth_json,
         )
         llm_roles[role_name] = {
             "config": role_config_snapshot.get(role_name),
-            "runtime_dir": runtime_dir or None,
-            "runtime_files": runtime_files[role_name],
+            "runtime_files": models_json is not None,
         }
     llm_binding_snapshot = {
         "version": 1,
@@ -2169,9 +2154,6 @@ class TaskService:
                     "agent_task_key_prefix": str((agent_task_key or {}).get("prefix") or "").strip() or None,
                     "agent_task_key_source": str((agent_task_key or {}).get("source") or "").strip() or None,
                     "agent_runtime_mode": agent_runtime_mode,
-                    "role_runtime_dirs": dict(task_pi_dirs),
-                    "workers": dict(task_pi_dirs).get("workers"),
-                    "judges": dict(task_pi_dirs).get("judges"),
                 },
             )
             db.commit()
