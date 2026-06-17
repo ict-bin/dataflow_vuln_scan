@@ -517,25 +517,22 @@ def _load_svc_config():
 
 
 def _load_svc_config_from_db(db: Session, project_id: str) -> "object":
-    """从数据库读取分析配置，构造 ServiceConfig；失败时回退到文件读取。"""
+    """Load the global service config (all projects share one config)."""
     try:
         from app.service.config_service import get_config_service
         from app.models import ServiceConfig as _ServiceConfig
-        cfg_dict = get_config_service().get_config(db, project_id)
+        cfg_dict = get_config_service().get_config()
         for _k in ("updated_at", "project_id"):
             cfg_dict.pop(_k, None)
         svc = _ServiceConfig(**cfg_dict)
         if not svc.workers.agents:
-            logger.warning(
-                "project config has empty worker agents (%s), falling back to file defaults",
-                project_id,
-            )
+            logger.warning("global config has empty worker agents, falling back to file defaults")
             fallback = _load_svc_config()
             svc.workers = fallback.workers
         svc.judges.agents = []
         return svc
     except Exception as _exc:
-        logger.warning("_load_svc_config_from_db failed (%s), falling back to file: %s", project_id, _exc)
+        logger.warning("_load_svc_config_from_db failed: %s, falling back to file", _exc)
         return _load_svc_config()
 
 
