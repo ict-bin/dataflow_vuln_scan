@@ -70,7 +70,7 @@ def regenerate_models_json(secret: str) -> None:
         return
     injected = 0
     for _key, cfg in providers.items():
-        if isinstance(cfg, dict):
+        if isinstance(cfg, dict) and _key == "gaiasec":
             cfg["apiKey"] = secret
             injected += 1
     _write_json(_GLOBAL_PI_DIR / "models.json", data)
