@@ -66,6 +66,7 @@ EXECUTION_SUPERVISOR_INTERVAL_SECONDS = float(os.environ.get("DVS_EXECUTION_SUPE
 EXECUTION_NO_PROGRESS_SECONDS = float(os.environ.get("DVS_EXECUTION_NO_PROGRESS_SECONDS", "1800"))
 IDLE_PI_REAPER_ENABLED = os.environ.get("DVS_IDLE_PI_REAPER_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
 IDLE_PI_REAPER_INTERVAL_SECONDS = max(5, int(os.environ.get("DVS_IDLE_PI_REAPER_INTERVAL_SECONDS", "30")))
+IDLE_PI_REAPER_CONFIRM_ROUNDS = max(1, int(os.environ.get("DVS_IDLE_PI_REAPER_CONFIRM_ROUNDS", "2")))
 
 DB_RETRY_ATTEMPTS = max(3, int(os.environ.get("DVS_DB_RETRY_ATTEMPTS", "3")))
 DB_RETRY_BASE_DELAY_SECONDS = float(os.environ.get("DVS_DB_RETRY_BASE_DELAY_SECONDS", "1"))
@@ -840,6 +841,7 @@ class TaskService:
         self._idle_pi_reaper_runs_total = 0
         self._idle_pi_reaper_killed_groups_total = 0
         self._idle_pi_reaper_failures_total = 0
+        self._idle_pi_reaper_idle_streak = 0
 
     def local_running_task_count(self) -> int:
         with _RUNNING_TASK_LOCK:
@@ -890,6 +892,7 @@ class TaskService:
             "idle_pi_reaper_runs_total": self._idle_pi_reaper_runs_total,
             "idle_pi_reaper_killed_groups_total": self._idle_pi_reaper_killed_groups_total,
             "idle_pi_reaper_failures_total": self._idle_pi_reaper_failures_total,
+            "idle_pi_reaper_idle_streak": self._idle_pi_reaper_idle_streak,
         }
 
     def start_supervisor(self) -> None:
@@ -1037,12 +1040,68 @@ class TaskService:
             return 0
 
     def _worker_idle_for_pi_reaping(self) -> bool:
-        return self.local_running_task_count() == 0
+        if self.local_running_task_count() != 0:
+            self._idle_pi_reaper_idle_streak = 0
+            return False
+        from app.db import get_db
+
+        db_gen = get_db()
+        db: Session = next(db_gen)
+        try:
+            active_owned = (
+                db.query(AppDvsTask)
+                .filter(
+                    AppDvsTask.is_deleted.is_(False),
+                    AppDvsTask.execution_owner_id == WORKER_ID,
+                    AppDvsTask.status.in_(("pending", "running")),
+                    AppDvsTask.dispatch_status.in_(("leased", "running", "dispatching")),
+                )
+                .count()
+            )
+        finally:
+            try:
+                next(db_gen)
+            except StopIteration:
+                pass
+        if int(active_owned or 0) != 0:
+            self._idle_pi_reaper_idle_streak = 0
+            return False
+        self._idle_pi_reaper_idle_streak += 1
+        return self._idle_pi_reaper_idle_streak >= IDLE_PI_REAPER_CONFIRM_ROUNDS
+
+    def _worker_has_residual_pi_for_reaping(self) -> bool:
+        from app.db import get_db
+        from app.service.agent_observability import AgentObservabilityService
+
+        db_gen = get_db()
+        db: Session = next(db_gen)
+        try:
+            snapshot = AgentObservabilityService().build_snapshot(db, project_id=None)
+            summary = dict(snapshot.get("summary") or {})
+            residual_count = int(
+                summary.get("residual_pi_process_count")
+                or summary.get("residual_processes")
+                or 0
+            )
+            unknown_count = int(
+                summary.get("unknown_pi_process_count")
+                or summary.get("unknown_processes")
+                or 0
+            )
+            return (residual_count + unknown_count) > 0
+        finally:
+            try:
+                next(db_gen)
+            except StopIteration:
+                pass
 
     def _idle_pi_reaper_loop(self) -> None:
         while not self._idle_pi_reaper_stop.wait(IDLE_PI_REAPER_INTERVAL_SECONDS):
             self._idle_pi_reaper_runs_total += 1
             if not self._worker_idle_for_pi_reaping():
+                continue
+            if not self._worker_has_residual_pi_for_reaping():
+                self._idle_pi_reaper_idle_streak = 0
                 continue
             logger.info("idle_pi_reaper_scan_started: worker_id=%s", WORKER_ID)
             try:
@@ -1053,6 +1112,7 @@ class TaskService:
                 self._last_idle_pi_reaper_at = _time.time()
                 self._last_idle_pi_reaper_killed_count = int(cleaned or 0)
                 self._idle_pi_reaper_killed_groups_total += int(cleaned or 0)
+                self._idle_pi_reaper_idle_streak = 0
                 logger.info(
                     "idle_pi_reaper_cleanup_finished: worker_id=%s cleaned_groups=%s",
                     WORKER_ID,

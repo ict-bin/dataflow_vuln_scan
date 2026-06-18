@@ -93,6 +93,38 @@ class RunAgentPromptFileTests(unittest.TestCase):
         self.assertEqual(killed, 1)
         kill_group.assert_called_once()
 
+    def test_cleanup_worker_runtime_processes_only_targets_agent_processes(self):
+        python_helper = agent_process.AgentProcessInfo(
+            pid=201,
+            ppid=10,
+            pgid=301,
+            comm="python3",
+            exe="python3",
+            cwd="/tmp/helper",
+            cmdline="python3 helper.py",
+            environ={},
+        )
+        pi_agent = agent_process.AgentProcessInfo(
+            pid=202,
+            ppid=10,
+            pgid=302,
+            comm="pi",
+            exe="node",
+            cwd="/tmp/dfa-task",
+            cmdline="npx pi --session /tmp/dfa-task/run/session.jsonl",
+            environ={"DVS_TASK_ID": "dvs_1"},
+        )
+        with patch.object(agent_process, "_iter_agent_processes", return_value=[pi_agent]), \
+             patch.object(agent_process, "_iter_runtime_processes", return_value=[python_helper, pi_agent]), \
+             patch.object(agent_process, "_read_pgid", return_value=999), \
+             patch.object(agent_process.os, "getpid", return_value=100), \
+             patch.object(agent_process.os, "getppid", return_value=99), \
+             patch.object(agent_process, "_kill_process_group", return_value=True) as kill_group:
+            killed = agent_process.cleanup_worker_runtime_processes(lambda _: None, label="test")
+        self.assertEqual(killed, 1)
+        killed_info = kill_group.call_args.kwargs["info"]
+        self.assertEqual(202, killed_info.pid)
+
     def test_agent_process_terminate_tree_force_cleans_group_after_exit(self):
         logs: list[str] = []
 

@@ -343,7 +343,7 @@ def cleanup_worker_runtime_processes(
     *,
     label: str,
 ) -> int:
-    """Clean all pi/node/python helper processes owned by this worker container.
+    """Clean all agent runtime helper processes owned by this worker container.
 
     This service is deployed with one task slot per worker.  Before taking a new
     task and after every terminal/cancel path, it is safer to remove any stale
@@ -355,7 +355,7 @@ def cleanup_worker_runtime_processes(
     protected_pids = {0, 1, current_pid, os.getppid()}
     killed = 0
     seen_pgids: set[tuple[str, int]] = set()
-    for info in _iter_runtime_processes():
+    for info in _iter_agent_processes():
         if info.pid in protected_pids:
             continue
         if info.pgid is not None and current_pgid is not None and info.pgid == current_pgid:

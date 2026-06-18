@@ -454,6 +454,66 @@ class TaskTimelineTests(unittest.TestCase):
             task_service_module._running_task_contexts.pop(task_id, None)
             db.close()
 
+    def test_idle_pi_reaper_requires_confirmed_idle_rounds(self):
+        def _override_get_db():
+            db = self._session()
+            try:
+                yield db
+            finally:
+                db.close()
+
+        with patch("app.db.get_db", _override_get_db):
+            idle_round_1 = self.service._worker_idle_for_pi_reaping()
+            idle_round_2 = self.service._worker_idle_for_pi_reaping()
+
+        self.assertFalse(idle_round_1)
+        self.assertTrue(idle_round_2)
+        self.assertEqual(2, self.service.idle_pi_reaper_status()["idle_pi_reaper_idle_streak"])
+
+    def test_idle_pi_reaper_skips_when_db_still_has_owned_active_task(self):
+        task_id = self._create_task()
+        db = self._session()
+        try:
+            row = db.query(AppDvsTask).filter_by(task_id=task_id).first()
+            row.status = "running"
+            row.execution_owner_id = task_service_module.WORKER_ID
+            row.dispatch_status = "running"
+            db.commit()
+
+            def _override_get_db():
+                db2 = self._session()
+                try:
+                    yield db2
+                finally:
+                    db2.close()
+
+            with patch("app.db.get_db", _override_get_db):
+                self.assertFalse(self.service._worker_idle_for_pi_reaping())
+            self.assertEqual(0, self.service.idle_pi_reaper_status()["idle_pi_reaper_idle_streak"])
+        finally:
+            db.close()
+
+    def test_idle_pi_reaper_loop_skips_cleanup_when_no_residual_pi(self):
+        self.service._running = True
+        self.service._idle_pi_reaper_stop = threading.Event()
+
+        wait_calls = {"count": 0}
+
+        class _StopEvent:
+            def wait(self, seconds):
+                del seconds
+                wait_calls["count"] += 1
+                return wait_calls["count"] > 1
+
+        cleanup_calls: list[str] = []
+        self.service._idle_pi_reaper_stop = _StopEvent()
+        with patch.object(self.service, "_worker_idle_for_pi_reaping", return_value=True), \
+             patch.object(self.service, "_worker_has_residual_pi_for_reaping", return_value=False), \
+             patch.object(self.service, "_cleanup_worker_runtime", side_effect=lambda **_: cleanup_calls.append("cleanup")):
+            self.service._idle_pi_reaper_loop()
+
+        self.assertEqual([], cleanup_calls)
+
     def test_recursive_orchestrator_abort_sets_cancel_event(self):
         orchestrator = Orchestrator(config=self._build_task_config())
 
