@@ -244,7 +244,16 @@ class TaskTimelineTests(unittest.TestCase):
         previous_runner = task_service_module._run_execute_task_in_thread
         try:
             task_service_module._run_execute_task_in_thread = fake_thread_runner
-            claimed = self.service.dispatch_once()
+            def _override_get_db():
+                db = self._session()
+                try:
+                    yield db
+                finally:
+                    db.close()
+
+            with patch.object(self.service, "_cleanup_worker_runtime", return_value=0), \
+                 patch("app.db.get_db", _override_get_db):
+                claimed = self.service.dispatch_once()
             self.assertEqual(task_id, claimed)
 
             db = self._session()
@@ -285,7 +294,16 @@ class TaskTimelineTests(unittest.TestCase):
         previous_runner = task_service_module._run_execute_task_in_thread
         try:
             task_service_module._run_execute_task_in_thread = fake_thread_runner
-            claimed = self.service.dispatch_once()
+            def _override_get_db():
+                db = self._session()
+                try:
+                    yield db
+                finally:
+                    db.close()
+
+            with patch.object(self.service, "_cleanup_worker_runtime", return_value=0), \
+                 patch("app.db.get_db", _override_get_db):
+                claimed = self.service.dispatch_once()
             self.assertEqual(task_id, claimed)
 
             db = self._session()
@@ -345,13 +363,37 @@ class TaskTimelineTests(unittest.TestCase):
             row.dispatch_status = "running"
             db.commit()
 
-            payload = self.service.cancel_task(db, task_id)
+            with patch.object(self.service, "_cleanup_worker_runtime", return_value=3):
+                payload = self.service.cancel_task(db, task_id)
 
             self.assertEqual("cancelled", payload["status"])
             timeline = self.service.get_task_timeline(db, task_id)
             self.assertEqual("task_cancelled", timeline["events"][0]["event_type"])
             self.assertEqual("cancelled", timeline["events"][0]["status"])
             self.assertEqual(2, timeline["events"][0]["control_version"])
+            self.assertEqual(3, timeline["events"][0]["payload"]["terminal_cleaned_groups"])
+        finally:
+            db.close()
+
+    def test_restart_task_records_preflight_cleanup_groups(self):
+        task_id = self._create_task()
+        db = self._session()
+        try:
+            row = db.query(AppDvsTask).filter_by(task_id=task_id).first()
+            row.status = "failed"
+            row.control_version = 2
+            row.execution_epoch = 4
+            row.execution_owner_id = "worker-a"
+            row.dispatch_status = "leased"
+            db.commit()
+
+            with patch.object(self.service, "_cleanup_worker_runtime", return_value=5):
+                payload = self.service.restart_task(db, task_id)
+
+            self.assertEqual("pending", payload["status"])
+            timeline = self.service.get_task_timeline(db, task_id)
+            self.assertEqual("task_retried", timeline["events"][0]["event_type"])
+            self.assertEqual(5, timeline["events"][0]["payload"]["preflight_cleaned_groups"])
         finally:
             db.close()
 
@@ -396,7 +438,8 @@ class TaskTimelineTests(unittest.TestCase):
             )
             task_service_module._running_task_contexts[task_id] = fake_ctx
             task_service_module._running_tasks[task_id] = fake_ctx
-            with patch("app.service.task_service.cleanup_task_agent_processes", return_value=2) as cleanup:
+            with patch.object(self.service, "_cleanup_worker_runtime", return_value=0), \
+                 patch("app.service.task_service.cleanup_task_agent_processes", return_value=2) as cleanup:
                 payload = self.service.cancel_task(db, task_id)
 
             self.assertEqual("cancelled", payload["status"])

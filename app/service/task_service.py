@@ -64,6 +64,8 @@ logger = logging.getLogger("dvs.task_service")
 TASK_EVENT_RENEW_INTERVAL_SECONDS = max(60, HEARTBEAT_INTERVAL_SECONDS * 6)
 EXECUTION_SUPERVISOR_INTERVAL_SECONDS = float(os.environ.get("DVS_EXECUTION_SUPERVISOR_INTERVAL_SECONDS", "5"))
 EXECUTION_NO_PROGRESS_SECONDS = float(os.environ.get("DVS_EXECUTION_NO_PROGRESS_SECONDS", "1800"))
+IDLE_PI_REAPER_ENABLED = os.environ.get("DVS_IDLE_PI_REAPER_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
+IDLE_PI_REAPER_INTERVAL_SECONDS = max(5, int(os.environ.get("DVS_IDLE_PI_REAPER_INTERVAL_SECONDS", "30")))
 
 DB_RETRY_ATTEMPTS = max(3, int(os.environ.get("DVS_DB_RETRY_ATTEMPTS", "3")))
 DB_RETRY_BASE_DELAY_SECONDS = float(os.environ.get("DVS_DB_RETRY_BASE_DELAY_SECONDS", "1"))
@@ -831,6 +833,13 @@ class TaskService:
         self._supervisor_stop = threading.Event()
         self._last_supervisor_run_at = 0.0
         self._last_supervisor_error: str | None = None
+        self._idle_pi_reaper_thread: threading.Thread | None = None
+        self._idle_pi_reaper_stop = threading.Event()
+        self._last_idle_pi_reaper_at = 0.0
+        self._last_idle_pi_reaper_killed_count = 0
+        self._idle_pi_reaper_runs_total = 0
+        self._idle_pi_reaper_killed_groups_total = 0
+        self._idle_pi_reaper_failures_total = 0
 
     def local_running_task_count(self) -> int:
         with _RUNNING_TASK_LOCK:
@@ -873,10 +882,21 @@ class TaskService:
             "last_error": self._last_supervisor_error,
         }
 
+    def idle_pi_reaper_status(self) -> dict[str, object]:
+        return {
+            "thread_alive": bool(self._idle_pi_reaper_thread and self._idle_pi_reaper_thread.is_alive()),
+            "last_idle_pi_reaper_at": self._last_idle_pi_reaper_at or None,
+            "last_idle_pi_reaper_killed_count": self._last_idle_pi_reaper_killed_count,
+            "idle_pi_reaper_runs_total": self._idle_pi_reaper_runs_total,
+            "idle_pi_reaper_killed_groups_total": self._idle_pi_reaper_killed_groups_total,
+            "idle_pi_reaper_failures_total": self._idle_pi_reaper_failures_total,
+        }
+
     def start_supervisor(self) -> None:
         if self._supervisor_thread and self._supervisor_thread.is_alive():
             return
         self._supervisor_stop = threading.Event()
+        self._idle_pi_reaper_stop = threading.Event()
 
         def _worker() -> None:
             from app.db import get_db
@@ -948,9 +968,13 @@ class TaskService:
 
         self._supervisor_thread = threading.Thread(target=_worker, name="dvs_execution_supervisor", daemon=True)
         self._supervisor_thread.start()
+        if IDLE_PI_REAPER_ENABLED and (self._idle_pi_reaper_thread is None or not self._idle_pi_reaper_thread.is_alive()):
+            self._idle_pi_reaper_thread = threading.Thread(target=self._idle_pi_reaper_loop, name="dvs_idle_pi_reaper", daemon=True)
+            self._idle_pi_reaper_thread.start()
 
     def stop_supervisor(self) -> None:
         self._supervisor_stop.set()
+        self._idle_pi_reaper_stop.set()
 
     def reconcile_orphaned_running_tasks(self, db: Session, *, limit: int = 100) -> int:
         from app.service.execution_coordinator import reclaim_orphaned_running_tasks
@@ -1012,13 +1036,39 @@ class TaskService:
             logger.warning("worker runtime cleanup failed [%s]: %s", label, exc, exc_info=True)
             return 0
 
+    def _worker_idle_for_pi_reaping(self) -> bool:
+        return self.local_running_task_count() == 0
+
+    def _idle_pi_reaper_loop(self) -> None:
+        while not self._idle_pi_reaper_stop.wait(IDLE_PI_REAPER_INTERVAL_SECONDS):
+            self._idle_pi_reaper_runs_total += 1
+            if not self._worker_idle_for_pi_reaping():
+                continue
+            logger.info("idle_pi_reaper_scan_started: worker_id=%s", WORKER_ID)
+            try:
+                cleaned = self._cleanup_worker_runtime(
+                    label="idle_pi_reaper",
+                    reason="idle_worker_reaper",
+                )
+                self._last_idle_pi_reaper_at = _time.time()
+                self._last_idle_pi_reaper_killed_count = int(cleaned or 0)
+                self._idle_pi_reaper_killed_groups_total += int(cleaned or 0)
+                logger.info(
+                    "idle_pi_reaper_cleanup_finished: worker_id=%s cleaned_groups=%s",
+                    WORKER_ID,
+                    cleaned,
+                )
+            except Exception as exc:
+                self._idle_pi_reaper_failures_total += 1
+                logger.warning("idle_pi_reaper_cleanup_failed: worker_id=%s error=%s", WORKER_ID, exc)
+
     def dispatch_once(self) -> str | None:
         if self.local_running_task_count() >= MAX_LOCAL_RUNNING_TASKS:
             from app.metrics import observe_local_event
 
             observe_local_event("dispatch_capacity_blocked", "skip")
             return None
-        self._cleanup_worker_runtime(label="pre_dispatch", reason="before_claim")
+        pre_dispatch_cleaned = self._cleanup_worker_runtime(label="pre_dispatch", reason="before_claim")
         from app.db import get_db
         db_gen = get_db()
         db: Session = next(db_gen)
@@ -1090,6 +1140,8 @@ class TaskService:
                         "epoch": claimed.epoch,
                         "control_version": claimed.control_version,
                         "dispatch_status": claimed.dispatch_status,
+                        "preflight_cleanup_scope": "pod_all_pi",
+                        "preflight_cleaned_groups": pre_dispatch_cleaned,
                     },
                 )
                 if auto_recovery is not None:
@@ -1483,7 +1535,7 @@ class TaskService:
         previous_error = str(row.error or "").strip() or None
         previous_epoch = int(row.execution_epoch or 0)
         self.request_cancel(task_id, reason="restart_requested")
-        self._cleanup_worker_runtime(label=f"task_restart:{task_id}", task_id=task_id, reason="restart_requested_before_pending")
+        restart_cleanup_groups = self._cleanup_worker_runtime(label=f"task_restart:{task_id}", task_id=task_id, reason="restart_requested_before_pending")
         task_root = _task_root(row)
         run_dir_removed = False
         output_dir_removed = False
@@ -1546,6 +1598,8 @@ class TaskService:
                 "run_dir_removed": run_dir_removed,
                 "output_dir_removed": output_dir_removed,
                 "cleanup_errors": cleanup_errors,
+                "preflight_cleanup_scope": "pod_all_pi",
+                "preflight_cleaned_groups": restart_cleanup_groups,
             },
         )
         db.commit(); db.refresh(row)
@@ -1559,7 +1613,7 @@ class TaskService:
 
     def cancel_task(self, db: Session, task_id: str) -> dict:
         row = self._get_or_404(db, task_id)
-        self._cleanup_worker_runtime(label=f"task_cancel:{task_id}", task_id=task_id, reason="cancel_requested")
+        cancel_cleanup_groups = self._cleanup_worker_runtime(label=f"task_cancel:{task_id}", task_id=task_id, reason="cancel_requested")
         if row.status in ("passed", "failed", "error", "cancelled"):
             return self._row_to_dict(row)
         ctx = _get_running_task_context(task_id)
@@ -1621,6 +1675,8 @@ class TaskService:
                 "cleanup_task_root": ctx.task_root if ctx is not None else None,
                 "cleanup_run_root": ctx.run_root if ctx is not None else None,
                 "control_version": int(row.control_version or 0),
+                "terminal_cleanup_scope": "pod_all_pi",
+                "terminal_cleaned_groups": cancel_cleanup_groups,
             },
         )
         db.commit(); db.refresh(row)
@@ -2332,7 +2388,30 @@ class TaskService:
             log_event(logger, logging.INFO, "terminal state committed", event="task_terminal_committed",
                       task_id=task_id, owner_id=WORKER_ID, epoch=epoch, control_version=control_version,
                       status=terminal_status)
-            self._cleanup_worker_runtime(label=f"task_terminal:{task_id}", task_id=task_id, reason="task_terminal_committed")
+            terminal_cleaned_groups = self._cleanup_worker_runtime(label=f"task_terminal:{task_id}", task_id=task_id, reason="task_terminal_committed")
+            def _record_terminal_cleanup(_db: Session, _attempt: int):
+                refreshed = _db.query(AppDvsTask).filter_by(task_id=task_id).first()
+                if refreshed is not None:
+                    _record_task_event(
+                        _db,
+                        row=refreshed,
+                        event_type="task_terminal_pi_cleanup_finished",
+                        message="任务终态前已执行全量 PI 清理",
+                        level="warning" if terminal_cleaned_groups else "info",
+                        status=refreshed.status,
+                        worker_id=WORKER_ID,
+                        execution_owner_id=WORKER_ID,
+                        execution_epoch=epoch,
+                        control_version=control_version,
+                        payload={
+                            "cleanup_scope": "pod_all_pi",
+                            "terminal_status": refreshed.status,
+                            "cleaned_groups": terminal_cleaned_groups,
+                        },
+                    )
+                    _db.commit()
+                return None
+            _run_db_write_with_retries("record_terminal_cleanup", _record_terminal_cleanup)
 
         except Exception as exc:
             from app.metrics import observe_local_event

@@ -2,6 +2,7 @@ import sys
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+from types import SimpleNamespace
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -83,6 +84,34 @@ class AgentObservabilityTests(unittest.TestCase):
             self.assertIn("last_scanned_at", pod)
             self.assertEqual(1, pod["unknown_process_count"])
             self.assertTrue(snapshot["processes"][0]["kill_allowed"])
+        finally:
+            db.close()
+
+    def test_build_snapshot_exposes_idle_reaper_fields(self):
+        self._insert_task(task_id="dvs_obs_residual", status="cancelled")
+        db = self._session()
+        try:
+            with patch("app.service.agent_observability._iter_agent_processes", return_value=[
+                {
+                    "pid": 102,
+                    "ppid": 1,
+                    "pgid": 102,
+                    "command": "npx pi worker",
+                    "cwd": "/tmp/output/dvs_obs_residual/run",
+                    "rss_bytes": 2048,
+                }
+            ]), patch("app.service.task_service.get_task_service", return_value=SimpleNamespace(
+                idle_pi_reaper_status=lambda: {
+                    "last_idle_pi_reaper_at": 100.0,
+                    "last_idle_pi_reaper_killed_count": 4,
+                }
+            )):
+                snapshot = self.service.build_snapshot(db, project_id="p1")
+            self.assertEqual(1, snapshot["summary"]["total_pi_process_count"])
+            self.assertTrue(snapshot["summary"]["residual_pi_detected"])
+            self.assertEqual(100.0, snapshot["summary"]["last_idle_pi_reaper_at"])
+            self.assertEqual(4, snapshot["summary"]["last_idle_pi_reaper_killed_count"])
+            self.assertTrue(snapshot["pods"][0]["residual_pi_detected"])
         finally:
             db.close()
 

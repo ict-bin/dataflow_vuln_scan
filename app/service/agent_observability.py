@@ -298,7 +298,7 @@ class AgentObservabilityService:
             task_row = task_by_id.get(task_id or "")
             task_name = task_row.task_name if task_row is not None else None
             task_status = str(task_row.status or "") if task_row is not None else None
-            stage_key = str(task_row.current_stage or "") if task_row is not None else None
+            stage_key = str(getattr(task_row, "current_stage", "") or "") if task_row is not None else None
             role_kind = _extract_role_kind(str(proc.get("command") or ""))
             if task_row is not None and str(task_status or "").strip() == "running":
                 owner_kind = "tracked"
@@ -351,7 +351,7 @@ class AgentObservabilityService:
                 "task_id": row.task_id,
                 "task_name": row.task_name,
                 "task_status": row.status,
-                "stage_key": str(row.current_stage or ""),
+                "stage_key": str(getattr(row, "current_stage", "") or ""),
                 "pod_name": POD_NAME,
                 "process_count": len(linked_processes),
                 "agent_roles": sorted({str(item.get("role_kind") or "") for item in linked_processes if item.get("role_kind")}),
@@ -363,6 +363,13 @@ class AgentObservabilityService:
         residual_process_count = len([item for item in processes if item.get("owner_kind") == "residual"])
         unknown_process_count = len([item for item in processes if item.get("owner_kind") == "unknown"])
         scanned_at = time.time()
+        idle_reaper_state: dict[str, Any] = {}
+        with contextlib.suppress(Exception):
+            from app.service.task_service import get_task_service
+
+            idle_reaper_state = dict(get_task_service().idle_pi_reaper_status() or {})
+        total_pi_process_count = len(processes)
+        residual_pi_detected = total_pi_process_count > tracked_process_count
         return {
             "summary": {
                 "pod_name": POD_NAME,
@@ -371,6 +378,12 @@ class AgentObservabilityService:
                 "unknown_processes": unknown_process_count,
                 "killable_residual_processes": len([item for item in processes if item.get("owner_kind") == "residual" and item.get("kill_allowed")]),
                 "killable_unknown_processes": len([item for item in processes if item.get("owner_kind") == "unknown" and item.get("kill_allowed")]),
+                "total_pi_process_count": total_pi_process_count,
+                "residual_pi_process_count": residual_process_count,
+                "unknown_pi_process_count": unknown_process_count,
+                "residual_pi_detected": residual_pi_detected,
+                "last_idle_pi_reaper_at": idle_reaper_state.get("last_idle_pi_reaper_at"),
+                "last_idle_pi_reaper_killed_count": int(idle_reaper_state.get("last_idle_pi_reaper_killed_count") or 0),
                 "scanned_at": scanned_at,
                 "scan_errors": 0,
             },
@@ -384,9 +397,15 @@ class AgentObservabilityService:
                 "tracked_process_count": tracked_process_count,
                 "residual_process_count": residual_process_count,
                 "unknown_process_count": unknown_process_count,
+                "total_pi_process_count": total_pi_process_count,
+                "residual_pi_process_count": residual_process_count,
+                "unknown_pi_process_count": unknown_process_count,
+                "residual_pi_detected": residual_pi_detected,
                 "task_count": len(tasks),
                 "running_task_count": len([item for item in tasks if str(item.get("ownership_status") or "") == "tracked"]),
                 "residual_task_count": len([item for item in tasks if str(item.get("ownership_status") or "") == "residual"]),
+                "last_idle_pi_reaper_at": idle_reaper_state.get("last_idle_pi_reaper_at"),
+                "last_idle_pi_reaper_killed_count": int(idle_reaper_state.get("last_idle_pi_reaper_killed_count") or 0),
                 "last_scanned_at": scanned_at,
                 "scan_errors": 0,
                 "processes": processes,

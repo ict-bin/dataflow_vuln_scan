@@ -218,9 +218,15 @@ class AgentPodSnapshotResponse(BaseModel):
     tracked_process_count: int = 0
     residual_process_count: int = 0
     unknown_process_count: int = 0
+    total_pi_process_count: int = 0
+    residual_pi_process_count: int = 0
+    unknown_pi_process_count: int = 0
+    residual_pi_detected: bool = False
     task_count: int = 0
     running_task_count: int = 0
     residual_task_count: int = 0
+    last_idle_pi_reaper_at: Optional[float] = None
+    last_idle_pi_reaper_killed_count: int = 0
     last_scanned_at: Optional[float] = None
     scan_errors: int = 0
     processes: list[AgentProcessSnapshotResponse] = Field(default_factory=list)
@@ -234,6 +240,12 @@ class AgentObservabilitySummaryResponse(BaseModel):
     unknown_processes: int = 0
     killable_residual_processes: int = 0
     killable_unknown_processes: int = 0
+    total_pi_process_count: int = 0
+    residual_pi_process_count: int = 0
+    unknown_pi_process_count: int = 0
+    residual_pi_detected: bool = False
+    last_idle_pi_reaper_at: Optional[float] = None
+    last_idle_pi_reaper_killed_count: int = 0
     scanned_at: Optional[float] = None
     scan_errors: int = 0
     aggregate_mode: Optional[str] = None
