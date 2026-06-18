@@ -34,10 +34,19 @@ def emit_agent_runtime_events(
             error=str(getattr(result, "error", "") or ""),
             **payload,
         )
-    if getattr(result, "context_overflow_retrying", False):
+    if getattr(result, "fatal_retry_event_due", False):
+        emit(
+            "task_fatal_retrying",
+            retry_delay_seconds=int(getattr(result, "retry_delay_seconds", 30) or 30),
+            consecutive_fatal_retry_count=int(getattr(result, "consecutive_fatal_retry_count", 0) or 0),
+            reason=str(getattr(result, "fatal_retry_reason", "") or ""),
+            **payload,
+        )
+    if getattr(result, "context_overflow_retrying", False) and getattr(result, "context_overflow_retry_event_due", False):
         emit(
             "task_context_overflow_retrying",
             proxy_reserved_tokens=proxy_reserved_tokens,
+            context_overflow_retry_count=int(getattr(result, "context_overflow_retry_count", 0) or 0),
             **payload,
         )
     if getattr(result, "context_overflow_failed_after_compaction", False):

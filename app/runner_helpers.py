@@ -73,6 +73,9 @@ class AgentResult:
         self.api_retry_event_due: bool = False
         self.consecutive_api_retry_count: int = 0
         self.api_retry_reason: str | None = None
+        self.fatal_retry_event_due: bool = False
+        self.consecutive_fatal_retry_count: int = 0
+        self.fatal_retry_reason: str | None = None
         self.agent_role: str | None = None
         self.runtime_dir: str | None = None
         self.context_window: int = 0
@@ -82,6 +85,8 @@ class AgentResult:
         self.context_budget_exceeded_preflight: bool = False
         self.context_overflow_retrying: bool = False
         self.context_overflow_failed_after_compaction: bool = False
+        self.context_overflow_retry_count: int = 0
+        self.context_overflow_retry_event_due: bool = False
 
 
 class _PiProcessError(Exception):
@@ -166,6 +171,24 @@ def _should_emit_api_retry_event(consecutive_retries: int, delay_seconds: float)
     retries = max(0, int(consecutive_retries or 0))
     delay = max(0.0, float(delay_seconds or 0))
     return delay >= 30.0 and retries > 0 and retries % 10 == 0
+
+
+def _should_emit_infinite_retry_event(streak: int) -> bool:
+    streak = max(0, int(streak or 0))
+    return streak > 0 and streak % 10 == 0
+
+
+def _mark_infinite_retry(result: AgentResult, *, kind: str, count: int, reason: str, delay_seconds: float = 30.0) -> None:
+    result.fatal = False
+    result.retry_delay_seconds = int(delay_seconds)
+    if kind == "fatal":
+        result.consecutive_fatal_retry_count = int(count)
+        result.fatal_retry_reason = reason
+        result.fatal_retry_event_due = _should_emit_infinite_retry_event(count)
+    else:
+        result.context_overflow_retry_count = int(count)
+        result.context_overflow_retrying = True
+        result.context_overflow_retry_event_due = _should_emit_infinite_retry_event(count)
 
 
 def _cmd_preview(args: list[str]) -> str:
@@ -466,9 +489,13 @@ def _build_agent_env(
 def _is_fatal_error(result: AgentResult) -> bool:
     if result.fatal:
         return True
+    if _is_context_overflow_error(result.error):
+        return False
     error_text = (result.error or "").lower()
     fatal_patterns = [
-        "model not found", "unauthorized", "invalid api key",
+        "model not found", "invalid model", "unknown model",
+        "model does not exist", "unsupported model",
+        "unauthorized", "invalid api key",
         "module not found", "no such file", "permission denied",
     ]
     return any(pattern in error_text for pattern in fatal_patterns)

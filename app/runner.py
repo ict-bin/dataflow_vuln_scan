@@ -50,7 +50,9 @@ from .runner_helpers import (
     _find_pi_command,
     _resolve_pi_model,
     _should_emit_api_retry_event,
+    _should_emit_infinite_retry_event,
     _should_retry,
+    _mark_infinite_retry,
 )
 
 logger = logging.getLogger("dvs.runner")
@@ -107,19 +109,25 @@ def _run_with_context_overflow_recovery(
     runtime_dir: str | None = None,
 ) -> AgentResult:
     context_window = _model_context_window(model)
-    preflight_limit = _preflight_context_token_limit(context_window, 0)
-    single_input_tokens = _single_input_token_estimate(system_prompt, prompt, post_skill_prompt)
-    if single_input_tokens > preflight_limit:
-        preflight_result = AgentResult()
-        preflight_result.agent_role = agent_role
-        preflight_result.runtime_dir = runtime_dir
-        preflight_result.context_window = context_window
-        preflight_result.context_budget_exceeded_preflight = True
-        if session_file:
-            compaction_args = _build_args(
-                pi_cmd, model, tools, thinking_level, session_file,
-            )
-            compaction_result = _run_with_pi_retry(
+    overflow_attempts = 0
+    fatal_attempts = 0
+    while True:
+        preflight_limit = _preflight_context_token_limit(context_window, 0)
+        single_input_tokens = _single_input_token_estimate(system_prompt, prompt, post_skill_prompt)
+        if single_input_tokens > preflight_limit:
+            if not session_file:
+                preflight_result = AgentResult()
+                preflight_result.agent_role = agent_role
+                preflight_result.runtime_dir = runtime_dir
+                preflight_result.context_window = context_window
+                preflight_result.context_budget_exceeded_preflight = True
+                preflight_result.context_overflow_failed_after_compaction = True
+                preflight_result.error = _format_context_overflow_failure(
+                    model, system_prompt, prompt, post_skill_prompt, "preflight_context_length_exceeded",
+                )
+                return preflight_result
+            compaction_args = _build_args(pi_cmd, model, tools, thinking_level, session_file)
+            _run_with_pi_retry(
                 args=compaction_args,
                 cwd=cwd,
                 env=env,
@@ -133,78 +141,50 @@ def _run_with_context_overflow_recovery(
                 pi_retry_delay=pi_retry_delay,
                 timeout_seconds=timeout_seconds,
             )
-            preflight_result.compaction_requested = True
-            preflight_result.compaction_completed = not bool(compaction_result.error)
-            single_input_tokens = _single_input_token_estimate(system_prompt, prompt, post_skill_prompt)
-            if single_input_tokens <= preflight_limit:
-                result = _run_with_pi_retry(
-                    args=args,
-                    cwd=cwd,
-                    env=env,
-                    prompt=prompt,
-                    post_skill_prompt=post_skill_prompt,
-                    cancel_event=cancel_event,
-                    on_stream=on_stream,
-                    max_retries=max_retries,
-                    retry_delay=retry_delay,
-                    pi_max_retries=pi_max_retries,
-                    pi_retry_delay=pi_retry_delay,
-                    timeout_seconds=timeout_seconds,
-                )
-                result.agent_role = agent_role
-                result.runtime_dir = runtime_dir
-                result.context_window = context_window
-                result.context_budget_exceeded_preflight = True
+            overflow_attempts += 1
+            continue
+        result = _run_with_pi_retry(
+            args=args,
+            cwd=cwd,
+            env=env,
+            prompt=prompt,
+            post_skill_prompt=post_skill_prompt,
+            cancel_event=cancel_event,
+            on_stream=on_stream,
+            max_retries=max_retries,
+            retry_delay=retry_delay,
+            pi_max_retries=pi_max_retries,
+            pi_retry_delay=pi_retry_delay,
+            timeout_seconds=timeout_seconds,
+        )
+        result.agent_role = agent_role
+        result.runtime_dir = runtime_dir
+        result.context_window = context_window
+        if not _is_context_overflow_error(result.error):
+            if overflow_attempts > 0:
                 result.compaction_requested = True
-                result.compaction_completed = preflight_result.compaction_completed
-                return result
-        preflight_result.context_overflow_failed_after_compaction = True
-        preflight_result.error = _format_context_overflow_failure(
-            model, system_prompt, prompt, post_skill_prompt, "preflight_context_length_exceeded",
-        )
-        return preflight_result
-
-    result = _run_with_pi_retry(
-        args=args,
-        cwd=cwd,
-        env=env,
-        prompt=prompt,
-        post_skill_prompt=post_skill_prompt,
-        cancel_event=cancel_event,
-        on_stream=on_stream,
-        max_retries=max_retries,
-        retry_delay=retry_delay,
-        pi_max_retries=pi_max_retries,
-        pi_retry_delay=pi_retry_delay,
-        timeout_seconds=timeout_seconds,
-    )
-    result.agent_role = agent_role
-    result.runtime_dir = runtime_dir
-    result.context_window = context_window
-    if not _is_context_overflow_error(result.error):
-        return result
-
-    overflow = _parse_context_overflow_details(result.error)
-    context_window = overflow.get("context_length") or _model_context_window(model)
-    proxy_reserved_tokens = overflow.get("proxy_reserved_tokens", 0)
-    result.context_window = context_window
-    result.proxy_reserved_tokens = proxy_reserved_tokens
-    single_input_tokens = _single_input_token_estimate(system_prompt, prompt, post_skill_prompt)
-    single_input_limit = _preflight_context_token_limit(context_window, proxy_reserved_tokens)
-    compaction_attempted = False
-
-    if session_file:
-        compaction_attempted = True
-        msg = (
-            "检测到智能体单次请求触发上下文超限，先触发一次会话自动压缩，"
-            "随后重试原请求。"
-        )
-        _log_warn(msg)
-        if on_stream:
-            on_stream(f"\n⚠️ {msg}\n")
-        compaction_args = _build_args(
-            pi_cmd, model, tools, thinking_level, session_file,
-        )
+                result.compaction_completed = True
+                result.context_overflow_retrying = True
+                result.context_overflow_retry_count = overflow_attempts
+                result.context_overflow_retry_event_due = _should_emit_infinite_retry_event(overflow_attempts)
+            return result
+        overflow = _parse_context_overflow_details(result.error)
+        context_window = overflow.get("context_length") or _model_context_window(model)
+        proxy_reserved_tokens = overflow.get("proxy_reserved_tokens", 0)
+        result.context_window = context_window
+        result.proxy_reserved_tokens = proxy_reserved_tokens
+        if not session_file:
+            result.context_overflow_failed_after_compaction = True
+            return result
+        overflow_attempts += 1
+        result.compaction_requested = True
+        result.compaction_completed = True
+        result.context_overflow_retrying = True
+        result.context_overflow_retry_count = overflow_attempts
+        result.context_overflow_retry_event_due = _should_emit_infinite_retry_event(overflow_attempts)
+        if result.context_overflow_retry_event_due:
+            _log_warn(f"overflow 无限压缩重试 [{overflow_attempts}], 继续重试: {(result.error or '')[:200]}")
+        compaction_args = _build_args(pi_cmd, model, tools, thinking_level, session_file)
         _run_with_pi_retry(
             args=compaction_args,
             cwd=cwd,
@@ -219,35 +199,7 @@ def _run_with_context_overflow_recovery(
             pi_retry_delay=pi_retry_delay,
             timeout_seconds=timeout_seconds,
         )
-        result.compaction_requested = True
-        result.compaction_completed = True
-
-    if single_input_tokens > single_input_limit:
-        result.error = _format_context_overflow_failure(
-            model, system_prompt, prompt, post_skill_prompt, result.error,
-        )
-        result.context_overflow_failed_after_compaction = True
-        return result
-
-    if not session_file:
-        return result
-
-    retry_result = _run_with_pi_retry(
-        args=args, cwd=cwd, env=env, prompt=prompt,
-        post_skill_prompt=post_skill_prompt,
-        cancel_event=cancel_event, on_stream=on_stream,
-        max_retries=max_retries, retry_delay=retry_delay,
-        pi_max_retries=pi_max_retries, pi_retry_delay=pi_retry_delay,
-        timeout_seconds=timeout_seconds,
-    )
-    retry_result.agent_role = agent_role
-    retry_result.runtime_dir = runtime_dir
-    retry_result.context_window = context_window
-    retry_result.proxy_reserved_tokens = proxy_reserved_tokens
-    retry_result.compaction_requested = compaction_attempted
-    retry_result.compaction_completed = compaction_attempted
-    retry_result.context_overflow_retrying = True
-    return retry_result
+        continue
 
 
 # ─── Public interface ─────────────────────────────────────────────────────────
@@ -326,6 +278,8 @@ def run_agent(
                 max_retries=max_retries, retry_delay=retry_delay,
                 pi_max_retries=pi_max_retries, pi_retry_delay=pi_retry_delay,
                 timeout_seconds=timeout_seconds,
+                agent_role=str(task_context.get("agent_role") or "").strip() or None,
+                runtime_dir=str(task_context.get("task_pi_dir") or "").strip() or None,
             )
         except TimeoutError:
             timeout_failures += 1
@@ -378,6 +332,7 @@ def _run_with_pi_retry(
         return r
 
     pi_attempt = 0
+    fatal_retry_count = 0
 
     while True:
         if cancel_event and cancel_event.is_set():
@@ -394,10 +349,16 @@ def _run_with_pi_retry(
                 timeout_seconds=timeout_seconds,
             )
 
-            if _is_fatal_error(result):
-                result.fatal = True
-                _log_error(f"pi fatal error (unretryable): {result.error}")
-                return result
+            if _is_fatal_error(result) or result.fatal:
+                fatal_retry_count += 1
+                reason = str(result.error or "").strip() or "fatal error"
+                _mark_infinite_retry(result, kind="fatal", count=fatal_retry_count, reason=reason)
+                _log_warn(f"pi infrastructure error [{fatal_retry_count}/inf], retry in 30s: {reason[:200]}")
+                if on_stream:
+                    on_stream("\n⚠️ PI infrastructure error, retry in 30s...\n")
+                if _sleep_with_cancel(30.0, cancel_event):
+                    return result
+                continue
 
             if _is_pi_crash(result):
                 raise _PiProcessError(
@@ -417,15 +378,23 @@ def _run_with_pi_retry(
                 return r
 
             err_lower = str(exc).lower()
-            fatal_detected = False
+            fatal_handled = False
             for pattern in _FATAL_PATTERNS:
                 if all(p in err_lower for p in pattern):
-                    _log_error(f"pi fatal error (unretryable) [{label}]: {exc}")
+                    fatal_retry_count += 1
                     r = AgentResult()
                     r.error = str(exc)
                     r.exit_code = -1
-                    r.fatal = True
-                    return r
+                    _mark_infinite_retry(r, kind="fatal", count=fatal_retry_count, reason=str(exc))
+                    _log_warn(f"pi infrastructure error [{fatal_retry_count}/inf], retry in 30s: {exc}")
+                    if on_stream:
+                        on_stream("\n⚠️ PI infrastructure error, retry in 30s...\n")
+                    if _sleep_with_cancel(30.0, cancel_event):
+                        return r
+                    fatal_handled = True
+                    break
+            if fatal_handled:
+                continue
 
             if _should_retry(attempt=pi_attempt, max_retries=pi_max_retries,
                              cancel_event=cancel_event):

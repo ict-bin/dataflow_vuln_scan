@@ -1750,6 +1750,7 @@ class TaskService:
                             "error": "task_runtime_error",
                             "task_rate_limited_retrying": "task_rate_limited_retrying",
                             "task_api_retrying": "task_api_retrying",
+                            "task_fatal_retrying": "task_fatal_retrying",
                             "task_context_compaction_requested": "task_context_compaction_requested",
                             "task_context_compaction_completed": "task_context_compaction_completed",
                             "task_context_budget_exceeded_preflight": "task_context_budget_exceeded_preflight",
@@ -1775,10 +1776,11 @@ class TaskService:
                             "task_runtime_error": str(event_data.get("error") or "分析过程中出现错误"),
                             "task_rate_limited_retrying": "智能体请求被 429 限流，30 秒后自动重试",
                             "task_api_retrying": "智能体 API 错误，已进入无限重试",
+                            "task_fatal_retrying": "智能体基础设施异常，已进入 30 秒固定间隔重试",
                             "task_context_compaction_requested": "智能体上下文超限，已请求会话压缩",
                             "task_context_compaction_completed": "智能体会话压缩已完成",
                             "task_context_budget_exceeded_preflight": "智能体请求在发送前已判定超出上下文预算",
-                            "task_context_overflow_retrying": "智能体上下文超限，压缩后正在重试",
+                            "task_context_overflow_retrying": "智能体上下文持续超限，已进入无限压缩重试",
                             "task_context_overflow_failed_after_compaction": "智能体上下文压缩后仍超出预算，请求已终止",
                         }.get(mapped_event_type, f"运行事件: {mapped_event_type}")
                         _record_task_event(

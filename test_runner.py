@@ -24,6 +24,24 @@ def _overflow_result() -> runner.AgentResult:
 
 
 class RunAgentPromptFileTests(unittest.TestCase):
+    def test_is_fatal_error_ignores_context_overflow_wrapped_as_invalid_request(self):
+        result = runner.AgentResult()
+        result.error = (
+            "400 litellm.BadRequestError: Hosted_vllmException - "
+            '{"object":"error","message":"Prefiller\'s maximum context length is 131072 tokens, '
+            'however the input has 127564 tokens and the proxy reserves 4096 safety-buffer tokens '
+            'after chat template rendering. Please reduce the length of the input.",'
+            '"type":"invalid_request_error","code":"prefill_context_length_exceeded"}. '
+            "Received Model Group=zai-org/GLM-5.1-180K"
+        )
+        self.assertTrue(runner._is_context_overflow_error(result.error))
+        self.assertFalse(runner._is_fatal_error(result))
+
+    def test_is_fatal_error_still_matches_real_model_config_errors(self):
+        result = runner.AgentResult()
+        result.error = "model not found"
+        self.assertTrue(runner._is_fatal_error(result))
+
     def test_cleanup_orphan_pi_processes_ignores_live_parent(self):
         orphan = agent_process.AgentProcessInfo(
             pid=101,
@@ -233,6 +251,7 @@ class RunAgentPromptFileTests(unittest.TestCase):
                         max_retries=0,
                         pi_max_retries=0,
                         task_context={"task_pi_dir": "/tmp/runtime/workers", "agent_role": "workers"},
+                        env={"PI_CODING_AGENT_DIR": "/tmp/runtime/workers"},
                     )
 
         self.assertEqual(result.output, "ok")
@@ -241,6 +260,8 @@ class RunAgentPromptFileTests(unittest.TestCase):
         self.assertIn("compaction", prompts[1].lower())
         self.assertEqual(prompts[2], "summary")
         self.assertTrue(result.context_overflow_retrying)
+        self.assertEqual(1, result.context_overflow_retry_count)
+        self.assertFalse(result.context_overflow_retry_event_due)
         self.assertEqual("/tmp/runtime/workers", result.runtime_dir)
         self.assertEqual("workers", result.agent_role)
 
@@ -257,6 +278,7 @@ class RunAgentPromptFileTests(unittest.TestCase):
                     max_retries=0,
                     pi_max_retries=0,
                     task_context={"task_pi_dir": "/tmp/runtime/workers", "agent_role": "workers"},
+                    env={"PI_CODING_AGENT_DIR": "/tmp/runtime/workers"},
                 )
 
         run_with_pi_retry.assert_not_called()
@@ -275,6 +297,8 @@ class RunAgentPromptFileTests(unittest.TestCase):
         result.compaction_completed = True
         result.context_budget_exceeded_preflight = True
         result.context_overflow_retrying = True
+        result.context_overflow_retry_event_due = True
+        result.context_overflow_retry_count = 10
         result.context_overflow_failed_after_compaction = True
         result.error = "overflow"
 
