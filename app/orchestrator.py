@@ -53,6 +53,7 @@ from .param_analyzer import analyze as analyze_param_semantics
 from .scheduler import TaintState, TaintEntry, ValidationCache, _normalize_taint_signature
 from .global_cache import GlobalCache, compute_func_hash
 from .vuln_workflow import build_function_summary_from_result
+from .taint_source_identifier import autodetect_taint_sources, needs_taint_autodetect
 
 logger = logging.getLogger("dvs.orchestrator")
 from .judge_runner import JudgeMixin
@@ -749,6 +750,35 @@ class Orchestrator(JudgeMixin):
         self._emit("trace_start", root_task_id,
                    function=cfg.function_name, source_file=cfg.source_file,
                    depth=0, max_depth=max_depth)
+
+        # ── 污点源自动识别（depth=0 预阶段，常开）───────────────────────
+        # 任务未提供污点信息（taint_params/taint_details 为空或仅为 all）时，
+        # 先用一轮独立系统提示词的 pi agent（嵌入完整函数体）判断外部输入，
+        # 把识别结果补充到根任务输入，再接续现有 BFS 污点追踪流程。
+        autodetect_tokens = TokenUsage()
+        if needs_taint_autodetect(cfg):
+            self._emit("taint_autodetect_start", root_task_id,
+                       function=cfg.function_name, source_file=cfg.source_file, depth=0)
+            _ad = autodetect_taint_sources(
+                cfg,
+                target_dir=target_dir,
+                session_file=str(root_sessions_dir / "d00-taint-source-id.jsonl"),
+                on_event=self.on_event,
+                cancel_event=self._cancel_event,
+            )
+            autodetect_tokens += _ad.token_usage
+            if _ad.taint_params:
+                cfg.taint_params = _ad.taint_params
+                if _ad.taint_details:
+                    cfg.taint_details = _ad.taint_details
+                self._emit("taint_autodetect_done", root_task_id,
+                           function=cfg.function_name, taints=_ad.taint_params,
+                           count=len(_ad.taint_params), depth=0)
+            else:
+                self._emit("taint_autodetect_empty", root_task_id,
+                           function=cfg.function_name,
+                           no_external_input=_ad.no_external_input,
+                           error=_ad.error, depth=0)
 
         # 根任务入队
         queue.put((cfg.function_name, cfg.source_file, cfg.line_hint,
@@ -1472,6 +1502,7 @@ class Orchestrator(JudgeMixin):
                 combined_rounds.extend(item.rounds or [])
                 combined_tokens += item.total_tokens
                 total_duration_ms += float(item.total_duration_ms or 0.0)
+            combined_tokens += autodetect_tokens
             root_result.rounds = combined_rounds
             root_result.total_tokens = combined_tokens
             if total_duration_ms > 0:

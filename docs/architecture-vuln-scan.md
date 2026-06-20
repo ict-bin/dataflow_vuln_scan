@@ -24,6 +24,40 @@
   - 某行函数调用参数；
   - 局部变量/字段/全局对象。
 
+## 污点源自动识别（depth=0 预阶段，常开）
+
+任务**允许不提供任何污点信息**。当 `taint_details` 无有效 symbol 且 `taint_params` 为空或仅为 `all` 哨兵时，系统会在根函数（depth=0）进入 BFS 污点追踪**之前**，先自动识别污点源：
+
+1. 用 `extract_func` 提取根函数**完整函数体**（带绝对行号）。
+2. 拉起**一个独立系统提示词的 pi agent**（`prompts/taint-source-id/default.md`），把完整函数体嵌入 prompt，**单轮会话、无 Judge**。该 agent 的模型/工具/思考等级/重试与 Worker 完全一致（复用 `workers.agents[0]`），仅系统提示词不同。
+3. agent 只判断「哪些数据来自外部 / 不可信来源」，不做传播追踪、不做漏洞分析、不写任何文件，输出严格 JSON：
+
+   ```json
+   {
+     "function": "foo",
+     "source_file": "a.c",
+     "no_external_input": false,
+     "taints": [
+       {"symbol": "aMessage", "kind": "param", "line": "L228", "reason": "外部网络报文"}
+     ]
+   }
+   ```
+
+4. 服务端解析并过滤（去 `&` 前缀、去 `all`、去伪符号 `v\d+`、去重、`_is_likely_external_taint_symbol`），**回填到根任务输入** `cfg.taint_params` / `cfg.taint_details`，随后接续既有 BFS 污点追踪流程。
+
+特性：
+
+- **常开、无配置项**：缺省即生效，不暴露任何开关。
+- **只作用于 depth=0 根函数**；子函数（callee）的污点仍由调用点 P0/P1/P2 分流计算，不走此预阶段。
+- **失败安全**：函数体提取失败 / agent 出错 / 识别为空 → 静默退回 `all`（分析全函数），不影响任务成败。
+- 实现：`app/taint_source_identifier.py`（`needs_taint_autodetect` + `autodetect_taint_sources`），由 `app/orchestrator.py::execute_recursive` 根分支调用。
+
+### 产物与可观测
+
+- Session 归档：`run/sessions/d00-taint-source-id.jsonl`（可回放）。
+- 事件流：`taint_autodetect_start` → `taint_autodetect_done`（含识别出的 `taints` / `count`）或 `taint_autodetect_empty`（含 `no_external_input` / `error`）。
+- token 计入任务最终 `total_tokens`。
+
 ## SQLite 图数据库
 
 每个任务在 `run/vuln-scan.sqlite` 中维护完整树/图。
