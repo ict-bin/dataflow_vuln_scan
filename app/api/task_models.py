@@ -323,6 +323,18 @@ class TaskTimelineEventResponse(BaseModel):
     parent_stage_item_id: str | None = None
     message: str
     payload: Dict[str, Any] = Field(default_factory=dict)
+    recorder_instance_id: str | None = None
+    recorder_hostname: str | None = None
+    recorder_pod_name: str | None = None
+    recorder_node_name: str | None = None
+    recorder_pod_ip: str | None = None
+    recorder_role: str | None = None
+    origin_instance_id: str | None = None
+    origin_hostname: str | None = None
+    origin_pod_name: str | None = None
+    origin_node_name: str | None = None
+    origin_pod_ip: str | None = None
+    origin_role: str | None = None
     created_at: str | None = None
 
 

@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
+import socket
 import uuid
 
 from sqlalchemy.exc import IntegrityError
@@ -17,6 +19,23 @@ logger = logging.getLogger("dvs.task_events")
 
 TASK_EVENT_SOURCE_DVS = "dvs"
 DB_TIMELINE_EVENT_LIMIT = 10_000
+POD_NAME = (
+    os.environ.get("DVS_POD_NAME")
+    or os.environ.get("POD_NAME")
+    or os.environ.get("HOSTNAME")
+    or "dvs-pod"
+)
+POD_IP = (
+    os.environ.get("DVS_POD_IP")
+    or os.environ.get("MY_POD_IP")
+    or os.environ.get("POD_IP")
+    or ""
+)
+NODE_NAME = (
+    os.environ.get("DVS_NODE_NAME")
+    or os.environ.get("NODE_NAME")
+    or ""
+)
 
 
 def _fit_event_message(raw: object, *, limit: int = 400) -> str:
@@ -82,7 +101,97 @@ def _task_event_dedupe_key(
     return "::".join(parts)[:255]
 
 
+def _task_event_runtime_role() -> str:
+    role = str(os.environ.get("DVS_ROLE") or "").strip().lower()
+    if role in {"api", "worker", "scheduler", "runner"}:
+        return role
+    return "api"
+
+
+def _task_event_instance_id(
+    *,
+    payload: dict[str, object] | None = None,
+    worker_id: str | None = None,
+    execution_owner_id: str | None = None,
+) -> str | None:
+    data = payload if isinstance(payload, dict) else {}
+    candidates = (
+        os.environ.get("DVS_INSTANCE_ID"),
+        os.environ.get("WORKER_INSTANCE_ID"),
+        os.environ.get("DVS_WORKER_ID"),
+        worker_id,
+        execution_owner_id,
+        str(data.get("worker_id") or "").strip() or None,
+        str(data.get("execution_owner_id") or "").strip() or None,
+        str(data.get("pod_name") or "").strip() or None,
+        POD_NAME,
+    )
+    for value in candidates:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return None
+
+
+def _build_task_event_recorder_metadata(
+    *,
+    payload: dict[str, object] | None = None,
+    role: str | None = None,
+    worker_id: str | None = None,
+    execution_owner_id: str | None = None,
+) -> dict[str, object]:
+    resolved_role = str(role or _task_event_runtime_role()).strip().lower() or "api"
+    hostname = str(os.environ.get("HOSTNAME") or "").strip() or socket.gethostname()
+    pod_name = str(os.environ.get("DVS_POD_NAME") or os.environ.get("POD_NAME") or hostname).strip() or hostname
+    pod_ip = str(os.environ.get("DVS_POD_IP") or os.environ.get("MY_POD_IP") or os.environ.get("POD_IP") or "").strip() or None
+    node_name = str(os.environ.get("DVS_NODE_NAME") or os.environ.get("NODE_NAME") or "").strip() or None
+    return {
+        "service": "dataflow-vuln-scan",
+        "role": resolved_role,
+        "instance_id": _task_event_instance_id(
+            payload=payload,
+            worker_id=worker_id,
+            execution_owner_id=execution_owner_id,
+        ),
+        "hostname": hostname or None,
+        "pod_name": pod_name or None,
+        "node_name": node_name,
+        "pod_ip": pod_ip,
+    }
+
+
+def _merge_task_event_recorder_payload(
+    payload: dict[str, object] | None,
+    *,
+    role: str | None = None,
+    origin: dict[str, object] | None = None,
+    worker_id: str | None = None,
+    execution_owner_id: str | None = None,
+) -> dict[str, object]:
+    merged = dict(payload) if isinstance(payload, dict) else {}
+    merged["recorder"] = _build_task_event_recorder_metadata(
+        payload=merged,
+        role=role,
+        worker_id=worker_id,
+        execution_owner_id=execution_owner_id,
+    )
+    if isinstance(origin, dict) and origin:
+        merged["event_origin"] = dict(origin)
+    return merged
+
+
+def _timeline_party_from_payload(payload: dict[str, object] | None, key: str) -> dict[str, object] | None:
+    if not isinstance(payload, dict):
+        return None
+    party = payload.get(key)
+    if not isinstance(party, dict):
+        return None
+    return party
+
+
 def _build_task_event_response(event: AppDvsTaskEvent) -> dict[str, object]:
+    recorder = _timeline_party_from_payload(event.payload, "recorder") or {}
+    origin = _timeline_party_from_payload(event.payload, "event_origin") or {}
     return {
         "id": event.id,
         "task_id": event.task_id,
@@ -103,6 +212,18 @@ def _build_task_event_response(event: AppDvsTaskEvent) -> dict[str, object]:
         "parent_stage_item_id": event.parent_stage_item_id,
         "message": event.message,
         "payload": event.payload,
+        "recorder_instance_id": recorder.get("instance_id"),
+        "recorder_hostname": recorder.get("hostname"),
+        "recorder_pod_name": recorder.get("pod_name"),
+        "recorder_node_name": recorder.get("node_name"),
+        "recorder_pod_ip": recorder.get("pod_ip"),
+        "recorder_role": recorder.get("role"),
+        "origin_instance_id": origin.get("instance_id"),
+        "origin_hostname": origin.get("hostname"),
+        "origin_pod_name": origin.get("pod_name"),
+        "origin_node_name": origin.get("node_name"),
+        "origin_pod_ip": origin.get("pod_ip"),
+        "origin_role": origin.get("role"),
         "created_at": isoformat_local(event.created_at),
     }
 
@@ -158,6 +279,7 @@ def _record_task_event(
     function_name: str | None = None,
     source_file: str | None = None,
     line_hint: str | None = None,
+    origin: dict[str, object] | None = None,
     dedupe_key: str | None = None,
 ) -> AppDvsTaskEvent | None:
     normalized_message = _fit_event_message(message, limit=1000)
@@ -202,7 +324,14 @@ def _record_task_event(
         message=normalized_message,
         dedupe_key=event_dedupe_key,
     )
-    event.payload = _compact_event_payload(payload or {})
+    event.payload = _compact_event_payload(
+        _merge_task_event_recorder_payload(
+            payload,
+            origin=origin,
+            worker_id=normalized_worker_id,
+            execution_owner_id=normalized_owner_id,
+        )
+    )
     db.add(event)
     try:
         db.flush()

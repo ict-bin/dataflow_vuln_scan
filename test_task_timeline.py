@@ -644,31 +644,42 @@ class TaskTimelineTests(unittest.TestCase):
         db = self._session()
         try:
             row = db.query(AppDvsTask).filter_by(task_id=task_id).first()
-            first = task_service_module._record_task_event(
-                db,
-                row=row,
-                event_type="task_lease_lost",
-                message="任务心跳续租失败，租约已丢失",
-                level="warning",
-                status="running",
-                execution_epoch=1,
-                control_version=2,
-            )
-            second = task_service_module._record_task_event(
-                db,
-                row=row,
-                event_type="task_lease_lost",
-                message="任务心跳续租失败，租约已丢失",
-                level="warning",
-                status="running",
-                execution_epoch=1,
-                control_version=2,
-            )
+            with patch.dict(task_events_module.os.environ, {
+                "DVS_ROLE": "worker",
+                "DVS_POD_NAME": "dvs-worker-0",
+                "DVS_POD_IP": "10.2.3.4",
+                "DVS_NODE_NAME": "node-z",
+                "HOSTNAME": "dvs-worker-0",
+            }, clear=False):
+                first = task_service_module._record_task_event(
+                    db,
+                    row=row,
+                    event_type="task_lease_lost",
+                    message="任务心跳续租失败，租约已丢失",
+                    level="warning",
+                    status="running",
+                    execution_epoch=1,
+                    control_version=2,
+                )
+                second = task_service_module._record_task_event(
+                    db,
+                    row=row,
+                    event_type="task_lease_lost",
+                    message="任务心跳续租失败，租约已丢失",
+                    level="warning",
+                    status="running",
+                    execution_epoch=1,
+                    control_version=2,
+                )
             db.commit()
 
             self.assertEqual(first.id, second.id)
             lost_events = db.query(AppDvsTaskEvent).filter_by(task_id=task_id, event_type="task_lease_lost").all()
             self.assertEqual(1, len(lost_events))
+            payload = lost_events[0].payload
+            self.assertEqual("worker", payload["recorder"]["role"])
+            self.assertEqual("dvs-worker-0", payload["recorder"]["pod_name"])
+            self.assertEqual("node-z", payload["recorder"]["node_name"])
         finally:
             db.close()
 
@@ -677,13 +688,20 @@ class TaskTimelineTests(unittest.TestCase):
         db = self._session()
         try:
             row = db.query(AppDvsTask).filter_by(task_id=task_id).first()
-            task_service_module._record_task_event(
-                db,
-                row=row,
-                event_type="task_started",
-                message="任务已开始执行",
-                status="running",
-            )
+            with patch.dict(task_events_module.os.environ, {
+                "DVS_ROLE": "api",
+                "DVS_POD_NAME": "dvs-api-1",
+                "DVS_POD_IP": "10.9.0.1",
+                "DVS_NODE_NAME": "node-api",
+                "HOSTNAME": "dvs-api-1",
+            }, clear=False):
+                task_service_module._record_task_event(
+                    db,
+                    row=row,
+                    event_type="task_started",
+                    message="任务已开始执行",
+                    status="running",
+                )
             db.commit()
         finally:
             db.close()
@@ -695,7 +713,41 @@ class TaskTimelineTests(unittest.TestCase):
         payload = response.json()
         self.assertEqual(task_id, payload["task_id"])
         self.assertEqual("task_started", payload["events"][0]["event_type"])
+        self.assertEqual("dvs-api-1", payload["events"][0]["recorder_pod_name"])
+        self.assertEqual("node-api", payload["events"][0]["recorder_node_name"])
+        self.assertEqual("api", payload["events"][0]["recorder_role"])
         self.assertEqual("task_created", payload["events"][-1]["event_type"])
+
+    def test_timeline_api_get_keeps_legacy_event_without_recorder_compatible(self):
+        task_id = self._create_task()
+        db = self._session()
+        try:
+            row = db.query(AppDvsTask).filter_by(task_id=task_id).first()
+            legacy = AppDvsTaskEvent(
+                id="evt-legacy-no-recorder",
+                task_id=task_id,
+                project_id=row.project_id,
+                source="dfa",
+                level="info",
+                event_type="task_started",
+                status="running",
+                message="legacy",
+                dedupe_key="legacy-no-recorder",
+            )
+            legacy.payload_json = "{\"legacy\":true}"
+            db.add(legacy)
+            db.commit()
+        finally:
+            db.close()
+
+        with self._build_client() as client:
+            response = client.get(f"/api/app/dataflow-vuln-scan/tasks/{task_id}/timeline")
+
+        self.assertEqual(200, response.status_code)
+        payload = response.json()
+        legacy_event = next(item for item in payload["events"] if item["id"] == "evt-legacy-no-recorder")
+        self.assertIsNone(legacy_event["recorder_pod_name"])
+        self.assertEqual({"legacy": True}, legacy_event["payload"])
 
     def test_timeline_api_delete_single_event(self):
         task_id = self._create_task()
