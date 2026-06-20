@@ -14,6 +14,10 @@
     "deep_trace_enabled": true,
     "callee_concurrency": -1,
 
+    "entry_screen_enabled": false,
+    "entry_screen_whitelist": ["recv", "read", "proc", "process", "handle", "parse", "decode", "dispatch", "on_", "callback", "ioctl", "input", "msg", "packet", "request", "cmd"],
+    "entry_screen_thinking_level": "off",
+
     "workers": {
         "default_tools": ["read", "bash", "edit", "write", "find"],
         "system_prompt_dir": "/opt/dataflow_vuln_scan/prompts/workers",

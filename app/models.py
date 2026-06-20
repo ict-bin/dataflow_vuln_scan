@@ -65,6 +65,14 @@ class RoleConfig(BaseModel):
 
 # ─── 服务配置（由管理员一次性配置，长期不变）─────────────────────────────────
 
+# 入口快速筛查默认白名单关键字（小写）：函数名命中任一子串即直接判为入口。
+DEFAULT_ENTRY_WHITELIST: list[str] = [
+    "recv", "read", "proc", "process", "handle", "parse", "decode",
+    "dispatch", "on_", "callback", "ioctl", "input", "msg", "packet",
+    "request", "cmd",
+]
+
+
 class ServiceConfig(BaseModel):
     """config.json — 服务提供者配置，不含任务信息"""
     max_rounds: int = Field(default=3, ge=-1, description="每个函数最大 Worker+Judge 迭ge轮数，-1=无限")
@@ -84,6 +92,11 @@ class ServiceConfig(BaseModel):
     max_trace_depth: int = Field(default=3, ge=1, le=1000, description="函数调用递归追踪最大深度")
     deep_trace_enabled: bool = Field(default=False, description="深度探索模式：不按 max_trace_depth 截断，依赖污点收敛去重")
     callee_concurrency: int = Field(default=4, ge=-1, description="callee 并行分析数：-1=自动/不限, 1=串行, N=最多 N 个并发 BFS 工作池")
+
+    # 入口快速筛查（Entry Screening）：分析前先判断根函数是否为模块入口
+    entry_screen_enabled: bool = Field(default=False, description="是否启用入口快速筛查：开启后分析前先判定根函数是否为模块入口，非入口直接以 PASSED 结束并注明理由")
+    entry_screen_whitelist: list[str] = Field(default_factory=lambda: list(DEFAULT_ENTRY_WHITELIST), description="入口白名单关键字（小写子串），函数名命中任一即直接判为入口、跳过 agent 判断")
+    entry_screen_thinking_level: str = Field(default="off", description="入口筛查 agent 思考等级，默认 off 以省 token")
 
     workers: RoleConfig = Field(default_factory=RoleConfig)
     judges: RoleConfig = Field(default_factory=RoleConfig)
@@ -131,6 +144,9 @@ class TaskConfig(BaseModel):
     max_trace_depth: int = Field(default=3)
     deep_trace_enabled: bool = Field(default=False)
     callee_concurrency: int = Field(default=4)
+    entry_screen_enabled: bool = Field(default=False)
+    entry_screen_whitelist: list[str] = Field(default_factory=lambda: list(DEFAULT_ENTRY_WHITELIST))
+    entry_screen_thinking_level: str = Field(default="off")
     workers: RoleConfig = Field(default_factory=RoleConfig)
     judges: RoleConfig = Field(default_factory=RoleConfig)
     output_dir: str = Field(default="/data/output")

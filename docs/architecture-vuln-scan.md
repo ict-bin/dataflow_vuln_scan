@@ -166,6 +166,7 @@ GET /api/app/dataflow-vuln-scan/tasks/{task_id}/vuln-findings
 提示词：
 
 ```text
+prompts/entry-screen/default.md
 prompts/taint-graph/default.md
 prompts/vuln-miners/default.md
 prompts/followups/default.md

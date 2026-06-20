@@ -82,6 +82,27 @@ DVS 不再根据 `input_path` 猜测源码根目录，统一按下面的双路�
 
 ## 执行流程
 
+### 入口快速筛查（前置，可配置开关，默认关）
+
+开启 `entry_screen_enabled` 后，在进入污点追踪前先判断根函数是否为「模块入口」：
+
+```
+root 函数
+  │
+  ├─ 白名单关键字命中（recv/read/proc/handle/...，子串、不区分大小写）
+  │     → 直接放行，0 token / 0 agent 调用
+  │
+  └─ 未命中 → 1 轮独立提示词 pi agent（thinking off、不写文件、仅看函数头 60 行）
+        ├─ is_entry=true  → 继续后续流程
+        └─ is_entry=false → 早退：status=PASSED、completion_reason=not_entry_point，
+                            写报告/事件注明「非入口」及理由，不做污点/漏洞分析
+```
+
+- **失败安全**：函数体提取失败 / agent 报错 / JSON 解析失败 / 拿不准 → 一律按「是入口」继续，绝不误杀。
+- **仅 depth=0 根函数生效**；子函数不重复筛查。
+- 产物/可观测：Session `run/sessions/d00-entry-screen.jsonl`；事件 `entry_screen_start` → `entry_screen_whitelisted` / `entry_screen_pass` / `entry_screen_reject`（含理由）。
+- 实现：`app/entry_point_screener.py`（`needs_entry_screen` + `whitelist_hit` + `screen_entry_point`），提示词 `prompts/entry-screen/default.md`。
+
 ### 单函数分析（一轮）
 
 ```
@@ -138,6 +159,9 @@ HandleCommissioningSet (depth=0)
     "pass_threshold": 1,        // Judge 通过票数阈值（默认 ceil(J/2)）
     "max_trace_depth": 5,       // 函数调用递归最大深度
     "callee_concurrency": -1,   // callee 并行数，-1=不限，1=串行，N=最多N个
+    "entry_screen_enabled": false,  // 入口快速筛查开关（默认关）：开启后非入口函数直接 PASSED 并跳过分析
+    "entry_screen_whitelist": ["recv","read","proc","process","handle","parse","decode","dispatch","on_","callback","ioctl","input","msg","packet","request","cmd"], // 函数名子串命中即直接判为入口（0 token）
+    "entry_screen_thinking_level": "off",  // 入口筛查 agent 思考等级，默认 off 省 token
     "agent_max_retries": 50,    // API 错误重试次数
     "agent_retry_delay": 15,    // 重试初始等待秒（指数退避）
     "pi_max_retries": -1,       // pi 进程拉起失败重试次数，-1=无限

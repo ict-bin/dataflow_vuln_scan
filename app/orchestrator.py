@@ -54,6 +54,7 @@ from .scheduler import TaintState, TaintEntry, ValidationCache, _normalize_taint
 from .global_cache import GlobalCache, compute_func_hash
 from .vuln_workflow import build_function_summary_from_result
 from .taint_source_identifier import autodetect_taint_sources, needs_taint_autodetect
+from .entry_point_screener import needs_entry_screen, screen_entry_point
 
 logger = logging.getLogger("dvs.orchestrator")
 from .judge_runner import JudgeMixin
@@ -750,6 +751,52 @@ class Orchestrator(JudgeMixin):
         self._emit("trace_start", root_task_id,
                    function=cfg.function_name, source_file=cfg.source_file,
                    depth=0, max_depth=max_depth)
+
+        # ── 入口快速筛查（depth=0 预阶段，可配置开关）─────────────
+        # 开启后：函数名命中白名单关键字直接放行；未命中则用一轮独立
+        # 提示词的 pi agent 判断是否为模块入口。判定为非入口 → 任务以
+        # PASSED 结束、注明非入口及理由，不进入污点追踪 / 漏洞挖掘。
+        # 失败安全：任何异常按「是入口」继续。
+        screen_tokens = TokenUsage()
+        if needs_entry_screen(cfg):
+            self._emit("entry_screen_start", root_task_id,
+                       function=cfg.function_name, source_file=cfg.source_file, depth=0)
+            _es = screen_entry_point(
+                cfg,
+                target_dir=target_dir,
+                session_file=str(root_sessions_dir / "d00-entry-screen.jsonl"),
+                on_event=self.on_event,
+                cancel_event=self._cancel_event,
+            )
+            screen_tokens += _es.token_usage
+            if _es.whitelisted:
+                self._emit("entry_screen_whitelisted", root_task_id,
+                           function=cfg.function_name,
+                           matched_keyword=_es.matched_keyword,
+                           reason=_es.reason, depth=0)
+            elif _es.is_entry:
+                self._emit("entry_screen_pass", root_task_id,
+                           function=cfg.function_name,
+                           screened_by=_es.screened_by,
+                           confidence=_es.confidence,
+                           reason=_es.reason, error=_es.error, depth=0)
+            else:
+                # 判定为非入口 → 早退：PASSED + 注明理由，不做后续分析
+                self._emit("entry_screen_reject", root_task_id,
+                           function=cfg.function_name, source_file=cfg.source_file,
+                           confidence=_es.confidence, reason=_es.reason, depth=0)
+                screen_result = TaskResult(
+                    task_id=root_task_id,
+                    task=cfg.task,
+                    status=TaskStatus.PASSED,
+                    completion_reason="not_entry_point",
+                    analysis_status="skipped_not_entry",
+                )
+                screen_result.total_tokens = screen_tokens
+                screen_result.final_output = self._build_not_entry_report(cfg, _es)
+                self._do_final_archive(screen_result, root_out_dir, _root_output_dir)
+                self._cancel_event = None
+                return screen_result
 
         # ── 污点源自动识别（depth=0 预阶段，常开）───────────────────────
         # 任务未提供污点信息（taint_params/taint_details 为空或仅为 all）时，
@@ -1503,6 +1550,7 @@ class Orchestrator(JudgeMixin):
                 combined_tokens += item.total_tokens
                 total_duration_ms += float(item.total_duration_ms or 0.0)
             combined_tokens += autodetect_tokens
+            combined_tokens += screen_tokens
             root_result.rounds = combined_rounds
             root_result.total_tokens = combined_tokens
             if total_duration_ms > 0:
@@ -1516,6 +1564,24 @@ class Orchestrator(JudgeMixin):
             return root_result
         finally:
             self._cancel_event = None
+
+    def _build_not_entry_report(self, cfg: TaskConfig, es) -> str:
+        """入口快速筛查判定为非入口时的早退报告。"""
+        conf = str(getattr(es, "confidence", "") or "").strip() or "-"
+        reason = str(getattr(es, "reason", "") or "").strip() or "（未给出理由）"
+        return "\n".join([
+            f"# 入口快速筛查：判定为非入口（已跳过数据流分析）",
+            "",
+            f"- 目标函数: `{cfg.source_file}::{cfg.function_name}`",
+            f"- 结论: **非模块入口**（not_entry_point）",
+            f"- 置信度: `{conf}`",
+            f"- 判断方式: `{getattr(es, 'screened_by', 'agent')}`",
+            f"- 判断理由: {reason}",
+            "",
+            "> 该函数被入口快速筛查阶段判定为非模块入口，未进入污点追踪 / 漏洞挖掘。",
+            "> 任务状态为 PASSED（已完成）。若认为误判，可在配置页关闭「入口快速筛查」后 restart。",
+            "",
+        ])
 
     def _build_vulnerability_brief_report(self, result: TaskResult, graph_db_path: Path) -> str:
         """构建最终报告：只展示漏洞简报列表，不内嵌数据流全文。"""
