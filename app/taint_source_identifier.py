@@ -209,9 +209,13 @@ def autodetect_taint_sources(
             timeout_max_retries=int(getattr(cfg, "agent_timeout_max_retries", 20)),
             pi_max_retries=int(getattr(cfg, "pi_max_retries", 3)),
             pi_retry_delay=float(getattr(cfg, "pi_retry_delay", 10.0)),
+            # 复用 Worker 的任务级 pi runtime（同一任务级注入 apiKey / 模型配置），
+            # 与其他 Worker 一致；否则独立 agent 会退回全局占位 key 导致 401。
             task_context={
                 "task_id": str(getattr(cfg, "task_name", "") or ""),
                 "stage": "taint_source_identification",
+                "agent_role": "workers",
+                "task_pi_dir": (cfg.role_pi_dir("workers") if hasattr(cfg, "role_pi_dir") else ""),
             },
         )
     except Exception as exc:  # pragma: no cover - 防御式

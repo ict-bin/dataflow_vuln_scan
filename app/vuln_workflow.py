@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import re
 import shutil
 import time
@@ -104,6 +105,151 @@ def parse_taint_inputs(cfg: TaskConfig, fallback: Iterable[str] | None = None) -
         if symbol and _is_likely_external_taint_symbol(symbol) and all(x.symbol != symbol for x in items):
             items.append(TaintInput(symbol=symbol, kind="param"))
     return items or [TaintInput(symbol="all", kind="unknown")]
+
+
+def _format_exploitability_md(value: Any) -> str:
+    """Render the exploitability field as Markdown.
+
+    Accepts either a structured object ({preconditions, trigger_complexity,
+    worst_case_impact}) — as produced by the four-dimension vuln-miners prompt —
+    or a legacy free-text string.
+    """
+    if not value:
+        return "未知"
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        pre = str(value.get("preconditions") or value.get("precondition") or "").strip()
+        tc = str(value.get("trigger_complexity") or "").strip()
+        wci = str(value.get("worst_case_impact") or value.get("impact") or "").strip()
+        parts: list[str] = []
+        if pre:
+            parts.append(f"- **前置条件**: {pre}")
+        if tc:
+            parts.append(f"- **触发难度**: {tc}")
+        if wci:
+            parts.append(f"- **最坏后果**: {wci}")
+        return "\n".join(parts) if parts else json.dumps(value, ensure_ascii=False, indent=2)
+    return json.dumps(value, ensure_ascii=False, indent=2)
+
+
+_DIM_LABEL = {
+    "code_accurate": "代码准确性",
+    "path_reachable": "路径可达性",
+    "unmitigated": "防御可绕过",
+    "security_impact": "实质安全影响",
+}
+
+
+def _format_dimensions_md(value: Any) -> str:
+    """Render the four-dimension self-check (code_accurate/path_reachable/
+    unmitigated/security_impact) as Markdown. Returns "" when absent
+    (legacy findings / miner did not emit it)."""
+    if not isinstance(value, dict) or not value:
+        return ""
+    lines: list[str] = ["## 四维度自检", ""]
+    rows = []
+    for key, label in _DIM_LABEL.items():
+        entry = value.get(key)
+        if isinstance(entry, dict):
+            passed = entry.get("passed")
+            if passed is True:
+                status = "PASS"
+            elif passed is False:
+                status = "FAIL"
+            else:
+                status = "N/A"
+            reason = str(entry.get("reason") or entry.get("detail") or "").strip()
+        else:
+            status = "➖ 未判定"
+            reason = str(entry or "").strip()
+        rows.append(f"| {label} | {status} | {reason} |")
+    if rows:
+        lines.append("| 维度 | 结论 | 理由 |")
+        lines.append("|------|------|------|")
+        lines.extend(rows)
+        lines.append("")
+        return "\n".join(lines)
+    return ""
+
+
+def _format_vuln_report_md(item: dict, finding_id: str, source_file: str, function_name: str, line: str) -> str:
+    """Build the vulnerability-report.md body from a structured finding.
+
+    Handles the structured exploitability object and four-dimension self-check
+    introduced by the updated vuln-miners prompt, while staying backward
+    compatible with free-text fields.
+    """
+    title = str(item.get("title") or finding_id)
+    summary = str(item.get("summary") or "")
+    evidence = str(item.get("evidence") or "")
+    vuln_type = str(item.get("vuln_type") or "unknown")
+    severity = str(item.get("severity") or "unknown")
+    confidence = item.get("confidence")
+    sections = [
+        f"# {title}",
+        "",
+        "## 位置",
+        f"- 文件: `{source_file}`",
+        f"- 函数: `{function_name}`",
+        f"- 行号: `{line or 'unknown'}`",
+        f"- 类型: `{vuln_type}`",
+        f"- 严重性: `{severity}`",
+        f"- 置信度: `{confidence}`",
+        "",
+        "## 摘要",
+        summary,
+        "",
+        "## 证据",
+        evidence,
+        "",
+        "## 可利用性",
+        _format_exploitability_md(item.get("exploitability")),
+    ]
+    dim_md = _format_dimensions_md(item.get("dimensions"))
+    if dim_md:
+        sections.append("")
+        sections.append(dim_md)
+    return "\n".join(sections) + "\n"
+
+
+def _vuln_intake_min_confidence() -> float:
+    """Minimum confidence for a finding to be submitted to vuln-platform intake.
+
+    Findings below this threshold are still archived locally (SQLite + report.md)
+    for observability and tuning, but are not pushed downstream — this is the
+    primary lever for reducing false-positive leakage into verification.
+    """
+    raw = os.environ.get("DVS_VULN_INTAKE_MIN_CONFIDENCE", "0.5").strip()
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        value = 0.5
+    return max(0.0, min(1.0, value))
+
+
+def _check_finding_dimensions(dims: dict) -> bool:
+    """Validate the four-dimension self-check emitted by the vuln-miners prompt.
+
+    Returns True only when all four dimensions are present and explicitly
+    passed. Findings missing the self-check (legacy/partial output) are
+    treated as eligible by default to avoid silently dropping everything —
+    the confidence gate is the hard filter in that case.
+    """
+    if not isinstance(dims, dict) or not dims:
+        return True
+    required = ("code_accurate", "path_reachable", "unmitigated", "security_impact")
+    present = {k: v for k, v in dims.items() if k in required}
+    if not present:
+        return True
+    for key in required:
+        entry = present.get(key)
+        if isinstance(entry, dict):
+            if entry.get("passed") is False:
+                return False
+        # Missing or non-dict entries do not by themselves disqualify; the
+        # confidence gate remains in effect.
+    return True
 
 
 def _extract_json_from_text(text: str, key: str | None = None) -> Any:
@@ -513,15 +659,38 @@ class DataflowVulnWorkflow:
             finding_source_file = str(item.get('source_file') or item.get('file') or self.src_file)
             finding_function_name = str(item.get('function_name') or item.get('function') or item.get('func') or self.func_name)
             finding_line = str(item.get('line') or item.get('line_hint') or item.get('vuln_line') or '')
-            report_path.write_text(f"# {item.get('title') or finding_id}\n\n## 位置\n- 文件: `{finding_source_file}`\n- 函数: `{finding_function_name}`\n- 行号: `{finding_line or 'unknown'}`\n\n## 摘要\n{item.get('summary','')}\n\n## 证据\n{item.get('evidence','')}\n\n## 可利用性\n{item.get('exploitability','')}\n", encoding="utf-8")
+            report_path.write_text(_format_vuln_report_md(item, finding_id, finding_source_file, finding_function_name, finding_line), encoding="utf-8")
             taint_report_path.write_text(dataflow_text, encoding="utf-8")
             try:
                 if fork_session.exists():
                     safe_copyfile(fork_session, fdir / "context.jsonl")
             except OSError:
                 (fdir / "context.jsonl").write_text("", encoding="utf-8")
-            rec = VulnFindingRecord(finding_id=finding_id, run_id=self.run_id, node_id=node, source_file=finding_source_file, function_name=finding_function_name, line=finding_line, vuln_type=str(item.get("vuln_type") or "unknown"), severity=str(item.get("severity") or "unknown"), title=str(item.get("title") or finding_id), summary=str(item.get("summary") or ""), evidence=str(item.get("evidence") or ""), exploitability=str(item.get("exploitability") or ""), confidence=float(item.get("confidence") or 0), output_dir=str(fdir))
+            _exploit_raw = item.get("exploitability")
+            if isinstance(_exploit_raw, (dict, list)):
+                exploitability_str = json.dumps(_exploit_raw, ensure_ascii=False)
+            else:
+                exploitability_str = str(_exploit_raw or "")
+            rec = VulnFindingRecord(finding_id=finding_id, run_id=self.run_id, node_id=node, source_file=finding_source_file, function_name=finding_function_name, line=finding_line, vuln_type=str(item.get("vuln_type") or "unknown"), severity=str(item.get("severity") or "unknown"), title=str(item.get("title") or finding_id), summary=str(item.get("summary") or ""), evidence=str(item.get("evidence") or ""), exploitability=exploitability_str, confidence=float(item.get("confidence") or 0), output_dir=str(fdir))
             self.store.add_finding(rec); findings.append(rec)
+            # 四维度自检 + 置信度过滤：仅通过自检且达到阈值的 finding 才提交到
+            # vuln-platform intake，低置信度/未通过自检的仅本地归档，避免误报外泄。
+            _dims = item.get("dimensions") if isinstance(item.get("dimensions"), dict) else {}
+            _dim_pass = _check_finding_dimensions(_dims)
+            _min_conf = _vuln_intake_min_confidence()
+            _submit_eligible = _dim_pass and rec.confidence >= _min_conf
+            if not _submit_eligible:
+                self._emit(
+                    "vuln_intake_skipped",
+                    finding_id=rec.finding_id,
+                    reason="low_confidence_or_self_check_failed",
+                    confidence=rec.confidence,
+                    min_confidence=_min_conf,
+                    dimensions_pass=_dim_pass,
+                    source_file=rec.source_file,
+                    function_name=rec.function_name,
+                    line=rec.line,
+                )
             self.store.append_artifact_manifest(
                 "vulnerability_mining",
                 [
@@ -535,6 +704,9 @@ class DataflowVulnWorkflow:
                 run_id=self.run_id,
             )
             try:
+                if not _submit_eligible:
+                    # 本地已归档但未达到提交阈值，跳过 vuln-platform intake。
+                    continue
                 from .vuln_intake_reporter import report_finding_to_intake
                 report_result = report_finding_to_intake(
                     project_id=self.project_id,
