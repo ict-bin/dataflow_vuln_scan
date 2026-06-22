@@ -777,6 +777,35 @@ class DataflowVulnWorkflow:
                     tainted_nonlocal = []
                 followups.append(FollowupRecord(followup_id=followup_id, edge_id=eid, parent_node_id=node_ids[0] if node_ids else "", callee_file=str(item.get("file") or self.src_file), callee_function=fname, callee_line=fline, tainted_params_json=json.dumps(param_list, ensure_ascii=False), depth=self.dep + 1, reason=str(item.get("reason") or ""), dispatch_kind=dispatch_kind, tainted_nonlocal_json=json.dumps(tainted_nonlocal, ensure_ascii=False)))
                 self.store.record_constraints(run_id=self.run_id, edge_id=eid, followup_id=followup_id, source_file=self.src_file, function_name=self.func_name, line=fline, facts=validation_state.facts)
+        # ── Bug B: 容器驻留信号（独立于 followups，仅记入图 + 返回元数据）──
+        container_taint_syms: list[dict] = []
+        for item in (graph or {}).get("container_taints") or []:
+            if not isinstance(item, dict):
+                continue
+            sym = str(item.get("symbol") or "").strip()
+            kind = str(item.get("kind") or "global").strip()
+            if not sym:
+                continue
+            eid = _edge_id(self.run_id, self.func_name, self.taint_params[0] if self.taint_params else "taint", sym, str(item.get("evidence") or "")[:60])
+            edges.append(TaintEdgeRecord(
+                edge_id=eid, run_id=self.run_id,
+                from_node_id=node_ids[0] if node_ids else "",
+                to_node_id=_node_id(self.src_file, self.func_name, sym, self.dep),
+                source_file=self.src_file, function_name=self.func_name,
+                from_symbol=self.taint_params[0] if self.taint_params else "taint",
+                to_symbol=sym, line=str(item.get("evidence") or ""),
+                operation="container",
+                evidence=str(item.get("evidence") or ""),
+            ))
+            container_taint_syms.append({"symbol": sym, "kind": kind, "evidence": str(item.get("evidence") or "")})
+        if container_taint_syms:
+            try:
+                self.store.record_container_taints(
+                    run_id=self.run_id, source_file=self.src_file,
+                    function_name=self.func_name, entries=container_taint_syms, depth=self.dep,
+                )
+            except Exception as _e:
+                logger.warning("unexpected error in vuln_workflow.py: %s", _e, exc_info=True)
         callees = []
         for c in callees:
             eid = _edge_id(self.run_id, self.func_name, self.taint_params[0] if self.taint_params else "taint", c.function_name, c.line)
@@ -796,6 +825,11 @@ class DataflowVulnWorkflow:
                 for f in followups
             ]
             result.upstream_entry_metadata = _meta
+        # ── Bug B: 容器驻留符号带回元数据，供 orchestrator Bug A 聚合搜索 ──
+        if container_taint_syms:
+            _meta2 = result.upstream_entry_metadata or {}
+            _meta2["container_taint_syms"] = container_taint_syms
+            result.upstream_entry_metadata = _meta2
         self.store.append_artifact_manifest(
             "taint_tracking",
             [

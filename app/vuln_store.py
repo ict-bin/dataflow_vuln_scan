@@ -277,6 +277,20 @@ class VulnScanStore:
                 CREATE INDEX IF NOT EXISTS ix_findings_run ON vulnerability_findings(run_id);
                 CREATE INDEX IF NOT EXISTS ix_contexts_lookup ON analysis_contexts(function_identity, taint_signature, validation_signature);
                 CREATE INDEX IF NOT EXISTS ix_constraints_run ON taint_constraints(run_id, edge_id, followup_id);
+
+                CREATE TABLE IF NOT EXISTS container_taints (
+                  container_taint_id TEXT PRIMARY KEY,
+                  run_id TEXT NOT NULL,
+                  source_file TEXT NOT NULL DEFAULT '',
+                  function_name TEXT NOT NULL DEFAULT '',
+                  symbol TEXT NOT NULL,
+                  kind TEXT NOT NULL DEFAULT 'global',
+                  evidence TEXT NOT NULL DEFAULT '',
+                  depth INTEGER NOT NULL DEFAULT 0,
+                  created_at REAL NOT NULL DEFAULT (strftime('%s','now'))
+                );
+
+                CREATE INDEX IF NOT EXISTS ix_container_taints_run ON container_taints(run_id);
                 """
             )
             for table, column, ddl in [
@@ -434,6 +448,33 @@ class VulnScanStore:
                     fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
                 except OSError:
                     pass
+
+    def record_container_taints(self, *, run_id: str, source_file: str, function_name: str, entries: list[dict[str, Any]], depth: int) -> None:
+        """存储每函数分析后上报的容器驻留污点信息。
+
+        entries 中每一项包含 {symbol, kind, evidence}。
+        每条记录写入 container_taints 表。
+        """
+        import uuid
+        import time as _time
+        now = _time.time()
+        with self.connect() as conn:
+            for entry in (entries or []):
+                if not isinstance(entry, dict):
+                    continue
+                sym = str(entry.get("symbol") or "").strip()
+                if not sym:
+                    continue
+                ct_id = "ct_" + str(uuid.uuid4())[:16]
+                conn.execute(
+                    """INSERT OR REPLACE INTO container_taints
+                       (container_taint_id, run_id, source_file, function_name,
+                        symbol, kind, evidence, depth, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (ct_id, run_id, source_file, function_name,
+                     sym, str(entry.get("kind") or "global"),
+                     str(entry.get("evidence") or ""), int(depth), now),
+                )
 
     def record_constraints(self, *, run_id: str, edge_id: str = "", followup_id: str = "", source_file: str = "", function_name: str = "", line: str = "", facts: list[dict[str, Any]] | None = None) -> None:
         rows = []

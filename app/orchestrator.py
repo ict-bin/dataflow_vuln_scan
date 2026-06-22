@@ -1087,14 +1087,16 @@ class Orchestrator(JudgeMixin):
                 # 就独立触发一次 nonlocal tracker 去搜该符号的读取者，作为新跟入点回灌 callees，
                 # 不再受历史上「仅 callee 解析失败才触发」门槛的限制。按符号集去重，防止回环。
                 _nl_syms = collect_trackable_nonlocals(callees)
-                _nl_sig = ",".join(sorted(s["symbol"] for s in _nl_syms))
-                if (_nl_syms and workflow is not None and dep < max_depth
+                _ct_syms = (result.upstream_entry_metadata or {}).get("container_taint_syms") or []
+                _all_syms = list({s["symbol"]: s for s in _nl_syms + _ct_syms}.values())
+                _nl_sig = ",".join(sorted(s["symbol"] for s in _all_syms))
+                if (_all_syms and workflow is not None and dep < max_depth
                         and _nl_sig and _nl_sig not in nonlocal_searched):
                     nonlocal_searched.add(_nl_sig)
                     _nl_fids = [c.followup_id for c in callees if c.followup_id and (c.tainted_nonlocal or [])]
                     _nl_session = root_sessions_dir / f"{session_label}-tracker-nonlocal.jsonl"
                     self._emit("tracker_start", tid, function=func_name, tracker_type="nonlocal",
-                               symbols=[s["symbol"] for s in _nl_syms], depth=dep)
+                               symbols=[s["symbol"] for s in _all_syms], depth=dep)
                     _nl_readers: list[CalleeRef] = []
                     try:
                         for _fid in _nl_fids:
@@ -1106,7 +1108,7 @@ class Orchestrator(JudgeMixin):
                         _nl_tracked = run_tracker(
                             "nonlocal",
                             {
-                                "tainted_nonlocal": _nl_syms,
+                                "tainted_nonlocal": _all_syms,
                                 "caller_func": func_name,
                                 "caller_file": src_file,
                                 "callee_function": "",

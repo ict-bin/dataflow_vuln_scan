@@ -122,3 +122,27 @@
   ]
 }
 ```
+
+## container_taints（独立于 followups，不要写在 followups 里）
+
+当污点被写入全局变量、静态变量或结构体字段构成的容器（队列、环形缓冲、链表缓冲区、状态池），
+且当前函数内没有任何后续 followup 把这些符号当参数传给被调函数时，在此数组中输出每个被污染的容器符号。
+该字段只记录“驻留事实”，不表达跟入点。没有时输出 `[]`。
+
+`container_taints` 的 JSON 格式：
+```json
+"container_taints": [
+  {
+    "symbol": "g_queue",
+    "kind": "global",
+    "evidence": "L17: g_queue[g_tail] = m",
+    "description": "污点从 recv 取得的 m 写入全局队列 g_queue"
+  }
+]
+```
+
+`container_taints` 中每个元素包含：
+- `symbol`: 被污染的容器符号名（如 `g_queue`、`myport->PqRecvBuffer`）。
+- `kind`: `global | field | static_local`。
+- `evidence`: 带行号的写入证据。
+- `description`: 简述污点如何进入该容器。
