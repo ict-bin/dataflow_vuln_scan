@@ -47,7 +47,7 @@ from .vuln_store import VulnScanStore, FollowupRecord
 from .function_resolver import FunctionResolver, normalize_taint_params
 from .callsite_analysis import analyze_callsite, map_taint_signature
 from .validation_state import normalize_validation_state
-from .followup_resolver import ResolutionContext, ResolutionResult, default_followup_resolver
+from .followup_resolver import ResolutionContext, ResolutionResult, default_followup_resolver, collect_trackable_nonlocals
 from .tracker import run_tracker
 from .param_analyzer import analyze as analyze_param_semantics
 from .scheduler import TaintState, TaintEntry, ValidationCache, _normalize_taint_signature
@@ -710,6 +710,9 @@ class Orchestrator(JudgeMixin):
         target_dir = os.path.abspath(cfg.cwd)
         global_cache = GlobalCache(target_dir)
         taint_state_stack: list[TaintState] = []  # DFS 调用链上的累积校验
+        # Bug A 修复：按符号集去重的非局部读取者搜索集合（跨整个 BFS 共享），
+        # 防止消费者再次上报同一全局符号导致无限重复搜索。
+        nonlocal_searched: set[str] = set()
 
         # 初始化根目录
         root_task_id = task_id or make_id()
@@ -1079,6 +1082,88 @@ class Orchestrator(JudgeMixin):
                 followup_resolver = default_followup_resolver()
                 def _callee_key(c: CalleeRef) -> str:
                     return c.followup_id or f"{c.function_name}|{c.file}|{c.line}|{c.tainted_params}"
+                # ── Bug A 修复：非局部/容器污点读取者搜索（与 callee 解析结果解耦）──
+                # 只要本函数任意 followup 把污点写入命名非局部容器（global/field/static_local），
+                # 就独立触发一次 nonlocal tracker 去搜该符号的读取者，作为新跟入点回灌 callees，
+                # 不再受历史上「仅 callee 解析失败才触发」门槛的限制。按符号集去重，防止回环。
+                _nl_syms = collect_trackable_nonlocals(callees)
+                _nl_sig = ",".join(sorted(s["symbol"] for s in _nl_syms))
+                if (_nl_syms and workflow is not None and dep < max_depth
+                        and _nl_sig and _nl_sig not in nonlocal_searched):
+                    nonlocal_searched.add(_nl_sig)
+                    _nl_fids = [c.followup_id for c in callees if c.followup_id and (c.tainted_nonlocal or [])]
+                    _nl_session = root_sessions_dir / f"{session_label}-tracker-nonlocal.jsonl"
+                    self._emit("tracker_start", tid, function=func_name, tracker_type="nonlocal",
+                               symbols=[s["symbol"] for s in _nl_syms], depth=dep)
+                    _nl_readers: list[CalleeRef] = []
+                    try:
+                        for _fid in _nl_fids:
+                            try:
+                                VulnScanStore(graph_db_path).update_followup_tracker(_fid, tracker_type="nonlocal", tracker_status="running")
+                            except Exception as _e:
+                                logger.warning("unexpected error in orchestrator.py: %s", _e, exc_info=True)
+                        _acfg = workflow._agent_cfg()
+                        _nl_tracked = run_tracker(
+                            "nonlocal",
+                            {
+                                "tainted_nonlocal": _nl_syms,
+                                "caller_func": func_name,
+                                "caller_file": src_file,
+                                "callee_function": "",
+                                "callee_file": src_file,
+                                "callee_line": line_hint or "",
+                                "tainted_params": ",".join(task_cfg.taint_params or []),
+                                "description": "container-resident taint readers (decoupled nonlocal search)",
+                            },
+                            workspace=workflow.ws,
+                            model=_acfg.model,
+                            tools=_acfg.tools or task_cfg.workers.default_tools,
+                            session_file=str(_nl_session),
+                            cancel_event=self._cancel_event,
+                            run_timeout_seconds=min(float(task_cfg.agent_run_timeout_seconds or 300), 600),
+                            pi_max_retries=task_cfg.pi_max_retries,
+                            pi_retry_delay=task_cfg.pi_retry_delay,
+                            task_context={"task_id": tid, "task_root": str(root_output_path.parent), "task_run_root": str(root_out_dir)},
+                        )
+                        for _item in (_nl_tracked.functions or [])[:16]:
+                            _rfn = str(_item.get("function") or _item.get("function_name") or "").strip()
+                            if not _rfn or _rfn == func_name:
+                                continue
+                            _rp = _item.get("tainted_params") or []
+                            if isinstance(_rp, list):
+                                _rp_text = ",".join(str(x).strip() for x in _rp if str(x).strip())
+                            else:
+                                _rp_text = str(_rp or "")
+                            _nl_readers.append(CalleeRef(
+                                function_name=_rfn,
+                                file=str(_item.get("file") or src_file or ""),
+                                line=str(_item.get("line") or ""),
+                                tainted_params=_rp_text or "*",
+                                description=str(_item.get("reason") or "reads tainted non-local container"),
+                                followup_id="",
+                                dispatch_kind="direct_call",
+                                tainted_nonlocal=[],
+                            ))
+                        _nl_status = "resolved" if _nl_readers else "unresolved"
+                        for _fid in _nl_fids:
+                            try:
+                                VulnScanStore(graph_db_path).update_followup_tracker(
+                                    _fid, tracker_type="nonlocal", tracker_status=_nl_status,
+                                    result={"functions": [r.model_dump() for r in _nl_readers], "error": _nl_tracked.error},
+                                )
+                            except Exception as _e:
+                                logger.warning("unexpected error in orchestrator.py: %s", _e, exc_info=True)
+                        self._emit("tracker_done", tid, function=func_name, tracker_type="nonlocal",
+                                   targets=[r.function_name for r in _nl_readers], error=_nl_tracked.error, depth=dep)
+                    except Exception as _nl_exc:
+                        logger.exception("nonlocal tracker failed func=%s syms=%s", func_name, _nl_sig)
+                        for _fid in _nl_fids:
+                            try:
+                                VulnScanStore(graph_db_path).update_followup_tracker(_fid, tracker_type="nonlocal", tracker_status="error", result={"error": str(_nl_exc)})
+                            except Exception as _e:
+                                logger.warning("unexpected error in orchestrator.py: %s", _e, exc_info=True)
+                    if _nl_readers:
+                        callees.extend(_nl_readers)
                 for callee in callees:
                     resolved_name, resolved_file = _resolve_function_pointer_followup(target_dir, callee, func_name)
                     if resolved_name != callee.function_name:
