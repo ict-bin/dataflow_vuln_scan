@@ -91,6 +91,7 @@
   - `symbol`: 如 `g_config.key`、`this->ctx_`、`ClassName::static_field`。
   - `kind`: `global | field | static_local`。
   - `evidence`: 带行号的写入证据。
+- `container_taints`: 与 followups 平行的独立字段（写在 JSON 根级，不在 followups 数组里）。当函数把污点写入了命名全局/静态/字段容器，且无后续 followup 把该容器作为参数传递时，在此输出 `[{"symbol","kind","evidence"}]`，否则 `[]`。kind 取 `global|field|static_local`。
 - `validations`: 调用该 callee 前对这些污点参数已经生效且支配 callsite 的校验事实。没有校验时输出 `[]`，不要省略字段。
 
 `validations` 必须使用统一 JSON 语言，不要只写中文描述：
@@ -121,28 +122,3 @@
     }
   ]
 }
-```
-
-## container_taints（独立于 followups，不要写在 followups 里）
-
-当污点被写入全局变量、静态变量或结构体字段构成的容器（队列、环形缓冲、链表缓冲区、状态池），
-且当前函数内没有任何后续 followup 把这些符号当参数传给被调函数时，在此数组中输出每个被污染的容器符号。
-该字段只记录“驻留事实”，不表达跟入点。没有时输出 `[]`。
-
-`container_taints` 的 JSON 格式：
-```json
-"container_taints": [
-  {
-    "symbol": "g_queue",
-    "kind": "global",
-    "evidence": "L17: g_queue[g_tail] = m",
-    "description": "污点从 recv 取得的 m 写入全局队列 g_queue"
-  }
-]
-```
-
-`container_taints` 中每个元素包含：
-- `symbol`: 被污染的容器符号名（如 `g_queue`、`myport->PqRecvBuffer`）。
-- `kind`: `global | field | static_local`。
-- `evidence`: 带行号的写入证据。
-- `description`: 简述污点如何进入该容器。
