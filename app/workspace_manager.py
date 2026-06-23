@@ -221,6 +221,11 @@ class WorkspaceManager:
             if _mirror.exists():
                 shutil.rmtree(str(_mirror), ignore_errors=True)
                 logger.info("workspace_manager: cleaned staging dir %s", str(_mirror))
+            # Clean up the NFS run/sessions/ temp copies (periodic sync wrote here)
+            _nfs_sessions = self._nfs_run_root.parent.parent / "sessions"
+            if _nfs_sessions.exists() and _nfs_sessions.is_dir():
+                shutil.rmtree(str(_nfs_sessions), ignore_errors=True)
+                logger.info("workspace_manager: cleaned run/sessions temp copies %s", str(_nfs_sessions))
 
             logger.info(
                 "workspace_manager: final sync completed %s status=%s",
@@ -345,9 +350,9 @@ class WorkspaceManager:
     def _periodic_sync_loop(self) -> None:
         """Background thread: periodically sync sessions and result files to NFS.
 
-        We write to {task_root}/.run_nfs/ on NFS — the well-known mirror
-        directory that API path resolution helpers check as fallback.
-        The directory hierarchy mirrors the run/ structure including epochs/.
+        Writes directly to run/sessions/ and run/ on NFS — the run/ directory
+        itself is NOT a symlink (only run/epochs/NNNN/ is), so the frontend
+        can always read sessions from run/sessions/.
         """
         interval = _sync_interval()
         while not self._stop_event.wait(interval):
@@ -355,54 +360,43 @@ class WorkspaceManager:
                 continue
             if not self._local_run_root.exists():
                 continue
-            # Compute the NFS mirror root: {task_root}/.run_nfs/
-            # self._nfs_run_root is {task_root}/run/epochs/{epoch:04d}/
-            # So task_root = self._nfs_run_root.parent.parent.parent
-            task_root = self._nfs_run_root.parent.parent.parent
-            mirror_root = task_root / ".run_nfs"
-            # Mirror the epochs/ structure so session files resolve correctly
-            epochs_rel = self._nfs_run_root.relative_to(task_root / "run")
-            mirror_epoch_root = mirror_root / epochs_rel
+            # run/ itself is on NFS, not symlinked — write here directly
+            # self._nfs_run_root = {root}/run/epochs/{epoch:04d}/
+            # nfs_run_parent = {root}/run/
+            nfs_run_parent = self._nfs_run_root.parent.parent
             try:
-                # Sync sessions/ directory (frontend needs these)
+                # Sync sessions/ to run/sessions/ on NFS (frontend reads this)
                 local_sessions = self._local_run_root / "sessions"
                 if local_sessions.exists():
-                    nfs_sessions = mirror_epoch_root / "sessions"
+                    nfs_sessions = nfs_run_parent / "sessions"
                     nfs_sessions.mkdir(parents=True, exist_ok=True)
                     self._sync_sessions_incremental(local_sessions, nfs_sessions)
 
-                # Sync vuln-scan.sqlite (frontend vuln-graph API)
+                # Sync vuln-scan.sqlite
                 local_db = self._local_run_root / "vuln-scan.sqlite"
                 if local_db.exists():
-                    nfs_db = mirror_epoch_root / "vuln-scan.sqlite"
-                    nfs_db.parent.mkdir(parents=True, exist_ok=True)
+                    nfs_db = nfs_run_parent / "vuln-scan.sqlite"
                     _safe_copyfile(str(local_db), str(nfs_db))
 
-                # Sync result.json (frontend task result API)
+                # Sync result.json
                 local_result = self._local_run_root / "result.json"
                 if local_result.exists():
-                    nfs_result = mirror_epoch_root / "result.json"
+                    nfs_result = nfs_run_parent / "result.json"
                     _safe_copyfile(str(local_result), str(nfs_result))
 
                 # Sync output/ directory
                 local_output = self._local_run_root.parent / "output"
                 if local_output.exists():
-                    nfs_output = mirror_root / "output"
+                    nfs_output = nfs_run_parent / "output"
                     nfs_output.mkdir(parents=True, exist_ok=True)
                     _copy_tree(str(local_output), str(nfs_output))
-
-                # Sync dataflow/ directory (callee resolve may need this)
-                local_df = self._local_run_root / "dataflow"
-                if local_df.exists():
-                    nfs_df = mirror_epoch_root / "dataflow"
-                    _copy_tree(str(local_df), str(nfs_df))
             except Exception as exc:
                 logger.debug(
                     "workspace_manager: periodic sync failed: %s", exc,
                 )
 
     def _sync_sessions_incremental(self, local_sessions: Path, nfs_sessions: Path) -> None:
-        """Copy session files to the NFS mirror directory."""
+        """Copy session files to the NFS sessions directory."""
         nfs_sessions.mkdir(parents=True, exist_ok=True)
         for src in local_sessions.iterdir():
             if src.is_file():
