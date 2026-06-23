@@ -174,14 +174,22 @@ def _format_dimensions_md(value: Any) -> str:
 
 
 def _format_vuln_report_md(item: dict, finding_id: str, source_file: str, function_name: str, line: str) -> str:
-    """Build the vulnerability-report.md body from a structured finding.
+    """Build the vulnerability-report.md body with 8 standardized sections.
 
-    Handles the structured exploitability object and four-dimension self-check
-    introduced by the updated vuln-miners prompt, while staying backward
-    compatible with free-text fields.
+    Sections:
+      1. 漏洞概述    — summary
+      2. 漏洞最初入口 — entry_point
+      3. 漏洞所在文件 — source_file
+      4. 漏洞所在函数 — function_name
+      5. 漏洞所在行号 — line
+      6. 漏洞触发路径 — trigger_path
+      7. 漏洞危害     — exploitability
+      8. 四维度判断指标 — dimensions
     """
     title = str(item.get("title") or finding_id)
     summary = str(item.get("summary") or "")
+    entry_point = str(item.get("entry_point") or "")
+    trigger_path = str(item.get("trigger_path") or "")
     evidence = str(item.get("evidence") or "")
     vuln_type = str(item.get("vuln_type") or "unknown")
     severity = str(item.get("severity") or "unknown")
@@ -189,27 +197,35 @@ def _format_vuln_report_md(item: dict, finding_id: str, source_file: str, functi
     sections = [
         f"# {title}",
         "",
-        "## 位置",
-        f"- 文件: `{source_file}`",
-        f"- 函数: `{function_name}`",
-        f"- 行号: `{line or 'unknown'}`",
-        f"- 类型: `{vuln_type}`",
-        f"- 严重性: `{severity}`",
-        f"- 置信度: `{confidence}`",
-        "",
-        "## 摘要",
+        "## 漏洞概述",
         summary,
         "",
-        "## 证据",
-        evidence,
+        "## 漏洞最初入口",
+        entry_point or "（未提供）",
         "",
-        "## 可利用性",
+        "## 漏洞位置",
+        f"- **所在文件**: `{source_file}`",
+        f"- **所在函数**: `{function_name}`",
+        f"- **所在行号**: `{line or 'unknown'}`",
+        f"- **漏洞类型**: `{vuln_type}`",
+        f"- **严重程度**: `{severity}`",
+        f"- **置信度**: `{confidence}`",
+        "",
+        "## 漏洞触发路径",
+        trigger_path or "（未提供）",
+        "",
+        "## 漏洞危害",
         _format_exploitability_md(item.get("exploitability")),
+        "",
+        "## 漏洞证据",
+        evidence,
     ]
     dim_md = _format_dimensions_md(item.get("dimensions"))
     if dim_md:
         sections.append("")
-        sections.append(dim_md)
+        sections.append("## 四维度判断指标")
+        dim_body = dim_md.replace("## 四维度自检", "", 1).strip()
+        sections.append(dim_body)
     return "\n".join(sections) + "\n"
 
 
@@ -616,8 +632,17 @@ class DataflowVulnWorkflow:
         prompt = (
             f"# 阶段：漏洞挖掘 Fork\n\n目标函数: `{self.src_file}::{self.func_name}`\n污点: {', '.join(self.taint_params)}\n\n"
             "基于下面的单函数污点传播结果，判断是否存在漏洞。必须输出 JSON: {\"findings\":[]}。\n"
-            "每个 finding 必须包含 `source_file`（漏洞所在文件，相对源码根目录优先）、`function_name`（漏洞所在函数名）、`line`（漏洞发生行号，如 L123 或 123）。\n\n"
-            "**所有文本输出必须使用简体中文**。JSON key 保持英文，`title`/`summary`/`evidence`/`exploitability`/`dimensions.reason` 等文本字段的 value 全部用中文书写。\n"
+            "每个 finding 必须包含以下字段：\n"
+            "- `source_file`：漏洞所在文件（相对源码根目录优先）\n"
+            "- `function_name`：漏洞所在函数名\n"
+            "- `line`：漏洞发生行号，如 L123 或 123\n"
+            "- `entry_point`：漏洞最初入口，描述污点最初从哪个外部入口进入系统、经过的关键中间节点\n"
+            "- `trigger_path`：漏洞触发路径，分步骤描述从入口到漏洞点的完整调用链（如 步骤1: xxx → 步骤2: xxx → 步骤3: 触发漏洞）\n"
+            "- `summary`：漏洞概述（源→sink路径、缺失的防御、为何可绕过、实质后果）\n"
+            "- `evidence`：带行号的代码证据\n"
+            "- `exploitability`：{preconditions, trigger_complexity, worst_case_impact}\n"
+            "- `dimensions`：四维度自检{code_accurate, path_reachable, unmitigated, security_impact}\n\n"
+            "**所有文本输出必须使用简体中文**。JSON key 保持英文，`title`/`summary`/`evidence`/`entry_point`/`trigger_path`/`exploitability`/`dimensions.reason` 等文本字段的 value 全部用中文书写。\n"
             "`severity` 和 `vuln_type` 使用英文归一化值（如 `heap-buffer-overflow`、`critical`），不做翻译。\n\n"
             f"```markdown\n{dataflow_text[:30000]}\n```"
         )
