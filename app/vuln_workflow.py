@@ -348,6 +348,7 @@ class DataflowVulnWorkflow:
         self.run_id = f"{task_id}:{hashlib.sha1((src_file+'::'+func_name).encode()).hexdigest()[:12]}"
         self.project_id = str(getattr(cfg, "project_id", "") or "").strip()
         self.task_name = str(getattr(cfg, "task_name", "") or "").strip()
+        self.parent_task_name = str(getattr(cfg, "parent_task_name", "") or "").strip()
         self.store = VulnScanStore(graph_db_path or (self.out_dir / "vuln-scan.sqlite"))
         self.vuln_root = Path(vuln_output_root) if vuln_output_root is not None else (self.out_dir.parent / "output" / "vulnerabilities")
         self.vuln_root.mkdir(parents=True, exist_ok=True)
@@ -748,6 +749,7 @@ class DataflowVulnWorkflow:
                     project_id=self.project_id,
                     task_id=self.task_id,
                     task_name=self.task_name,
+                    parent_task_name=self.parent_task_name,
                     finding=rec,
                     source_root=str(self.cfg.cwd or ""),
                     report_path=str(report_path),
