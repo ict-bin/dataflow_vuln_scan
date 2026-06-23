@@ -27,6 +27,10 @@ from app.service import task_service as task_service_module
 from app.service.task_service import TaskService
 
 
+def _unexpected_cleanup_call(*args, **kwargs):
+    raise AssertionError(f"unexpected real cleanup invocation: args={args}, kwargs={kwargs}")
+
+
 class TaskTimelineTests(unittest.TestCase):
     def setUp(self):
         self.engine = create_engine(
@@ -46,8 +50,17 @@ class TaskTimelineTests(unittest.TestCase):
         self.output_dir = self.files_root / "output"
         self.input_dir.mkdir(parents=True, exist_ok=True)
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        self._cleanup_guard_patchers = [
+            patch("app.service.task_service.cleanup_worker_runtime_processes", side_effect=_unexpected_cleanup_call),
+            patch("app.service.task_service.cleanup_task_agent_processes", side_effect=_unexpected_cleanup_call),
+            patch("app.service.task_service.cleanup_orphan_pi_processes", side_effect=_unexpected_cleanup_call),
+        ]
+        for patcher in self._cleanup_guard_patchers:
+            patcher.start()
 
     def tearDown(self):
+        for patcher in reversed(getattr(self, "_cleanup_guard_patchers", [])):
+            patcher.stop()
         if self.previous_fileserver_root is None:
             os.environ.pop("FILESERVER_ROOT", None)
         else:
@@ -218,7 +231,8 @@ class TaskTimelineTests(unittest.TestCase):
             row.dispatch_status = "leased"
             db.commit()
 
-            payload = self.service.restart_task(db, task_id)
+            with patch.object(self.service, "_cleanup_worker_runtime", return_value=0):
+                payload = self.service.restart_task(db, task_id)
 
             self.assertEqual("pending", payload["status"])
             self.assertEqual(3, payload["control_version"])
@@ -325,7 +339,7 @@ class TaskTimelineTests(unittest.TestCase):
         finally:
             task_service_module._run_execute_task_in_thread = previous_runner
 
-    def test_resume_task_records_task_resumed_event(self):
+    def test_resume_task_currently_records_task_retried_event(self):
         task_id = self._create_task()
         db = self._session()
         previous_loader = task_service_module._load_svc_config_from_db
@@ -339,12 +353,14 @@ class TaskTimelineTests(unittest.TestCase):
             task_service_module._load_svc_config_from_db = lambda _db, _project_id: SimpleNamespace(
                 output_dir=str(self.output_dir)
             )
-            payload = self.service.resume_task(db, task_id)
+            with patch.object(self.service, "_cleanup_worker_runtime", return_value=0):
+                payload = self.service.resume_task(db, task_id)
 
             self.assertEqual("pending", payload["status"])
             self.assertEqual(6, payload["control_version"])
             timeline = self.service.get_task_timeline(db, task_id)
-            self.assertEqual("task_resumed", timeline["events"][0]["event_type"])
+            self.assertEqual("task_retried", timeline["events"][0]["event_type"])
+            self.assertEqual("restart_requested", timeline["events"][0]["payload"]["reason"])
             self.assertEqual(3, timeline["events"][0]["payload"]["start_stage"])
             self.assertIn(f"{task_id}/run/epochs/0002/workspace-worker-0", timeline["events"][0]["payload"]["resume_workspace"])
         finally:
