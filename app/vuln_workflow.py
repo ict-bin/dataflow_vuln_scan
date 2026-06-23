@@ -415,6 +415,8 @@ class DataflowVulnWorkflow:
             "请一个 Worker 在当前函数内同时分析所有污点，不要按污点拆分 worker。\n"
             "不要写任何中间产物文件；禁止创建 `taint-graph.json`、`tainted.list`、`taintvars.json`、`dataflow-*.md` 或 `taint-flow-*.md`。\n"
             "请在最终回复中直接输出一个 JSON 对象，包含 function/source_file/taints/edges/followups/termination。\n"
+            "**所有文本字段必须使用简体中文**：description、reason、evidence、sanitizer_effect（值为中文如 `完整清洗`/`部分清洗`/`未清洗`/`未知`）、termination_reason 等全部用中文书写。\n"
+            "JSON key 保持英文，`taints[].kind` 等枚举值保持英文。\n"
             "`followups` 是唯一跟入点输出，每个元素必须包含 file/function/line/tainted_params/reason/dispatch_kind/tainted_nonlocal/validations；服务端会直接写入 SQLite。\n"
             "`dispatch_kind` 用于说明调用机制：direct_call/function_pointer/vtable_dispatch/hook_callback/macro/inline/unknown。\n"
             "如果污点写入全局变量、静态变量或类成员变量，必须在相关 followup 的 `tainted_nonlocal` 中记录 symbol/kind/evidence，供后续 tracker 追踪使用点。\n"
@@ -615,6 +617,8 @@ class DataflowVulnWorkflow:
             f"# 阶段：漏洞挖掘 Fork\n\n目标函数: `{self.src_file}::{self.func_name}`\n污点: {', '.join(self.taint_params)}\n\n"
             "基于下面的单函数污点传播结果，判断是否存在漏洞。必须输出 JSON: {\"findings\":[]}。\n"
             "每个 finding 必须包含 `source_file`（漏洞所在文件，相对源码根目录优先）、`function_name`（漏洞所在函数名）、`line`（漏洞发生行号，如 L123 或 123）。\n\n"
+            "**所有文本输出必须使用简体中文**。JSON key 保持英文，`title`/`summary`/`evidence`/`exploitability`/`dimensions.reason` 等文本字段的 value 全部用中文书写。\n"
+            "`severity` 和 `vuln_type` 使用英文归一化值（如 `heap-buffer-overflow`、`critical`），不做翻译。\n\n"
             f"```markdown\n{dataflow_text[:30000]}\n```"
         )
         miner_system_prompt = (
