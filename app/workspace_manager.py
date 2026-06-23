@@ -240,19 +240,9 @@ class WorkspaceManager:
                 "workspace_manager: sync_back failed: %s", exc, exc_info=True,
             )
         finally:
-            # Clean up the local temp directory
-            if self._local_run_root.exists():
-                try:
-                    shutil.rmtree(str(self._local_run_root))
-                    logger.info(
-                        "workspace_manager: cleaned local %s",
-                        str(self._local_run_root),
-                    )
-                except OSError as exc:
-                    logger.warning(
-                        "workspace_manager: failed to clean local %s: %s",
-                        str(self._local_run_root), exc,
-                    )
+            # Clean up the local temp directory (with retries)
+            if self._local_run_root and self._local_run_root.exists():
+                _cleanup_local_temp(self._local_run_root)
 
     @staticmethod
     def cleanup_temp_for_task(task_id: str) -> None:
@@ -263,19 +253,9 @@ class WorkspaceManager:
             return
         root = _local_root()
         for pattern in [f"{task_id}_epoch*", f"{task_id}"]:
-            for path in root.glob(pattern):
-                if path.is_dir():
-                    try:
-                        shutil.rmtree(str(path))
-                        logger.info(
-                            "workspace_manager: cleaned stale temp %s",
-                            str(path),
-                        )
-                    except OSError as exc:
-                        logger.warning(
-                            "workspace_manager: failed to clean %s: %s",
-                            str(path), exc,
-                        )
+            for path in list(root.glob(pattern)):
+                if path.is_dir() and not path.is_symlink():
+                    _cleanup_local_temp(path)
                 elif path.is_symlink():
                     try:
                         path.unlink()
@@ -484,3 +464,35 @@ def _safe_copyfile(src: str, dst: str) -> bool:
     except OSError as exc:
         logger.debug("_safe_copyfile: %s → %s failed: %s", src, dst, exc)
         return False
+
+
+def _cleanup_local_temp(local_path: Path) -> None:
+    """Remove local temp directory with retries and forced cleanup."""
+    max_attempts = 3
+    for attempt in range(1, max_attempts + 1):
+        try:
+            if not local_path.exists():
+                logger.info("workspace_manager: local temp already gone %s", str(local_path))
+                return
+            shutil.rmtree(str(local_path))
+            logger.info("workspace_manager: cleaned local %s", str(local_path))
+            return
+        except OSError as exc:
+            if attempt < max_attempts:
+                time.sleep(1.0 * attempt)
+                logger.debug(
+                    "workspace_manager: cleanup retry %d/%d for %s: %s",
+                    attempt, max_attempts, str(local_path), exc,
+                )
+            else:
+                # Final attempt: force cleanup
+                logger.warning(
+                    "workspace_manager: forced cleanup %s after %d attempts",
+                    str(local_path), max_attempts,
+                )
+                shutil.rmtree(str(local_path), ignore_errors=True)
+                if local_path.exists():
+                    logger.error(
+                        "workspace_manager: CRITICAL - failed to clean local %s",
+                        str(local_path),
+                    )

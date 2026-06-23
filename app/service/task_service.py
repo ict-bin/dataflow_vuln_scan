@@ -2577,18 +2577,6 @@ class TaskService:
             except Exception:
                 logger.warning("failed to commit error terminal state after retries", exc_info=True)
         finally:
-            # ── Sync local workspace back to NFS ────────────────────────────
-            try:
-                _result = result
-            except NameError:
-                _result = None
-            if ws_manager.enabled:
-                terminal_status = (_result.status.value if _result else "error")
-                try:
-                    ws_manager.sync_back_and_cleanup(status=terminal_status)
-                except Exception as _sync_exc:
-                    logger.error("workspace sync back failed: %s", _sync_exc, exc_info=True)
-
             ctx = _get_running_task_context(task_id)
             if ctx is not None:
                 ctx.lease_stop_requested.set()
@@ -2634,6 +2622,19 @@ class TaskService:
                 )
             except Exception:
                 logger.warning("failed to cleanup orphan pi processes for %s", task_id, exc_info=True)
+
+            # ── Sync local workspace back to NFS (after pi cleanup) ──────────
+            try:
+                _result = result
+            except NameError:
+                _result = None
+            if ws_manager.enabled:
+                terminal_status = (_result.status.value if _result else "error")
+                try:
+                    ws_manager.sync_back_and_cleanup(status=terminal_status)
+                except Exception as _sync_exc:
+                    logger.error("workspace sync back failed: %s", _sync_exc, exc_info=True)
+
             try:
                 snapshot = load_execution_snapshot(db, task_id)
                 if (
