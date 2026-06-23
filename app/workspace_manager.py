@@ -347,7 +347,7 @@ class WorkspaceManager:
 
         We write to {task_root}/.run_nfs/ on NFS — the well-known mirror
         directory that API path resolution helpers check as fallback.
-        The directory hierarchy mirrors the run/ structure.
+        The directory hierarchy mirrors the run/ structure including epochs/.
         """
         interval = _sync_interval()
         while not self._stop_event.wait(interval):
@@ -360,23 +360,28 @@ class WorkspaceManager:
             # So task_root = self._nfs_run_root.parent.parent.parent
             task_root = self._nfs_run_root.parent.parent.parent
             mirror_root = task_root / ".run_nfs"
+            # Mirror the epochs/ structure so session files resolve correctly
+            epochs_rel = self._nfs_run_root.relative_to(task_root / "run")
+            mirror_epoch_root = mirror_root / epochs_rel
             try:
                 # Sync sessions/ directory (frontend needs these)
                 local_sessions = self._local_run_root / "sessions"
                 if local_sessions.exists():
-                    self._sync_sessions_incremental(local_sessions, mirror_root)
+                    nfs_sessions = mirror_epoch_root / "sessions"
+                    nfs_sessions.mkdir(parents=True, exist_ok=True)
+                    self._sync_sessions_incremental(local_sessions, nfs_sessions)
 
                 # Sync vuln-scan.sqlite (frontend vuln-graph API)
                 local_db = self._local_run_root / "vuln-scan.sqlite"
                 if local_db.exists():
-                    nfs_db = mirror_root / "vuln-scan.sqlite"
+                    nfs_db = mirror_epoch_root / "vuln-scan.sqlite"
                     nfs_db.parent.mkdir(parents=True, exist_ok=True)
                     _safe_copyfile(str(local_db), str(nfs_db))
 
                 # Sync result.json (frontend task result API)
                 local_result = self._local_run_root / "result.json"
                 if local_result.exists():
-                    nfs_result = mirror_root / "result.json"
+                    nfs_result = mirror_epoch_root / "result.json"
                     _safe_copyfile(str(local_result), str(nfs_result))
 
                 # Sync output/ directory
@@ -389,16 +394,15 @@ class WorkspaceManager:
                 # Sync dataflow/ directory (callee resolve may need this)
                 local_df = self._local_run_root / "dataflow"
                 if local_df.exists():
-                    nfs_df = mirror_root / "dataflow"
+                    nfs_df = mirror_epoch_root / "dataflow"
                     _copy_tree(str(local_df), str(nfs_df))
             except Exception as exc:
                 logger.debug(
                     "workspace_manager: periodic sync failed: %s", exc,
                 )
 
-    def _sync_sessions_incremental(self, local_sessions: Path, mirror_root: Path) -> None:
+    def _sync_sessions_incremental(self, local_sessions: Path, nfs_sessions: Path) -> None:
         """Copy session files to the NFS mirror directory."""
-        nfs_sessions = mirror_root / "sessions"
         nfs_sessions.mkdir(parents=True, exist_ok=True)
         for src in local_sessions.iterdir():
             if src.is_file():

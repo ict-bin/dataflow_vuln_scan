@@ -33,12 +33,13 @@ def _resolve_run_path(row: AppDvsTask, relative: str = "") -> Path | None:
     """Resolve a path under run/ with NFS sync mirror fallback.
 
     When DVS_LOCAL_WORKSPACE_ENABLED is active on a Worker pod, the
-    NFS run/ directory is a symlink to local /tmp/.  On API pods
-    (different node), this symlink is broken.  The Worker's periodic
-    sync thread writes a copy to {task_root}/.run_nfs/ on NFS.
+    NFS run/epochs/NNNN/ directory is a symlink to local /tmp/.
+    On API pods (different node), this symlink is broken.
 
-    This function tries the primary path first.  If it's a broken
-    symlink or missing, it falls back to the .run_nfs/ mirror.
+    This function first checks if the primary path is accessible.
+    If the primary run/ directory exists but its epochs/ subdirectory
+    contains broken symlinks (indicating active workspace redirection),
+    it falls back to the .run_nfs/ mirror.
     """
     root = _task_root(row)
     if root is None:
@@ -51,19 +52,29 @@ def _resolve_run_path(row: AppDvsTask, relative: str = "") -> Path | None:
     target = primary / relative if relative else primary
     fallback = root / _NFS_MIRROR_DIR / relative if relative else root / _NFS_MIRROR_DIR
 
-    # Primary path works → use it
-    if _path_readable(target):
+    # Check if epochs/ contains broken symlinks -> workspace is redirected
+    epochs_dir = primary / "epochs"
+    has_broken_epoch_symlinks = False
+    if epochs_dir.exists():
+        for entry in epochs_dir.iterdir():
+            if entry.is_symlink() and not _path_readable(entry):
+                has_broken_epoch_symlinks = True
+                break
+
+    # Use primary path only if it's readable AND epochs are not broken
+    if _path_readable(target) and not has_broken_epoch_symlinks:
         return target
 
-    # Primary is broken symlink → try NFS mirror
+    # Fall back to .run_nfs mirror
     if fallback.exists():
         logger.debug(
-            "_resolve_run_path: primary %s not readable, falling back to %s",
+            "_resolve_run_path: primary %s has broken epoch symlinks, "
+            "falling back to %s",
             str(target), str(fallback),
         )
         return fallback
 
-    # Neither works — return primary (caller will get a clean error)
+    # Neither works — return primary (caller gets a clean error)
     return target
 
 
