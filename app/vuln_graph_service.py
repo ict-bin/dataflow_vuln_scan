@@ -11,13 +11,20 @@ from .vuln_store import VulnScanStore
 def load_vuln_scan_graph(run_root: str | Path) -> dict[str, Any]:
     root = Path(run_root)
     candidates: list[Path] = []
+    # NFS mirror directory (written by Worker pod's periodic sync)
+    _nfs_mirror_dir = ".run_nfs"
+
     if root.parts and "epochs" in root.parts:
         epoch_idx = list(root.parts).index("epochs")
         run_dir = Path(*root.parts[:epoch_idx])
         task_output_dir = run_dir.parent / "output"
+        task_root = run_dir.parent
         # Prefer final archives over epoch-local snapshots so the UI sees the
         # completed recursive graph instead of an early pending followup view.
         candidates.extend([task_output_dir, run_dir])
+        # Also check .run_nfs mirror (for API pods during execution)
+        candidates.append(task_root / _nfs_mirror_dir)
+        candidates.append(task_root / _nfs_mirror_dir / "output")
         if root.name.isdigit():
             candidates.append(root)
         epochs_dir = run_dir / "epochs"
@@ -35,11 +42,17 @@ def load_vuln_scan_graph(run_root: str | Path) -> dict[str, Any]:
         candidates.extend([
             root / "output",
             root.parent / "output",
+            root.parent / _nfs_mirror_dir,
+            root.parent / _nfs_mirror_dir / "output",
             root,
         ])
     seen: set[Path] = set()
     for candidate in candidates:
-        resolved = candidate.resolve()
+        try:
+            resolved = candidate.resolve()
+        except (OSError, RuntimeError):
+            # Broken symlink (Worker pod replaced path with symlink to local /tmp)
+            continue
         if resolved in seen:
             continue
         seen.add(resolved)

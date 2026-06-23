@@ -49,7 +49,21 @@ def _safe_session_file(root: Path, relative_path: str) -> Path:
     if target.suffix != ".jsonl":
         from fastapi import HTTPException
         raise HTTPException(400, "仅支持 jsonl 会话文件")
+    # NFS sync mirror fallback: if primary path is broken symlink
+    # (worker pod replaced run/ with symlink to local /tmp),
+    # try .run_nfs/ mirror written by periodic sync.
+    if not _path_accessible(target):
+        mirror = root / ".run_nfs" / relative_path
+        if _path_accessible(mirror):
+            return mirror
     return target
+
+
+def _path_accessible(path: Path) -> bool:
+    try:
+        return path.exists()
+    except OSError:
+        return False
 
 
 def _parse_session_file(path: Path) -> dict[str, object]:
@@ -89,12 +103,14 @@ def _parse_session_file(path: Path) -> dict[str, object]:
 
 
 def _build_task_session_catalog(row: AppDvsTask) -> dict[str, object]:
-    from .task_paths import _task_root
+    from .task_paths import _task_root, _resolve_run_path
     from .task_result import _load_task_result_json
     from .session_index import build_session_catalog
 
     root = _task_root(row)
-    run_root = root / "run" if str(root) else Path()
+    # Resolve run_root with NFS mirror fallback (for API pods when
+    # Worker pod has run/ as symlink to local storage)
+    run_root = _resolve_run_path(row) or (root / "run" if root else Path())
     if not run_root.exists():
         return {
             "task_id": row.task_id,

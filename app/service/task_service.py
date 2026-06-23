@@ -30,6 +30,7 @@ from app.logging_utils import log_event
 from app.models import SwarmEvent, TaskStatus
 from app.orchestrator import Orchestrator
 from app.runtime_context import HEARTBEAT_INTERVAL_SECONDS, WORKER_ID, MAX_LOCAL_RUNNING_TASKS
+from app.workspace_manager import WorkspaceManager
 from app.service.execution_coordinator import (
     _auto_recovery_payload,
     _clear_auto_recovery_flag,
@@ -46,7 +47,7 @@ from app.service.execution_coordinator import (
 from app.agent_process import cleanup_orphan_pi_processes, cleanup_task_agent_processes, cleanup_worker_runtime_processes
 from app.time_utils import isoformat_local, now_local
 from .task_events import _record_task_event, _task_event_dedupe_key, _build_task_event_response
-from .task_paths import _task_root, _task_run_root, _task_epoch_run_root, _task_result_path, _latest_epoch_run_root, _epoch_label_from_path
+from .task_paths import _task_root, _task_run_root, _task_epoch_run_root, _task_result_path, _latest_epoch_run_root, _epoch_label_from_path, _resolve_run_path
 from .task_session import _write_json_atomic, _safe_session_file, _parse_session_file, _build_task_session_catalog
 from .task_result import (
     _load_task_result_json, _write_task_result_json, _build_entry_analysis_context,
@@ -1280,7 +1281,7 @@ class TaskService:
 
     def get_task_evaluation(self, db: Session, task_id: str) -> dict:
         row = self._get_or_404(db, task_id)
-        run_root = _latest_epoch_run_root(row)
+        run_root = _resolve_run_path(row) or _latest_epoch_run_root(row)
         warnings: list[str] = []
         if not run_root or not run_root.is_dir():
             return {
@@ -1601,6 +1602,8 @@ class TaskService:
         output_dir_removed = False
         cleanup_errors: list[str] = []
         if task_root is not None:
+            # 清除该任务的本地临时 workspace（防止跨任务污染）
+            WorkspaceManager.cleanup_temp_for_task(task_id)
             for child_name in ("run", "output"):
                 child = task_root / child_name
                 if child.exists():
@@ -1788,6 +1791,8 @@ class TaskService:
         files_delete_error: str | None = None
         if delete_files and row.output_path:
             task_dir = os.path.join(row.output_path, task_id)
+            # 清除该任务的本地临时 workspace
+            WorkspaceManager.cleanup_temp_for_task(task_id)
             if os.path.isdir(task_dir):
                 try:
                     shutil.rmtree(task_dir)
@@ -1831,6 +1836,7 @@ class TaskService:
         ctx = None
         task_root_path: str | None = None
         epoch_run_root_path: str | None = None
+        ws_manager = WorkspaceManager()  # init early for finally block access
 
         # Snapshot any previously-saved events BEFORE execution begins.
         # On resume, row.stages_json already has correct historical events
@@ -2042,6 +2048,8 @@ class TaskService:
                         except OSError as exc:
                             logger.warning("clean restart: failed to remove run root %s: %s", run_root, exc)
                     run_root.mkdir(parents=True, exist_ok=True)
+                    # 清除该任务本地临时 workspace（防止跨任务污染）
+                    WorkspaceManager.cleanup_temp_for_task(task_id)
                     # 完全清除 output/（图谱、漏洞、报告、flag 全部清除）
                     output_root = task_root / "output"
                     if output_root.exists():
@@ -2178,6 +2186,25 @@ class TaskService:
                     except OSError as exc:
                         logger.warning("failed to clean epoch run root %s: %s", epoch_run_root, exc)
                 epoch_run_root.mkdir(parents=True, exist_ok=True)
+
+            # ── Pod-local workspace (NFS IO mitigation) ─────────────────────
+            ws_manager = WorkspaceManager()
+            # Clean any leftover local temp from previous crashed tasks
+            ws_manager.cleanup_temp_for_task(task_id)
+            # Resolve broken symlinks from previous crashed tasks
+            if task_root_path:
+                WorkspaceManager.resolve_broken_symlinks(task_root_path)
+            # Replace epoch_run_root with symlink to local storage
+            ws_manager.setup(
+                task_id=task_id,
+                epoch=epoch,
+                nfs_run_root=epoch_run_root,
+                on_event=None,  # event callback set later
+            )
+            # Start periodic session sync for frontend access via NFS
+            ws_manager.start_periodic_sync()
+            # Note: epoch_run_root is NOW a symlink to local storage.
+            # The orchestrator uses the NFS path transparently — all IO goes local.
 
             cfg = build_task_config(svc, row.prompt_content, cwd=row.source_root_path or row.input_path)
             agent_task_key = _task_agent_key(tcfg)
@@ -2550,6 +2577,18 @@ class TaskService:
             except Exception:
                 logger.warning("failed to commit error terminal state after retries", exc_info=True)
         finally:
+            # ── Sync local workspace back to NFS ────────────────────────────
+            try:
+                _result = result
+            except NameError:
+                _result = None
+            if ws_manager.enabled:
+                terminal_status = (_result.status.value if _result else "error")
+                try:
+                    ws_manager.sync_back_and_cleanup(status=terminal_status)
+                except Exception as _sync_exc:
+                    logger.error("workspace sync back failed: %s", _sync_exc, exc_info=True)
+
             ctx = _get_running_task_context(task_id)
             if ctx is not None:
                 ctx.lease_stop_requested.set()

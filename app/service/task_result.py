@@ -31,6 +31,7 @@ ENTRY_CONTEXT_MAX_DESC_CHARS = 2240
 
 
 def _load_task_result_json(row) -> dict | None:
+    from .task_paths import _task_result_path, _resolve_run_path, _task_root
     path = _task_result_path(row)
     if path and path.is_file():
         try:
@@ -39,6 +40,17 @@ def _load_task_result_json(row) -> dict | None:
                 return loaded
         except Exception as exc:
             logger.warning("failed to load task result file %s: %s", path, exc)
+    # Fallback: try .run_nfs/ mirror (for API pods during execution)
+    root = _task_root(row)
+    if root:
+        mirror_path = root / ".run_nfs" / "result.json"
+        if mirror_path.is_file():
+            try:
+                loaded = json.loads(mirror_path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    return loaded
+            except Exception as exc:
+                logger.warning("failed to load mirror result file %s: %s", mirror_path, exc)
     return row.result_json if isinstance(row.result_json, dict) else None
 
 
