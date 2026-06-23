@@ -11,6 +11,10 @@ from app.agent_process import AgentProcessHandle
 from app.agent_runtime_events import emit_agent_runtime_events
 
 
+def _fail_if_real_signal(*args, **kwargs):
+    raise AssertionError(f"unexpected real signal invocation: args={args}, kwargs={kwargs}")
+
+
 def _overflow_result() -> runner.AgentResult:
     result = runner.AgentResult()
     result.exit_code = 1
@@ -54,9 +58,10 @@ class RunAgentPromptFileTests(unittest.TestCase):
             environ={"DVS_TASK_ID": "dvs_1", "DVS_TASK_ROOT": "/tmp/dfa-task"},
         )
         with patch.object(agent_process, "_iter_agent_processes", return_value=[orphan]):
-            with patch.object(agent_process.os, "kill", return_value=None):
-                with patch.object(agent_process, "_kill_process_group", return_value=True) as kill_group:
-                    killed = agent_process.cleanup_orphan_pi_processes(lambda _: None, label="test")
+            with patch.object(agent_process.os, "kill", side_effect=_fail_if_real_signal):
+                with patch.object(agent_process.os, "killpg", side_effect=_fail_if_real_signal):
+                    with patch.object(agent_process, "_kill_process_group", return_value=True) as kill_group:
+                        killed = agent_process.cleanup_orphan_pi_processes(lambda _: None, label="test")
         self.assertEqual(killed, 0)
         kill_group.assert_not_called()
 
@@ -82,14 +87,16 @@ class RunAgentPromptFileTests(unittest.TestCase):
             environ={"DVS_TASK_ID": "dvs_other", "DVS_TASK_ROOT": "/tmp/other"},
         )
         with patch.object(agent_process, "_iter_agent_processes", return_value=[match, other]):
-            with patch.object(agent_process, "_kill_process_group", return_value=True) as kill_group:
-                killed = agent_process.cleanup_task_agent_processes(
-                    lambda _: None,
-                    label="test",
-                    task_id="dvs_match",
-                    task_root="/tmp/dfa-task",
-                    run_root="/tmp/dfa-task/run/epochs/0001",
-                )
+            with patch.object(agent_process.os, "kill", side_effect=_fail_if_real_signal):
+                with patch.object(agent_process.os, "killpg", side_effect=_fail_if_real_signal):
+                    with patch.object(agent_process, "_kill_process_group", return_value=True) as kill_group:
+                        killed = agent_process.cleanup_task_agent_processes(
+                            lambda _: None,
+                            label="test",
+                            task_id="dvs_match",
+                            task_root="/tmp/dfa-task",
+                            run_root="/tmp/dfa-task/run/epochs/0001",
+                        )
         self.assertEqual(killed, 1)
         kill_group.assert_called_once()
 
@@ -119,6 +126,8 @@ class RunAgentPromptFileTests(unittest.TestCase):
              patch.object(agent_process, "_read_pgid", return_value=999), \
              patch.object(agent_process.os, "getpid", return_value=100), \
              patch.object(agent_process.os, "getppid", return_value=99), \
+             patch.object(agent_process.os, "kill", side_effect=_fail_if_real_signal), \
+             patch.object(agent_process.os, "killpg", side_effect=_fail_if_real_signal), \
              patch.object(agent_process, "_kill_process_group", return_value=True) as kill_group:
             killed = agent_process.cleanup_worker_runtime_processes(lambda _: None, label="test")
         self.assertEqual(killed, 1)

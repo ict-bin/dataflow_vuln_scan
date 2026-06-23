@@ -185,7 +185,10 @@ def _render_request_metrics() -> list[str]:
 
 def _render_local_runtime_metrics() -> list[str]:
     task_service = get_task_service()
-    local_running = int(task_service.local_running_task_count())
+    local_running = int(task_service.local_effective_running_task_count())
+    local_running_raw = int(task_service.local_running_task_count_raw())
+    local_stale_contexts = int(task_service.local_stale_context_count())
+    runtime_reconcile = dict(task_service.runtime_reconcile_status() or {})
     lines = [
         "# HELP secflow_dvs_local_role_info Static role info for this pod.",
         "# TYPE secflow_dvs_local_role_info gauge",
@@ -205,9 +208,24 @@ def _render_local_runtime_metrics() -> list[str]:
         "# HELP secflow_dvs_local_running_tasks Current running tasks in this pod.",
         "# TYPE secflow_dvs_local_running_tasks gauge",
         f"secflow_dvs_local_running_tasks {local_running}",
+        "# HELP secflow_dvs_local_running_tasks_raw Raw in-memory running task contexts in this pod.",
+        "# TYPE secflow_dvs_local_running_tasks_raw gauge",
+        f"secflow_dvs_local_running_tasks_raw {local_running_raw}",
+        "# HELP secflow_dvs_local_stale_running_contexts Current stale local running contexts in this pod.",
+        "# TYPE secflow_dvs_local_stale_running_contexts gauge",
+        f"secflow_dvs_local_stale_running_contexts {local_stale_contexts}",
         "# HELP secflow_dvs_local_running_capacity Configured max running tasks for this pod.",
         "# TYPE secflow_dvs_local_running_capacity gauge",
         f"secflow_dvs_local_running_capacity {MAX_LOCAL_RUNNING_TASKS}",
+        "# HELP secflow_dvs_runtime_reconcile_db_repairs_total Runtime reconcile DB repair count.",
+        "# TYPE secflow_dvs_runtime_reconcile_db_repairs_total counter",
+        f"secflow_dvs_runtime_reconcile_db_repairs_total {int(runtime_reconcile.get('db_repairs_total') or 0)}",
+        "# HELP secflow_dvs_runtime_reconcile_local_drops_total Runtime reconcile local context drop count.",
+        "# TYPE secflow_dvs_runtime_reconcile_local_drops_total counter",
+        f"secflow_dvs_runtime_reconcile_local_drops_total {int(runtime_reconcile.get('local_drops_total') or 0)}",
+        "# HELP secflow_dvs_runtime_reconcile_db_recoveries_total Runtime reconcile DB recovery count.",
+        "# TYPE secflow_dvs_runtime_reconcile_db_recoveries_total counter",
+        f"secflow_dvs_runtime_reconcile_db_recoveries_total {int(runtime_reconcile.get('db_recoveries_total') or 0)}",
     ]
     with _LOCAL_EVENT_LOCK:
         local_events = dict(_LOCAL_EVENT_TOTAL)

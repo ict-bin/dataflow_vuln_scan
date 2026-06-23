@@ -274,7 +274,12 @@ def health():
 def _probe_payload() -> dict[str, object]:
     bootstrap = get_runtime_bootstrap().status()
     worker_slot = get_runtime_bootstrap().worker_slot_status()
+    running_task_reconcile = get_runtime_bootstrap().running_task_reconcile_status()
     supervisor = get_task_service().supervisor_status()
+    runtime_reconcile = get_task_service().runtime_reconcile_status()
+    local_running_raw = get_task_service().local_running_task_count_raw()
+    local_running_effective = get_task_service().local_effective_running_task_count()
+    local_stale_contexts = get_task_service().local_stale_context_count()
     now_ts = time.time()
     heartbeat_recent = bool(worker_slot["last_heartbeat_at"] and now_ts - float(worker_slot["last_heartbeat_at"]) <= 90)
     worker_role_enabled = ROLE in {"worker", "all", "standalone"} or bool(DISPATCHER_ENABLED or EXECUTOR_ENABLED)
@@ -302,7 +307,10 @@ def _probe_payload() -> dict[str, object]:
         "active": sum(1 for t in _tasks.values() if t.result is None),
         "completed": sum(1 for t in _tasks.values() if t.result is not None),
         "dispatcher_running": get_runtime_bootstrap().dispatcher_running(),
-        "leased_tasks": get_task_service().local_running_task_count(),
+        "leased_tasks": local_running_effective,
+        "local_running_task_count_raw": local_running_raw,
+        "local_effective_running_task_count": local_running_effective,
+        "local_stale_context_count": local_stale_contexts,
         "startup_phase": bootstrap["phase"],
         "startup_ready": bootstrap["ready"],
         "startup_error": bootstrap["error"],
@@ -320,6 +328,14 @@ def _probe_payload() -> dict[str, object]:
         "execution_supervisor_thread_alive": supervisor["thread_alive"],
         "execution_supervisor_last_run_at": supervisor["last_run_at"] or None,
         "execution_supervisor_last_error": supervisor["last_error"],
+        "running_task_reconcile_thread_alive": running_task_reconcile["thread_alive"],
+        "running_task_reconcile_last_run_at": running_task_reconcile["last_run_at"] or None,
+        "running_task_reconcile_last_error": running_task_reconcile["last_error"],
+        "runtime_reconcile_last_run_at": runtime_reconcile["last_run_at"] or None,
+        "runtime_reconcile_last_error": runtime_reconcile["last_error"],
+        "runtime_reconcile_db_repairs_total": runtime_reconcile["db_repairs_total"],
+        "runtime_reconcile_local_drops_total": runtime_reconcile["local_drops_total"],
+        "runtime_reconcile_db_recoveries_total": runtime_reconcile["db_recoveries_total"],
         "started_at": _probe_started_at or None,
         "updated_at": now_ts,
         "shutting_down": _probe_shutdown,
@@ -365,6 +381,13 @@ def _probe_payload() -> dict[str, object]:
                 "thread_alive": bool(supervisor["thread_alive"]),
                 "last_run_at": supervisor["last_run_at"] or None,
                 "last_error": supervisor["last_error"],
+                "required": worker_role_enabled,
+            },
+            "running_task_reconcile": {
+                "ok": (not worker_role_enabled) or bool(running_task_reconcile["thread_alive"]),
+                "thread_alive": bool(running_task_reconcile["thread_alive"]),
+                "last_run_at": running_task_reconcile["last_run_at"] or None,
+                "last_error": running_task_reconcile["last_error"],
                 "required": worker_role_enabled,
             },
         },

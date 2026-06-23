@@ -881,6 +881,8 @@ class TaskTimelineTests(unittest.TestCase):
         previous_still_owner = task_service_module.still_owner
         previous_begin = task_service_module.begin_execution_if_owner
         previous_cleanup = task_service_module.cleanup_orphan_pi_processes
+        previous_cleanup_task_agents = task_service_module.cleanup_task_agent_processes
+        previous_cleanup_worker_runtime = task_service_module.cleanup_worker_runtime_processes
         previous_release = task_service_module.release_lease
         try:
             def _fake_get_db():
@@ -892,10 +894,12 @@ class TaskTimelineTests(unittest.TestCase):
 
             sys.modules["app.db"].get_db = _fake_get_db
             task_service_module.cleanup_orphan_pi_processes = lambda *args, **kwargs: 0
+            task_service_module.cleanup_task_agent_processes = lambda *args, **kwargs: 0
+            task_service_module.cleanup_worker_runtime_processes = lambda *args, **kwargs: 0
             task_service_module.release_lease = lambda db, task_id, owner_id, epoch: False
 
             task_service_module.still_owner = lambda db, task_id, owner_id, epoch, control_version: False
-            asyncio.run(self.service._execute_task(task_id, 1, 2))
+            self.service._execute_task(task_id, 1, 2)
 
             db = self._session()
             try:
@@ -917,7 +921,7 @@ class TaskTimelineTests(unittest.TestCase):
 
             task_service_module.still_owner = lambda db, task_id, owner_id, epoch, control_version: True
             task_service_module.begin_execution_if_owner = lambda db, task_id, owner_id, epoch, control_version, started_at=None: False
-            asyncio.run(self.service._execute_task(task_id, 1, 0))
+            self.service._execute_task(task_id, 1, 0)
 
             db = self._session()
             try:
@@ -930,6 +934,8 @@ class TaskTimelineTests(unittest.TestCase):
             task_service_module.still_owner = previous_still_owner
             task_service_module.begin_execution_if_owner = previous_begin
             task_service_module.cleanup_orphan_pi_processes = previous_cleanup
+            task_service_module.cleanup_task_agent_processes = previous_cleanup_task_agents
+            task_service_module.cleanup_worker_runtime_processes = previous_cleanup_worker_runtime
             task_service_module.release_lease = previous_release
 
 

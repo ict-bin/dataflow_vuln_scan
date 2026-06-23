@@ -1,5 +1,6 @@
 import asyncio
 import sys
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -25,10 +26,12 @@ class RuntimeBootstrapTests(unittest.IsolatedAsyncioTestCase):
             if len(init_attempts) == 1:
                 raise RuntimeError("mysql not ready")
 
-        async def fake_dispatch_until_full():
+        def fake_dispatch_until_full():
             dispatch_calls.append(1)
-            await asyncio.sleep(0)
             return 0
+
+        def fake_reconcile_running_task_contexts(db):
+            return {"db_repairs": 0, "local_drops": 0, "db_recoveries": 0}
 
         def fake_reconcile_orphaned_running_tasks(db, *, limit=100):
             reconcile_calls.append(limit)
@@ -49,8 +52,9 @@ class RuntimeBootstrapTests(unittest.IsolatedAsyncioTestCase):
             "app.service.runtime_bootstrap.get_task_service",
             return_value=SimpleNamespace(
                 dispatch_until_full=fake_dispatch_until_full,
-                local_running_task_count=lambda: 0,
+                local_effective_running_task_count=lambda: 0,
                 reconcile_orphaned_running_tasks=fake_reconcile_orphaned_running_tasks,
+                reconcile_running_task_contexts=fake_reconcile_running_task_contexts,
             ),
         ), patch(
             "app.db.init_db",
@@ -59,12 +63,12 @@ class RuntimeBootstrapTests(unittest.IsolatedAsyncioTestCase):
             "app.service.registry_service.get_registry_service",
             return_value=SimpleNamespace(register=lambda: asyncio.sleep(0), start=lambda: None, stop=lambda: None),
         ):
-            await bootstrap.start(app)
+            bootstrap.start(app)
             for _ in range(80):
                 if bootstrap.status()["ready"]:
                     break
                 await asyncio.sleep(0.01)
-            await bootstrap.stop()
+            bootstrap.stop()
 
         status = bootstrap.status()
         self.assertTrue(status["ready"])
@@ -117,6 +121,40 @@ class RuntimeBootstrapTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0.05)
 
         self.assertGreaterEqual(len(heartbeat_calls), 1)
+        self.assertGreaterEqual(len(reconcile_calls), 1)
+
+    async def test_running_task_reconcile_loop_invokes_task_service(self):
+        bootstrap = RuntimeBootstrap()
+        reconcile_calls = []
+
+        def fake_get_db():
+            class _DummyDb:
+                pass
+
+            db = _DummyDb()
+            try:
+                yield db
+            finally:
+                return
+
+        def fake_reconcile_running_task_contexts(db):
+            reconcile_calls.append(db)
+            return {"db_repairs": 0, "local_drops": 0, "db_recoveries": 0}
+
+        with patch(
+            "app.service.runtime_bootstrap.get_task_service",
+            return_value=SimpleNamespace(reconcile_running_task_contexts=fake_reconcile_running_task_contexts),
+        ), patch("app.db.get_db", fake_get_db), patch.dict(
+            "os.environ",
+            {"DVS_RUNNING_TASK_RECONCILE_INTERVAL_SECONDS": "1"},
+            clear=False,
+        ):
+            bootstrap._stop_event = threading.Event()
+            bootstrap._start_running_task_reconcile_loop()
+            await asyncio.sleep(1.2)
+            bootstrap._stop_event.set()
+            await asyncio.sleep(0.05)
+
         self.assertGreaterEqual(len(reconcile_calls), 1)
 
     def test_install_internal_observability_router_is_idempotent(self):

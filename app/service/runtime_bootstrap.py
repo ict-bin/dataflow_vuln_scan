@@ -49,12 +49,15 @@ class RuntimeBootstrap:
         self._status = RuntimeBootstrapStatus()
         self._router_installed = False
         self._dispatcher_task: threading.Thread | None = None
+        self._running_task_reconcile_thread: threading.Thread | None = None
         self._worker_slot_thread: threading.Thread | None = None
         self._worker_slot_stop = threading.Event()
         self._worker_slot_last_heartbeat_at = 0.0
         self._worker_slot_last_heartbeat_ok = False
         self._worker_slot_last_reconcile_at = 0.0
         self._worker_slot_last_error: str | None = None
+        self._running_task_reconcile_last_run_at = 0.0
+        self._running_task_reconcile_last_error: str | None = None
 
     def start(self, app: FastAPI) -> None:
         if self._task and self._task.is_alive():
@@ -76,6 +79,9 @@ class RuntimeBootstrap:
         if self._dispatcher_task and self._dispatcher_task.is_alive():
             self._dispatcher_task.join(timeout=5.0)
         self._dispatcher_task = None
+        if self._running_task_reconcile_thread and self._running_task_reconcile_thread.is_alive():
+            self._running_task_reconcile_thread.join(timeout=5.0)
+        self._running_task_reconcile_thread = None
         self._worker_slot_stop.set()
         self._worker_slot_thread = None
         try:
@@ -91,6 +97,13 @@ class RuntimeBootstrap:
 
     def dispatcher_running(self) -> bool:
         return bool(self._dispatcher_task and self._dispatcher_task.is_alive())
+
+    def running_task_reconcile_status(self) -> dict[str, object]:
+        return {
+            "thread_alive": bool(self._running_task_reconcile_thread and self._running_task_reconcile_thread.is_alive()),
+            "last_run_at": self._running_task_reconcile_last_run_at,
+            "last_error": self._running_task_reconcile_last_error,
+        }
 
     def worker_slot_status(self) -> dict[str, object]:
         return {
@@ -259,7 +272,7 @@ class RuntimeBootstrap:
                             event="dispatcher_claim_batch",
                             owner_id=INSTANCE_ID,
                             claimed_count=claimed,
-                            current_running=svc.local_running_task_count(),
+                            current_running=svc.local_effective_running_task_count(),
                         )
                 except Exception as exc:
                     logger.warning("dispatcher loop failed on %s: %s", INSTANCE_ID, exc, exc_info=True)
@@ -267,8 +280,43 @@ class RuntimeBootstrap:
 
         self._dispatcher_task = threading.Thread(target=_dispatcher_loop, name="dvs_dispatcher", daemon=True)
         self._dispatcher_task.start()
+        self._start_running_task_reconcile_loop()
         self._status.dispatcher_ready = True
         log_event(logger, logging.INFO, "dispatcher started", event="dispatcher_started", owner_id=INSTANCE_ID)
+
+    def _start_running_task_reconcile_loop(self) -> None:
+        if self._running_task_reconcile_thread and self._running_task_reconcile_thread.is_alive():
+            return
+
+        def _loop() -> None:
+            from app.db import get_db
+
+            svc = get_task_service()
+            interval_seconds = max(1.0, float(os.environ.get("DVS_RUNNING_TASK_RECONCILE_INTERVAL_SECONDS", "10")))
+            while not self._stop_event.wait(interval_seconds):
+                db_gen = None
+                try:
+                    db_gen = get_db()
+                    db = next(db_gen)
+                    self._running_task_reconcile_last_run_at = time.time()
+                    svc.reconcile_running_task_contexts(db)
+                    self._running_task_reconcile_last_error = None
+                except Exception as exc:
+                    self._running_task_reconcile_last_error = str(exc)
+                    logger.warning("running task reconcile loop failed on %s: %s", INSTANCE_ID, exc, exc_info=True)
+                finally:
+                    if db_gen is not None:
+                        try:
+                            next(db_gen)
+                        except StopIteration:
+                            pass
+
+        self._running_task_reconcile_thread = threading.Thread(
+            target=_loop,
+            name="dvs_running_task_reconcile",
+            daemon=True,
+        )
+        self._running_task_reconcile_thread.start()
 
     def _start_worker_slot_registry(self) -> None:
         self._worker_slot_stop = threading.Event()
