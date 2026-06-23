@@ -169,7 +169,7 @@ class RuntimeBootstrap:
                 continue
 
             try:
-                self._stop_event.wait()
+                self._stop_event.wait(DB_INIT_RETRY_SECONDS)
             except Exception as _e:
                 logger.warning("unexpected error in runtime_bootstrap.py: %s", _e, exc_info=True)
 

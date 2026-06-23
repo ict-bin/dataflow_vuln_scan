@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 from collections.abc import Callable
 
 import pytest
@@ -13,6 +14,15 @@ def _guard_kill(name: str, original: Callable):
             return original(target, sig, *args, **kwargs)
         raise AssertionError(
             f"real process signal blocked during tests: {name}(target={target}, sig={sig})"
+        )
+
+    return _wrapped
+
+
+def _guard_popen_signal(name: str):
+    def _wrapped(self, *args, **kwargs):
+        raise AssertionError(
+            f"real subprocess signal blocked during tests: {name}(pid={getattr(self, 'pid', None)})"
         )
 
     return _wrapped
@@ -48,4 +58,14 @@ def _block_real_process_signals(monkeypatch: pytest.MonkeyPatch):
         runner_helpers.os,
         "killpg",
         _guard_kill("app.runner_helpers.os.killpg", os.killpg),
+    )
+    monkeypatch.setattr(
+        subprocess.Popen,
+        "terminate",
+        _guard_popen_signal("subprocess.Popen.terminate"),
+    )
+    monkeypatch.setattr(
+        subprocess.Popen,
+        "kill",
+        _guard_popen_signal("subprocess.Popen.kill"),
     )

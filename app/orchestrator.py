@@ -5,6 +5,7 @@ Orchestrator: 管理单函数分析的 Worker+Judge 轮次循环
 execute_recursive: BFS 队列 + Worker Pool 递归分析调用链
 """
 from __future__ import annotations
+import asyncio
 from sqlalchemy import func
 
 import threading
@@ -242,7 +243,7 @@ class Orchestrator(JudgeMixin):
 
     def _raise_if_cancelled(self) -> None:
         if self._is_cancelled():
-            raise Exception("orchestrator cancelled")
+            raise asyncio.CancelledError("orchestrator cancelled")
 
     def execute(
         self,
@@ -1608,7 +1609,7 @@ class Orchestrator(JudgeMixin):
             if self._is_cancelled():
                 for w in workers:
                     w.join(timeout=5.0)
-                raise Exception("recursive orchestration cancelled")
+                raise asyncio.CancelledError("recursive orchestration cancelled")
 
             # 发送终止 sentinel
             for _ in range(n_workers):

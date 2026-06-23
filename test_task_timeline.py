@@ -33,6 +33,9 @@ def _unexpected_cleanup_call(*args, **kwargs):
 
 class TaskTimelineTests(unittest.TestCase):
     def setUp(self):
+        task_service_module._running_tasks.clear()
+        task_service_module._running_task_contexts.clear()
+        task_service_module._runtime_invalidations.clear()
         self.engine = create_engine(
             "sqlite://",
             connect_args={"check_same_thread": False},
@@ -59,6 +62,9 @@ class TaskTimelineTests(unittest.TestCase):
             patcher.start()
 
     def tearDown(self):
+        task_service_module._running_tasks.clear()
+        task_service_module._running_task_contexts.clear()
+        task_service_module._runtime_invalidations.clear()
         for patcher in reversed(getattr(self, "_cleanup_guard_patchers", [])):
             patcher.stop()
         if self.previous_fileserver_root is None:
@@ -543,7 +549,7 @@ class TaskTimelineTests(unittest.TestCase):
 
         async def _run():
             with patch("app.orchestrator.DataflowVulnWorkflow.run", new=_fake_workflow_run):
-                task = asyncio.create_task(orchestrator.execute_recursive(task_id="dvs_abort_probe"))
+                task = asyncio.create_task(asyncio.to_thread(orchestrator.execute_recursive, task_id="dvs_abort_probe"))
                 for _ in range(100):
                     await asyncio.sleep(0.01)
                     if orchestrator._cancel_event is not None:
