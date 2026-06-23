@@ -159,6 +159,7 @@ def build_intake_payload(
         },
         "subject": {
             "type": "dataflow_vulnerability",
+            "source_root": source_root or "",
             "locator": locator,
             "name": str(finding.title or locator),
         },
