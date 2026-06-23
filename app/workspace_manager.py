@@ -113,13 +113,19 @@ class WorkspaceManager:
                 str(self._nfs_run_root),
             )
             self._nfs_run_root.unlink()
-        elif self._nfs_run_root.exists():
-            # Move any existing content to local
-            logger.info(
-                "workspace_manager: moving existing content from %s to %s",
-                str(self._nfs_run_root), str(self._local_run_root),
-            )
-            _move_contents(self._nfs_run_root, self._local_run_root)
+        elif self._nfs_run_root.is_dir():
+            # Move any existing content to local, then remove the empty dir
+            if any(self._nfs_run_root.iterdir()):
+                logger.info(
+                    "workspace_manager: moving existing content from %s to %s",
+                    str(self._nfs_run_root), str(self._local_run_root),
+                )
+                _move_contents(self._nfs_run_root, self._local_run_root)
+            # Remove the NFS directory so we can create the symlink
+            try:
+                self._nfs_run_root.rmdir()
+            except OSError:
+                shutil.rmtree(str(self._nfs_run_root), ignore_errors=True)
 
         # Create the symlink: NFS path → local path
         try:
