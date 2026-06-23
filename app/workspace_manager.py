@@ -396,11 +396,17 @@ class WorkspaceManager:
                 )
 
     def _sync_sessions_incremental(self, local_sessions: Path, nfs_sessions: Path) -> None:
-        """Copy session files to the NFS sessions directory."""
+        """Copy session files to NFS — only copy files that changed (mtime/size).
+
+        Avoids full-copy every 60s cycle for large session files.
+        """
         nfs_sessions.mkdir(parents=True, exist_ok=True)
         for src in local_sessions.iterdir():
-            if src.is_file():
-                _safe_copyfile(str(src), str(nfs_sessions / src.name))
+            if not src.is_file():
+                continue
+            dst = nfs_sessions / src.name
+            if _needs_copy(src, dst):
+                _safe_copyfile(str(src), str(dst))
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -494,3 +500,16 @@ def _cleanup_local_temp(local_path: Path) -> None:
                         "workspace_manager: CRITICAL - failed to clean local %s",
                         str(local_path),
                     )
+
+
+def _needs_copy(src: Path, dst: Path) -> bool:
+    """Return True if src needs to be copied to dst (missing or stale)."""
+    try:
+        if not dst.exists():
+            return True
+        src_stat = src.stat()
+        dst_stat = dst.stat()
+        return (src_stat.st_mtime != dst_stat.st_mtime
+                or src_stat.st_size != dst_stat.st_size)
+    except OSError:
+        return True
