@@ -9,7 +9,7 @@
 - `summary`：漏洞摘要，必须用中文说明源→sink路径、缺失的防御、为何可绕过、实质后果
 - `entry_point`：漏洞最初入口，必须用中文描述污点最初从哪个外部入口进入系统
 - `trigger_path`：漏洞触发路径，必须用中文分步骤描述从入口到漏洞触发点的完整调用路径
-- `evidence`：证据说明，可以用中文描述代码证据，代码行号引用保留英文格式如 `L123`
+- `evidence`：漏洞判断依据，必须用中文描述做出漏洞判断的代码证据，逐行引用带行号的关键语句如 `L123`
 - `exploitability` 内部全部字段（preconditions、trigger_complexity、worst_case_impact）：必须用中文
 - `dimensions` 内部全部 `reason` 字段：必须用中文说明判定理由
 - `severity` 和 `vuln_type` 值使用英文归一化值（如 `heap-buffer-overflow`、`critical`），这是数据字段不做翻译
@@ -92,7 +92,7 @@ JSON 的 key 名保持英文不变（`title`、`summary`、`evidence` 等），v
       "line": "漏洞发生行号，如 L123 或 123",
       "entry_point": "漏洞最初入口：描述污点数据最初从哪个外部入口（函数）进入系统、经过哪些关键中间节点到达当前漏洞点",
       "trigger_path": "漏洞触发路径：从外部输入入口到漏洞触发点的逐步骤路径描述。示例格式：步骤1: 攻击者通过网络发送恶意报文 → 步骤2: parse_packet()解析报文提取data_len字段(L234) → 步骤3: data_len未经校验传入memcpy长度参数(L256) → 步骤4: 堆缓冲区溢出",
-      "evidence": "带行号的代码证据，逐行引用关键语句",
+      "evidence": "漏洞判断依据：带行号的关键代码证据，逐行引用证明漏洞存在的语句",
       "exploitability": {
         "preconditions": "触发所需的前置条件（攻击者位置、输入约束、平台/配置）",
         "trigger_complexity": "low|medium|high",
