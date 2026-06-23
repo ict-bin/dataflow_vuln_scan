@@ -361,8 +361,9 @@ class TaskTimelineTests(unittest.TestCase):
             timeline = self.service.get_task_timeline(db, task_id)
             self.assertEqual("task_retried", timeline["events"][0]["event_type"])
             self.assertEqual("restart_requested", timeline["events"][0]["payload"]["reason"])
-            self.assertEqual(3, timeline["events"][0]["payload"]["start_stage"])
-            self.assertIn(f"{task_id}/run/epochs/0002/workspace-worker-0", timeline["events"][0]["payload"]["resume_workspace"])
+            self.assertEqual("failed", timeline["events"][0]["payload"]["previous_status"])
+            self.assertEqual(2, timeline["events"][0]["payload"]["execution_epoch_before"])
+            self.assertEqual(3, timeline["events"][0]["payload"]["execution_epoch_after"])
         finally:
             task_service_module._load_svc_config_from_db = previous_loader
             db.close()
