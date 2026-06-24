@@ -372,7 +372,7 @@ def _terminate_pi_process_tree(
     task_id: str = "",
     timeout: float = 15.0,
 ) -> None:
-    """Synchronously terminate a process tree. Uses subprocess.Popen."""
+    """Synchronously terminate a process tree and close all associated pipes."""
     pid = proc.pid
     pgid = _proc_group_id(proc)
     logger.info(
@@ -406,6 +406,17 @@ def _terminate_pi_process_tree(
         pass
     except Exception as exc:
         logger.warning("error terminating pi process tree pid=%s: %s", pid, exc)
+    finally:
+        # Close all pipe file descriptors to prevent FD leaks.
+        # Each subprocess.Popen with stdout/stderr/stdin=PIPE creates 3 pipe FDs
+        # that must be explicitly closed after the process exits.
+        for pipe_attr in ("stdout", "stderr", "stdin"):
+            pipe = getattr(proc, pipe_attr, None)
+            if pipe is not None:
+                try:
+                    pipe.close()
+                except Exception:
+                    pass
 
 
 # ─── Argument building ────────────────────────────────────────────────────────

@@ -459,6 +459,18 @@ def _run_with_api_retry(
                 start_new_session=True,
             )
         except OSError as e:
+            # When Popen fails (e.g. ENFILE/EMFILE "Too many open files"),
+            # the OS may have already created pipe FDs before the exec
+            # failure.  These orphan FDs leak because no proc object
+            # exists to track them.  We cannot recover them here, but we
+            # emit a high-visibility log to help diagnose.
+            if getattr(e, "errno", None) in (23, 24):  # ENFILE / EMFILE
+                _log_error(
+                    "pi subprocess failed due to file descriptor exhaustion "
+                    "(errno=%s). FD limit may need to be increased. "
+                    "Error: %s",
+                    e.errno, e,
+                )
             raise
 
         _log_info(
@@ -651,6 +663,16 @@ def _run_with_api_retry(
             _terminate_pi_process_tree(
                 proc, reason="finally_cleanup",
             )
+            # Belts-and-suspenders: explicitly close all pipes.
+            # _terminate_pi_process_tree now also closes them, but double-close
+            # is harmless and ensures no FD leaks if terminate throws.
+            for _pipe_attr in ("stdout", "stderr", "stdin"):
+                _pipe = getattr(proc, _pipe_attr, None)
+                if _pipe is not None:
+                    try:
+                        _pipe.close()
+                    except Exception:
+                        pass
 
         # Extract output from messages
         for msg in reversed(result.messages):

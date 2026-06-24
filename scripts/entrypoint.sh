@@ -4,6 +4,14 @@
 
 set -e
 
+# Increase file descriptor limit to prevent "Too many open files" during
+# BFS call-tree exploration with many concurrent subprocess invocations.
+# Default Docker/K8s soft limit is 1024, which is easily exhausted.
+if [ "$(ulimit -n)" -lt 65535 ]; then
+    ulimit -n 65535 2>/dev/null || echo "[entrypoint] WARNING: could not raise ulimit -n to 65535"
+    echo "[entrypoint] ulimit -n: $(ulimit -n)"
+fi
+
 PI_DIR="${PI_CODING_AGENT_DIR:-/root/.pi/agent}"
 mkdir -p "$PI_DIR"
 
