@@ -64,12 +64,17 @@ def load_vuln_scan_graph(run_root: str | Path) -> dict[str, Any]:
 
 def summarize_graph(graph: dict[str, Any]) -> dict[str, int]:
     followups = graph.get("followups") or []
+    executed = sum(1 for f in followups if f.get("status") in ("completed", "passed", "analyzed"))
+    skipped = sum(1 for f in followups if f.get("status") in ("skipped", "cycle", "depth_limit", "merged_equivalent_taint_validation", "forked", "tracker_resolved"))
+    pending = sum(1 for f in followups if f.get("status") in ("pending", "queued", "running"))
     return {
         "runs": len(graph.get("analysis_runs") or []),
         "nodes": len(graph.get("taint_nodes") or []),
         "edges": len(graph.get("taint_edges") or []),
         "followups": len(followups),
-        "executed_followups": sum(1 for f in followups if f.get("status") in ("completed", "passed", "analyzed")),
+        "executed_followups": executed,
+        "skipped_followups": skipped,
+        "pending_followups": pending,
         "findings": len(graph.get("vulnerability_findings") or []),
     }
 
