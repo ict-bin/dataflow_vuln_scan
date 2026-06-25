@@ -824,6 +824,8 @@ def create_task(body: TaskCreateRequest, db: Session = Depends(get_db)):
             "secret": body.agent_task_key_secret,
             "source": body.agent_task_key_source,
         }
+    if body.model:
+        task_config_json["model"] = str(body.model).strip()
 
     svc = get_task_service()
     return svc.create_task(

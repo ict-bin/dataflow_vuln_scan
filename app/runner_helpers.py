@@ -25,7 +25,7 @@ logger = logging.getLogger("dvs.runner")
 # ─── Configuration constants ──────────────────────────────────────────────────
 
 _MAX_BACKOFF = 300  # 退避上限 5 分钟
-_QUERY_ENGINE_401_MAX_RETRIES = 10
+_QUERY_ENGINE_401_MAX_RETRIES = 3
 _DEFAULT_CONTEXT_WINDOW = 128_000
 _SINGLE_INPUT_CONTEXT_RATIO = 0.75
 _PROMPT_TOKEN_OVERHEAD = 128

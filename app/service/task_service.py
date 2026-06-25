@@ -2477,6 +2477,13 @@ class TaskService:
             # The orchestrator uses the NFS path transparently — all IO goes local.
 
             cfg = build_task_config(svc, row.prompt_content, cwd=row.source_root_path or row.input_path)
+            # ── Task-level model override ──────────────────────────────
+            # 手动任务: 用户选模型 or 默认 auto(网关路由)
+            # 非手动任务: 调度器下发模型 or 默认 auto
+            _task_model = str((tcfg.get("model") or "")).strip()
+            if _task_model and _task_model != "auto":
+                for _agent in cfg.workers.agents:
+                    _agent.model = _task_model
             agent_task_key = _task_agent_key(tcfg)
             secret = str((agent_task_key or {}).get("secret") or "").strip()
             from app.service.pi_runtime import materialize_pi_runtime

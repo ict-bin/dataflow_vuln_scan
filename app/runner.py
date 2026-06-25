@@ -58,7 +58,7 @@ from .runner_helpers import (
 logger = logging.getLogger("dvs.runner")
 
 _MAX_BACKOFF = 300
-_QUERY_ENGINE_401_MAX_RETRIES = 10
+_QUERY_ENGINE_401_MAX_RETRIES = 3
 _DEFAULT_CONTEXT_WINDOW = 128_000
 _SINGLE_INPUT_CONTEXT_RATIO = 0.75
 _PROMPT_TOKEN_OVERHEAD = 128
@@ -352,6 +352,14 @@ def _run_with_pi_retry(
             if _is_fatal_error(result) or result.fatal:
                 fatal_retry_count += 1
                 reason = str(result.error or "").strip() or "fatal error"
+                # Key/auth errors (401/unauthorized/invalid key): fail after 3 attempts, don't retry infinitely
+                _err_lower = reason.lower()
+                _is_key_error = any(p in _err_lower for p in ("unauthorized", "invalid api key", "401"))
+                if _is_key_error and fatal_retry_count >= 3:
+                    result.fatal = True
+                    result.error = f"Key/auth error after {fatal_retry_count} attempts: {reason}"
+                    _log_error(f"key/auth error exhausted after {fatal_retry_count} attempts, giving up: {reason[:200]}")
+                    return result
                 _mark_infinite_retry(result, kind="fatal", count=fatal_retry_count, reason=reason)
                 _log_warn(f"pi infrastructure error [{fatal_retry_count}/inf], retry in 30s: {reason[:200]}")
                 if on_stream:

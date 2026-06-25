@@ -41,6 +41,7 @@ class TaskCreateRequest(BaseModel):
     agent_task_key_prefix: Optional[str] = None
     agent_task_key_secret: Optional[str] = None
     agent_task_key_source: Optional[str] = None
+    model: Optional[str] = None
 
 
 class GeneratePromptRequest(BaseModel):
