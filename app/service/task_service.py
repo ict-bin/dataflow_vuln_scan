@@ -2478,10 +2478,15 @@ class TaskService:
 
             cfg = build_task_config(svc, row.prompt_content, cwd=row.source_root_path or row.input_path)
             # ── Task-level model override ──────────────────────────────
-            # 手动任务: 用户选模型 or 默认 auto(网关路由)
-            # 非手动任务: 调度器下发模型 or 默认 auto
+            # 手动任务: 用户选模型(模型配置中心), SK 来自中心配置(无需 agent_task_key)
+            # 非手动任务: 调度器下发 gaiasec/* 模型 + WSK; 未下发则默认 gaiasec/auto
             _task_model = str((tcfg.get("model") or "")).strip()
-            if _task_model and _task_model != "auto":
+            _is_manual = str(row.task_origin_type or "").strip() in ("", "manual")
+            if not _is_manual and not _task_model:
+                # 非手动任务未下发模型 → 默认走网关 auto 路由
+                _task_model = "gaiasec/auto"
+                cfg.workers.agents[0].model = _task_model if cfg.workers.agents else _task_model
+            elif _task_model and _task_model != "auto":
                 for _agent in cfg.workers.agents:
                     _agent.model = _task_model
             agent_task_key = _task_agent_key(tcfg)
