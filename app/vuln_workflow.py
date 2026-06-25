@@ -908,6 +908,111 @@ class DataflowVulnWorkflow:
                 pass
         return result
 
+    def _run_branch_pruning_fork(self, base_session: str, result: TaskResult) -> None:
+        """Fork worker session and ask LLM which followups are worth pursuing.
+
+        Smart mode: after taint analysis, fork the worker session and send a
+        separate user prompt.  The LLM decides pursue=true/false for each
+        followup.  Pruned followups are removed from the taint graph before
+        _record_edges_from_result writes them to SQLite.
+
+        Fail-safe: any error (network, JSON parse, agent failure) keeps all
+        followups — equivalent to full mode.
+        """
+        if self._cancelled() or not self.cfg.workers.agents:
+            return
+        graph = (result.upstream_entry_metadata or {}).get("taint_graph")
+        if not isinstance(graph, dict):
+            return
+        followups = graph.get("followups") or []
+        if not followups:
+            return
+        acfg = self._agent_cfg()
+        if self.sessions_archive_dir:
+            self.sessions_archive_dir.mkdir(parents=True, exist_ok=True)
+            fork_session = self.sessions_archive_dir / f"{self.session_label}-branch-pruning.jsonl"
+        else:
+            fork_session = self.sessions / f"branch-pruning-{_safe_name(self.func_name)}.jsonl"
+        try:
+            if base_session and Path(base_session).exists():
+                safe_copyfile(base_session, fork_session)
+        except OSError:
+            pass
+        lines = [f"你刚刚分析了函数 `{self.src_file}::{self.func_name}` 的污点传播，识别了以下跟入点：", ""]
+        for idx, fu in enumerate(followups, 1):
+            fname = str(fu.get("function") or fu.get("callee_function") or "").strip()
+            fline = str(fu.get("line") or fu.get("callee_line") or "").strip()
+            reason = str(fu.get("reason") or "").strip()
+            params = fu.get("tainted_params") or fu.get("params") or []
+            if isinstance(params, list):
+                params_str = ", ".join(str(p) for p in params)
+            else:
+                params_str = str(params)
+            lines.append(f"{idx}. 函数: {fname}")
+            lines.append(f"   行号: {fline}")
+            lines.append(f"   污点参数: {params_str}")
+            lines.append(f"   原因: {reason}")
+            lines.append("")
+        lines.append("请判断每个跟入点是否值得继续追踪。输出 JSON: {\"decisions\": [{\"function\": \"...\", \"pursue\": true/false}]}")
+        prompt = "\n".join(lines)
+        system_prompt = _read_prompt("prompts/branch-pruning/default.md")
+        self._emit("branch_pruning_start", function=self.func_name,
+                   followup_count=len(followups), depth=self.dep)
+        output = run_agent(
+            prompt=prompt, model=acfg.model,
+            tools=acfg.tools or self.cfg.workers.default_tools,
+            cwd=str(self.ws), session_file=str(fork_session),
+            system_prompt=system_prompt,
+            cancel_event=self.cancel_event,
+            run_timeout_seconds=min(self.cfg.agent_run_timeout_seconds or 300, 120),
+            pi_max_retries=self.cfg.pi_max_retries, pi_retry_delay=self.cfg.pi_retry_delay,
+            task_context={
+                "task_id": self.task_id,
+                "task_root": str(self.out_dir.parent),
+                "task_run_root": str(self.out_dir),
+                "task_pi_dir": self.cfg.role_pi_dir("workers"),
+                "agent_role": "workers",
+            },
+        )
+        emit_agent_runtime_events(
+            self._emit, result=output, stage="branch_pruning",
+            role="workers", model=acfg.model,
+            extra={"function": self.func_name, "depth": self.dep},
+        )
+        parsed = _extract_json_from_text(output.output, "decisions")
+        if not isinstance(parsed, dict):
+            self._emit("branch_pruning_done", function=self.func_name,
+                       total=len(followups), pursued=len(followups), pruned=0,
+                       error="json parse failed, keeping all followups", depth=self.dep)
+            return
+        decisions = parsed.get("decisions") or []
+        # Track both explicitly mentioned and explicitly pursued functions.
+        # Unmentioned followups default to pursue=true (fail-safe).
+        mentioned_set: set[str] = set()
+        pursue_set: set[str] = set()
+        for d in decisions:
+            if isinstance(d, dict):
+                fname = str(d.get("function") or "").strip()
+                if fname:
+                    mentioned_set.add(fname)
+                    if d.get("pursue") is True:
+                        pursue_set.add(fname)
+        pruned_names: list[str] = []
+        kept = []
+        for fu in followups:
+            fname = str(fu.get("function") or fu.get("callee_function") or "").strip()
+            if fname not in mentioned_set:
+                # Not mentioned by LLM → keep (fail-safe)
+                kept.append(fu)
+            elif fname in pursue_set:
+                kept.append(fu)
+            else:
+                pruned_names.append(fname)
+        graph["followups"] = kept
+        self._emit("branch_pruning_done", function=self.func_name,
+                   total=len(followups), pursued=len(kept), pruned=len(pruned_names),
+                   pruned_functions=pruned_names, depth=self.dep)
+
     def run_taint_tracking_only(self) -> TaskResult:
         self._write_design_doc()
         self.store.start_run(self.run_id, self.task_id, self.src_file, self.func_name, self.cfg.cwd, self.cfg.model_dump())
@@ -920,6 +1025,9 @@ class DataflowVulnWorkflow:
             result.upstream_entry_metadata["worker_session_file"] = base_session
         result.upstream_entry_metadata["vuln_mining_base_session"] = base_session
         result.upstream_entry_metadata["vuln_mining_dataflow_text"] = dataflow_text
+        # 分支剪枝（智能模式）：fork worker 会话，由 LLM 判断每个 followup 是否值得跟入
+        if self.cfg.branch_pruning_enabled:
+            self._run_branch_pruning_fork(base_session, result)
         self._record_edges_from_result(result, node_ids)
         return self._finalize_taint_result(result)
 

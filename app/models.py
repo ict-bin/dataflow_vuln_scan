@@ -97,6 +97,7 @@ class ServiceConfig(BaseModel):
     entry_screen_enabled: bool = Field(default=False, description="是否启用入口快速筛查：开启后分析前先判定根函数是否为模块入口，非入口直接以 PASSED 结束并注明理由")
     entry_screen_whitelist: list[str] = Field(default_factory=lambda: list(DEFAULT_ENTRY_WHITELIST), description="入口白名单关键字（小写子串），函数名命中任一即直接判为入口、跳过 agent 判断")
     entry_screen_thinking_level: str = Field(default="off", description="入口筛查 agent 思考等级，默认 off 以省 token")
+    branch_pruning_enabled: bool = Field(default=False, description="分支剪枝开关（智能模式）：开启后在污点分析完成后 fork 会话，由 LLM 判断每个 followup 是否值得跟入。关闭=全面模式，所有 followup 全部追踪")
 
     workers: RoleConfig = Field(default_factory=RoleConfig)
     judges: RoleConfig = Field(default_factory=RoleConfig)
@@ -149,6 +150,7 @@ class TaskConfig(BaseModel):
     entry_screen_enabled: bool = Field(default=False)
     entry_screen_whitelist: list[str] = Field(default_factory=lambda: list(DEFAULT_ENTRY_WHITELIST))
     entry_screen_thinking_level: str = Field(default="off")
+    branch_pruning_enabled: bool = Field(default=False)
     workers: RoleConfig = Field(default_factory=RoleConfig)
     judges: RoleConfig = Field(default_factory=RoleConfig)
     output_dir: str = Field(default="/data/output")
