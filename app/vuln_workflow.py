@@ -945,15 +945,28 @@ class DataflowVulnWorkflow:
             reason = str(fu.get("reason") or "").strip()
             params = fu.get("tainted_params") or fu.get("params") or []
             if isinstance(params, list):
-                params_str = ", ".join(str(p) for p in params)
+                params_str = ", ".join(str(p) for p in params) if params else "(无直接参数)"
             else:
-                params_str = str(params)
+                params_str = str(params) or "(无直接参数)"
+            tainted_nonlocal = fu.get("tainted_nonlocal") or fu.get("nonlocal_taints") or []
+            if not isinstance(tainted_nonlocal, list):
+                tainted_nonlocal = []
             lines.append(f"{idx}. 函数: {fname}")
             lines.append(f"   行号: {fline}")
             lines.append(f"   污点参数: {params_str}")
+            if tainted_nonlocal:
+                nl_parts = []
+                for nl in tainted_nonlocal:
+                    if isinstance(nl, dict):
+                        sym = str(nl.get("symbol") or "").strip()
+                        kind = str(nl.get("kind") or "").strip()
+                        ev = str(nl.get("evidence") or "").strip()
+                        nl_parts.append(f"{sym} [{kind}]{chr(8212) + ' ' + ev if ev else ''}")
+                if nl_parts:
+                    lines.append(f"   间接污点: {'; '.join(nl_parts)}")
             lines.append(f"   原因: {reason}")
             lines.append("")
-        lines.append("请判断每个跟入点是否值得继续追踪。输出 JSON: {\"decisions\": [{\"function\": \"...\", \"pursue\": true/false}]}")
+        lines.append("请判断每个跟入点是否有较大概率发现有价值漏洞。输出 JSON: {\"decisions\": [{\"function\": \"...\", \"pursue\": true/false, \"reason\": \"...\"}]}")
         prompt = "\n".join(lines)
         system_prompt = _read_prompt("prompts/branch-pruning/default.md")
         self._emit("branch_pruning_start", function=self.func_name,
