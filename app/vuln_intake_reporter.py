@@ -32,6 +32,11 @@ def _now_iso() -> str:
 
 
 def _normalize_severity(value: Any) -> str:
+    """Normalize severity to Literal['critical','high','medium','low'].
+
+    The vuln-platform schema only accepts these four values.
+    'info' and unknown values are upgraded to 'low'.
+    """
     text = str(value or "").strip().lower()
     if text in {"critical", "high", "medium", "low"}:
         return text
@@ -41,7 +46,7 @@ def _normalize_severity(value: Any) -> str:
         return "high"
     if text in {"中", "中危"}:
         return "medium"
-    if text in {"低", "低危"}:
+    if text in {"低", "低危", "info"}:
         return "low"
     return "medium"
 
@@ -80,6 +85,30 @@ def _stable_report_id(*, project_id: str, task_id: str, finding: VulnFindingReco
     return f"DVS-{task_id[-8:]}-{suffix}"
 
 
+def _artifact_item(
+    kind: str,
+    name: str,
+    content: str,
+    *,
+    path: str = "",
+    media_type: str = "",
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build a single artifact item with size/sha256/encoding computed."""
+    content_bytes = content.encode("utf-8", errors="replace")
+    return {
+        "kind": kind,
+        "name": name,
+        "path": path,
+        "media_type": media_type,
+        "encoding": "utf-8",
+        "size": len(content_bytes),
+        "sha256": hashlib.sha256(content_bytes).hexdigest(),
+        "content": content,
+        "metadata": metadata or {},
+    }
+
+
 def build_intake_payload(
     *,
     project_id: str,
@@ -111,33 +140,23 @@ def build_intake_payload(
     fingerprint_raw = "|".join([project_id, source_file, function_name, line, finding.vuln_type, finding.title, evidence[:512]])
     artifacts: list[dict[str, Any]] = []
     if report_text:
-        artifacts.append({
-            "kind": "report",
-            "name": "vulnerability-report.md",
-            "path": report_path,
-            "media_type": "text/markdown",
-            "encoding": "utf-8",
-            "content": report_text,
-            "metadata": {"finding_id": finding.finding_id, "artifact_role": "vulnerability_report"},
-        })
+        artifacts.append(_artifact_item(
+            kind="report", name="vulnerability-report.md", content=report_text,
+            path=report_path, media_type="text/markdown",
+            metadata={"finding_id": finding.finding_id, "artifact_role": "vulnerability_report"},
+        ))
     if taint_text:
-        artifacts.append({
-            "kind": "report",
-            "name": "taint-path-report.md",
-            "path": taint_path_report_path,
-            "media_type": "text/markdown",
-            "encoding": "utf-8",
-            "content": taint_text,
-            "metadata": {"finding_id": finding.finding_id, "artifact_role": "taint_path"},
-        })
-    artifacts.append({
-        "kind": "json",
-        "name": "dvs-finding.json",
-        "media_type": "application/json",
-        "encoding": "utf-8",
-        "content": json.dumps(asdict(finding), ensure_ascii=False, indent=2),
-        "metadata": {"finding_id": finding.finding_id, "artifact_role": "structured_finding"},
-    })
+        artifacts.append(_artifact_item(
+            kind="report", name="taint-path-report.md", content=taint_text,
+            path=taint_path_report_path, media_type="text/markdown",
+            metadata={"finding_id": finding.finding_id, "artifact_role": "taint_path"},
+        ))
+    finding_json = json.dumps(asdict(finding), ensure_ascii=False, indent=2)
+    artifacts.append(_artifact_item(
+        kind="json", name="dvs-finding.json", content=finding_json,
+        media_type="application/json",
+        metadata={"finding_id": finding.finding_id, "artifact_role": "structured_finding"},
+    ))
     return {
         "project_id": project_id,
         "report_id": report_id,
@@ -164,6 +183,7 @@ def build_intake_payload(
             "source_root": source_root or "",
             "locator": locator,
             "name": str(finding.title or locator),
+            "version": SERVICE_VERSION,
         },
         "evidence": {
             "summary": (evidence or summary or finding.title)[:2000],
@@ -175,6 +195,13 @@ def build_intake_payload(
             ],
         },
         "artifacts": artifacts,
+        "raw_report": {
+            "markdown": report_text,
+            "title": str(finding.title or finding.finding_id),
+            "report_id": report_id,
+            "source": "DVS dataflow_vuln_scan",
+            "reported_at": _now_iso(),
+        },
         "metadata": {
             "source": {
                 "service_name": SERVICE_NAME,
