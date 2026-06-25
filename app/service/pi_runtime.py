@@ -70,7 +70,7 @@ def regenerate_models_json(secret: str) -> None:
         return
     injected = 0
     for _key, cfg in providers.items():
-        if isinstance(cfg, dict) and _key == "gaiasec":
+        if isinstance(cfg, dict):
             cfg["apiKey"] = secret
             injected += 1
     _write_json(_GLOBAL_PI_DIR / "models.json", data)
@@ -104,11 +104,15 @@ def materialize_pi_runtime(*, secret: str) -> None:
     """Regenerate global PI config with the task's API key.
 
     Called once per task before execution starts.
+    No secret → keep current PI config (manual mode uses config center keys).
     """
-    if not secret:
-        logger.warning("no api key for task, keeping current PI config")
-        return
     _GLOBAL_PI_DIR.mkdir(parents=True, exist_ok=True)
-    regenerate_models_json(secret)
     regenerate_settings_json()
+    if not secret:
+        # No secret: restore pristine models.json (manual mode, use config center keys)
+        _ensure_original_models_saved()
+        _write_json(_GLOBAL_PI_DIR / "models.json", _ORIGINAL_MODELS)
+        logger.info("global PI runtime materialized — no secret, using config center keys")
+        return
+    regenerate_models_json(secret)
     logger.info("global PI runtime materialized")

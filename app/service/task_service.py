@@ -198,13 +198,6 @@ def _materialize_task_pi_runtime(*, task_root: str, agent_task_key: dict | None,
     base_models = _read_json_file(models_src)
     base_settings = _read_json_file(settings_src)
     merged_settings = _merge_pi_settings(base_settings)
-    auth_payload = {
-        "agent_task_key_id": str((agent_task_key or {}).get("id") or "").strip() or None,
-        "agent_task_key_name": str((agent_task_key or {}).get("name") or "").strip() or None,
-        "agent_task_key_prefix": str((agent_task_key or {}).get("prefix") or "").strip() or None,
-        "agent_task_key_secret": secret or None,
-        "agent_task_key_source": str((agent_task_key or {}).get("source") or "").strip() or "default",
-    }
     runtime_root = Path(task_root) / ".pi" / "agents"
     runtime_root.mkdir(parents=True, exist_ok=True)
     for role_name in _PI_RUNTIME_ROLES:
@@ -218,10 +211,6 @@ def _materialize_task_pi_runtime(*, task_root: str, agent_task_key: dict | None,
         )
         (role_dir / "settings.json").write_text(
             json.dumps(merged_settings, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        (role_dir / "auth.json").write_text(
-            json.dumps(auth_payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
         task_pi_dirs[role_name] = str(role_dir)
@@ -2477,20 +2466,20 @@ class TaskService:
             # The orchestrator uses the NFS path transparently — all IO goes local.
 
             cfg = build_task_config(svc, row.prompt_content, cwd=row.source_root_path or row.input_path)
-            # ── Task-level model override ──────────────────────────────
-            # 手动任务: 用户选模型(模型配置中心), SK 来自中心配置(无需 agent_task_key)
-            # 非手动任务: 调度器下发 gaiasec/* 模型 + WSK; 未下发则默认 gaiasec/auto
-            _task_model = str((tcfg.get("model") or "")).strip()
-            _is_manual = str(row.task_origin_type or "").strip() in ("", "manual")
-            if not _is_manual and not _task_model:
-                # 非手动任务未下发模型 → 默认走网关 auto 路由
-                _task_model = "gaiasec/auto"
-                cfg.workers.agents[0].model = _task_model if cfg.workers.agents else _task_model
-            elif _task_model and _task_model != "auto":
-                for _agent in cfg.workers.agents:
-                    _agent.model = _task_model
+            # ── Task-level model + key logic ───────────────────────────
+            # 有secret → 替换models.json所有provider的apiKey
+            # 有model → 使用该model
+            # 没model → 默认auto(gaiasec/auto)
+            # 没secret也没model → 手动模式，使用参数配置界面的key和model
             agent_task_key = _task_agent_key(tcfg)
             secret = str((agent_task_key or {}).get("secret") or "").strip()
+            _task_model = str(tcfg.get("model") or "").strip()
+            if _task_model and _task_model != "auto":
+                for _agent in cfg.workers.agents:
+                    _agent.model = _task_model
+            elif secret:
+                cfg.workers.agents[0].model = "gaiasec/auto"
+            # else: no secret + no model → keep service config defaults (manual mode)
             from app.service.pi_runtime import materialize_pi_runtime
             materialize_pi_runtime(secret=secret)
             agent_runtime_mode = "task_scoped" if secret else "global"
