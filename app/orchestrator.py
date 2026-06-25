@@ -56,6 +56,7 @@ from .global_cache import GlobalCache, compute_func_hash
 from .vuln_workflow import build_function_summary_from_result
 from .taint_source_identifier import autodetect_taint_sources, needs_taint_autodetect
 from .entry_point_screener import needs_entry_screen, screen_entry_point
+from .branch_pruner import prune_branches
 
 logger = logging.getLogger("dvs.orchestrator")
 from .judge_runner import JudgeMixin
@@ -1433,6 +1434,36 @@ class Orchestrator(JudgeMixin):
                         p2_followups.append(callee)
                     self._emit("trace_priority", tid, function=callee.function_name,
                                priority=pri, reason=sem.reason[:120], depth=dep)
+
+                # ── 分支剪枝（智能模式）：fork worker 会话，喂 callee 函数体 ──
+                # 在入队前批量判断所有 followup 是否值得跟入
+                if getattr(task_cfg, "branch_pruning_enabled", False) and workflow is not None:
+                    _all_prune_callees = p0_followups + p1_followups + p2_followups
+                    if _all_prune_callees:
+                        _acfg = workflow._agent_cfg()
+                        _pursue_names = prune_branches(
+                            worker_session=completed_session_file or "",
+                            callees=_all_prune_callees,
+                            caller_func=func_name,
+                            caller_file=src_file,
+                            source_root=local_td,
+                            workspace=workflow.ws,
+                            funcdb_path=getattr(task_cfg, "funcdb_path", ""),
+                            sessions_dir=root_sessions_dir,
+                            session_label=session_label,
+                            agent_cfg=_acfg,
+                            default_tools=task_cfg.workers.default_tools,
+                            cancel_event=self._cancel_event,
+                            run_timeout_seconds=task_cfg.agent_run_timeout_seconds,
+                            pi_max_retries=task_cfg.pi_max_retries,
+                            pi_retry_delay=task_cfg.pi_retry_delay,
+                            task_context={"task_id": tid, "task_root": str(root_output_path.parent), "task_run_root": str(root_out_dir), "task_pi_dir": task_cfg.role_pi_dir("workers"), "agent_role": "workers"},
+                            on_event=self.on_event,
+                            depth=dep,
+                        )
+                        p0_followups = [c for c in p0_followups if c.function_name in _pursue_names]
+                        p1_followups = [c for c in p1_followups if c.function_name in _pursue_names]
+                        p2_followups = [c for c in p2_followups if c.function_name in _pursue_names]
 
                 # ── P0: 顺序依赖，当前 Slot 内 DFS ────────────────────────
                 current_taint_state = TaintState()
