@@ -134,11 +134,22 @@ def _sanitize_callee_name(raw: str) -> list[str]:
     raw = raw.strip().strip("`")
     candidates: list[str] = [raw]
 
+    # 0.  Strip IDA Pro jump-thunk prefix "j_":
+    #    "j_IPSEC_MGTI_HASubscribePP6" -> "IPSEC_MGTI_HASubscribePP6"
+    #    IDA names direct-jump thunks as j_<target>. The funcdb stores
+    #    the real function name without the prefix.
+    if raw.startswith("j_") and len(raw) > 2:
+        thunk_stripped = raw[2:]
+        candidates.append(thunk_stripped)
+        cleaned = thunk_stripped
+    else:
+        cleaned = raw
+
     # 1.  Strip trailing parenthesised qualifier (only when there is content before it):
     #    "px_find_combo (通过 ...)" -> "px_find_combo"
     #    "next_client_auth_hook (函数指针)" -> "next_client_auth_hook"
     #    Avoid matching the entire string when it IS the wrapping paren.
-    cleaned = re.sub(r"^(.+)\s*[\(（][^)）]*[\)）]\s*$", r"\1", raw)
+    cleaned = re.sub(r"^(.+)\s*[\(（][^)）]*[\)）]\s*$", r"\1", cleaned)
     if cleaned != raw:
         candidates.append(cleaned.strip())
 
