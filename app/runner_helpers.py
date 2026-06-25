@@ -506,7 +506,7 @@ def _is_fatal_error(result: AgentResult) -> bool:
     fatal_patterns = [
         "model not found", "invalid model", "unknown model",
         "model does not exist", "unsupported model",
-        "unauthorized", "invalid api key",
+        "unauthorized", "invalid api key", "invalid llm key",
         "module not found", "no such file", "permission denied",
     ]
     return any(pattern in error_text for pattern in fatal_patterns)
@@ -528,7 +528,9 @@ def _is_retryable_api_error(result: AgentResult) -> bool:
 
 def _is_retryable_query_engine_401_error(result: AgentResult) -> bool:
     error_text = (result.error or "").lower()
-    return "401" in error_text and "unauthorized" in error_text
+    has_401 = "401" in error_text
+    has_key_err = any(p in error_text for p in ("unauthorized", "invalid llm key", "invalid api key", "invalid key"))
+    return has_401 and has_key_err
 
 
 def _is_pi_crash(result: AgentResult) -> bool:

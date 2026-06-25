@@ -354,7 +354,7 @@ def _run_with_pi_retry(
                 reason = str(result.error or "").strip() or "fatal error"
                 # Key/auth errors (401/unauthorized/invalid key): fail after 3 attempts, don't retry infinitely
                 _err_lower = reason.lower()
-                _is_key_error = any(p in _err_lower for p in ("unauthorized", "invalid api key", "401"))
+                _is_key_error = any(p in _err_lower for p in ("unauthorized", "invalid api key", "invalid llm key", "401"))
                 if _is_key_error and fatal_retry_count >= 3:
                     result.fatal = True
                     result.error = f"Key/auth error after {fatal_retry_count} attempts: {reason}"
