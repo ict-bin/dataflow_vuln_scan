@@ -134,22 +134,11 @@ def _sanitize_callee_name(raw: str) -> list[str]:
     raw = raw.strip().strip("`")
     candidates: list[str] = [raw]
 
-    # 0.  Strip IDA Pro jump-thunk prefix "j_":
-    #    "j_IPSEC_MGTI_HASubscribePP6" -> "IPSEC_MGTI_HASubscribePP6"
-    #    IDA names direct-jump thunks as j_<target>. The funcdb stores
-    #    the real function name without the prefix.
-    if raw.startswith("j_") and len(raw) > 2:
-        thunk_stripped = raw[2:]
-        candidates.append(thunk_stripped)
-        cleaned = thunk_stripped
-    else:
-        cleaned = raw
-
     # 1.  Strip trailing parenthesised qualifier (only when there is content before it):
     #    "px_find_combo (通过 ...)" -> "px_find_combo"
     #    "next_client_auth_hook (函数指针)" -> "next_client_auth_hook"
     #    Avoid matching the entire string when it IS the wrapping paren.
-    cleaned = re.sub(r"^(.+)\s*[\(（][^)）]*[\)）]\s*$", r"\1", cleaned)
+    cleaned = re.sub(r"^(.+)\s*[\(（][^)）]*[\)）]\s*$", r"\1", raw)
     if cleaned != raw:
         candidates.append(cleaned.strip())
 
@@ -1193,6 +1182,36 @@ class Orchestrator(JudgeMixin):
                             if cname != callee.function_name:
                                 callee = CalleeRef(function_name=resolved.function_name, file=resolved.source_file or callee.file, line=(f"L{resolved.line}" if resolved.line else callee.line), tainted_params=callee.tainted_params, description=callee.description, followup_id=callee.followup_id, dispatch_kind=callee.dispatch_kind, tainted_nonlocal=callee.tainted_nonlocal)
                             break
+                    if not resolved or not resolved.resolved:
+                        # ── Fuzzy resolve + LLM confirmation ──────────────────
+                        # When exact resolution fails, try longest prefix/suffix
+                        # segment matching in funcdb.  If candidates are found,
+                        # fork the worker session and ask the LLM to confirm
+                        # whether the candidate is actually the same function.
+                        if workflow is not None:
+                            _fuzzy_cands = resolver.fuzzy_resolve(
+                                callee.function_name,
+                                source_file_hint=callee.file or src_file,
+                                line_hint=callee.line,
+                            )
+                            if _fuzzy_cands:
+                                _confirmed = workflow._run_callee_resolve_fork(
+                                    completed_session_file or "",
+                                    {callee.function_name: _fuzzy_cands},
+                                    {callee.function_name: {"line": callee.line, "file": callee.file or src_file}},
+                                )
+                                _confirmed_name = _confirmed.get(callee.function_name)
+                                if _confirmed_name:
+                                    _re_resolved = resolver.resolve(
+                                        _confirmed_name,
+                                        source_file_hint=callee.file or src_file,
+                                        line_hint=callee.line,
+                                    )
+                                    if _re_resolved.resolved:
+                                        resolved = _re_resolved
+                                        callee = CalleeRef(function_name=resolved.function_name, file=resolved.source_file or callee.file, line=(f"L{resolved.line}" if resolved.line else callee.line), tainted_params=callee.tainted_params, description=callee.description, followup_id=callee.followup_id, dispatch_kind=callee.dispatch_kind, tainted_nonlocal=callee.tainted_nonlocal)
+                                        self._emit("callee_resolve_confirmed", tid,
+                                                   original=callee.function_name, resolved=resolved.function_name, depth=dep)
                     if not resolved or not resolved.resolved:
                         reason = "external followup" if _is_external_followup(callee) else (resolved.reason if resolved else "not_in_source_root_funcdb") or "not_in_source_root_funcdb"
                         tracker_ctx = ResolutionContext(

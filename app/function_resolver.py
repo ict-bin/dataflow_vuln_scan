@@ -73,6 +73,16 @@ def _score(row: dict, function_name: str, source_file_hint: str = "", line_hint:
         score += 1000
     elif name.endswith("::" + short):
         score += 800
+    elif short.endswith(name) and len(name) >= max(4, len(short) // 2):
+        # Fuzzy: search term ends with funcdb name (e.g. j_Foo → Foo).
+        # Longer matches score higher to prefer precise over noisy hits.
+        score += 600 + min(len(name), 50) * 2
+    elif name in short and len(name) >= max(4, len(short) // 2):
+        # Fuzzy: funcdb name is a substring of search term (any position).
+        score += 400 + min(len(name), 50) * 2
+    elif short in name and len(short) >= max(4, len(name) // 2):
+        # Fuzzy: search term is a substring of funcdb name.
+        score += 200 + min(len(short), 50) * 2
     fp = _row_file(row)
     hint = str(source_file_hint or "").replace("\\", "/")
     if hint and fp:
@@ -115,6 +125,49 @@ class FunctionResolver:
             if hit.resolved:
                 return hit
         return FunctionResolution("unresolved", name, reason="not_in_source_root_funcdb")
+
+    def fuzzy_resolve(self, function_name: str, *, source_file_hint: str = "", line_hint: str = "") -> list[FunctionResolution]:
+        """Find funcdb candidates by longest prefix/suffix segment matching.
+
+        When exact resolution fails, split the name by '_' and '::', then try
+        progressively removing segments from front (suffix match) and back
+        (prefix match).  Most decompiler naming variations (j_Foo, nullsub_Foo,
+        Foo_wrapper, Foo_stub) only add/remove one segment.
+
+        Returns candidates sorted by match length (longest first).
+        """
+        name = str(function_name or "").strip().strip("`")
+        if not name:
+            return []
+        seen: set[str] = set()
+        results: list[tuple[FunctionResolution, int]] = []
+        max_removals = 3
+        for separator in ("_", "::"):
+            segments = name.split(separator)
+            if len(segments) < 2:
+                continue
+            # Suffix matching: remove prefix segments (front)
+            for i in range(1, min(len(segments), max_removals + 1)):
+                candidate = separator.join(segments[i:])
+                if len(candidate) < 4 or candidate in seen:
+                    continue
+                seen.add(candidate)
+                hit = self.resolve(candidate, source_file_hint=source_file_hint, line_hint=line_hint)
+                if hit.resolved:
+                    results.append((hit, len(candidate)))
+                    break  # longest suffix for this separator found
+            # Prefix matching: remove suffix segments (back)
+            for i in range(1, min(len(segments), max_removals + 1)):
+                candidate = separator.join(segments[:len(segments) - i])
+                if len(candidate) < 4 or candidate in seen:
+                    continue
+                seen.add(candidate)
+                hit = self.resolve(candidate, source_file_hint=source_file_hint, line_hint=line_hint)
+                if hit.resolved:
+                    results.append((hit, len(candidate)))
+                    break  # longest prefix for this separator found
+        results.sort(key=lambda x: x[1], reverse=True)
+        return [r[0] for r in results]
 
     def _resolve_ea_funcdb(self, name: str, *, source_file_hint: str = "", line_hint: str = "") -> FunctionResolution:
         hit = FunctionResolution("unresolved", name, reason="not_in_ea_funcdb")

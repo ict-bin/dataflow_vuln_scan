@@ -1031,6 +1031,109 @@ class DataflowVulnWorkflow:
         self._record_edges_from_result(result, node_ids)
         return self._finalize_taint_result(result)
 
+    def _run_callee_resolve_fork(
+        self,
+        base_session: str,
+        unresolved_map: dict[str, list],
+        call_context_map: dict[str, dict] | None = None,
+    ) -> dict[str, str]:
+        """Fork worker session and ask LLM to confirm fuzzy callee resolutions.
+
+        Takes a map of {original_name: [FunctionResolution candidates]} and
+        returns a map of {original_name: confirmed_resolved_name}.
+
+        Fail-safe: any error keeps all candidates as confirmed.
+        """
+        if self._cancelled() or not unresolved_map or not self.cfg.workers.agents:
+            return {}
+        acfg = self._agent_cfg()
+        if self.sessions_archive_dir:
+            self.sessions_archive_dir.mkdir(parents=True, exist_ok=True)
+            fork_session = self.sessions_archive_dir / f"{self.session_label}-callee-resolve.jsonl"
+        else:
+            fork_session = self.sessions / f"callee-resolve-{_safe_name(self.func_name)}.jsonl"
+        try:
+            if base_session and Path(base_session).exists():
+                safe_copyfile(base_session, fork_session)
+        except OSError:
+            pass
+        lines = [
+            f"你在分析函数 `{self.src_file}::{self.func_name}` 时，以下跟入点在 funcdb 中"
+            "未精确匹配到函数定义。脚本通过最长前缀/后缀分段匹配找到了候选，"
+            "请判断每个候选是否确实是被调用的函数。",
+            "",
+        ]
+        for idx, (original, candidates) in enumerate(unresolved_map.items(), 1):
+            ctx = (call_context_map or {}).get(original, {})
+            call_line = ctx.get("line", "")
+            call_file = ctx.get("file", self.src_file)
+            lines.append(f"{idx}. 调用点函数名: {original}")
+            lines.append(f"   调用位置: {call_file} {call_line}")
+            if not candidates:
+                lines.append("   候选: (无)")
+                lines.append("")
+                continue
+            for j, c in enumerate(candidates):
+                c_name = getattr(c, "function_name", "") or ""
+                c_file = getattr(c, "source_file", "") or ""
+                c_line = getattr(c, "line", 0) or ""
+                lines.append(f"   候选 {chr(97 + j)}. {c_name} @ {c_file} L{c_line}")
+            lines.append("")
+        lines.append('输出 JSON: {"results": [{"original": "...", "confirmed": true, "resolved_name": "..."}]}')
+        prompt = "\n".join(lines)
+        system_prompt = _read_prompt("prompts/callee-resolve/default.md")
+        self._emit("callee_resolve_start", function=self.func_name,
+                   unresolved_count=len(unresolved_map), depth=self.dep)
+        output = run_agent(
+            prompt=prompt, model=acfg.model,
+            tools=acfg.tools or self.cfg.workers.default_tools,
+            cwd=str(self.ws), session_file=str(fork_session),
+            system_prompt=system_prompt,
+            cancel_event=self.cancel_event,
+            run_timeout_seconds=min(self.cfg.agent_run_timeout_seconds or 300, 120),
+            pi_max_retries=self.cfg.pi_max_retries, pi_retry_delay=self.cfg.pi_retry_delay,
+            task_context={
+                "task_id": self.task_id,
+                "task_root": str(self.out_dir.parent),
+                "task_run_root": str(self.out_dir),
+                "task_pi_dir": self.cfg.role_pi_dir("workers"),
+                "agent_role": "workers",
+            },
+        )
+        emit_agent_runtime_events(
+            self._emit, result=output, stage="callee_resolve",
+            role="workers", model=acfg.model,
+            extra={"function": self.func_name, "depth": self.dep},
+        )
+        parsed = _extract_json_from_text(output.output, "results")
+        if not isinstance(parsed, dict):
+            self._emit("callee_resolve_done", function=self.func_name,
+                       total=len(unresolved_map), confirmed=len(unresolved_map),
+                       error="json parse failed, keeping all candidates", depth=self.dep)
+            # Fail-safe: confirm all candidates
+            return {orig: getattr(cands[0], "function_name", "") if cands else ""
+                    for orig, cands in unresolved_map.items() if cands}
+        results_list = parsed.get("results") or []
+        confirmed_map: dict[str, str] = {}
+        confirmed_count = 0
+        for item in results_list:
+            if not isinstance(item, dict):
+                continue
+            original = str(item.get("original") or "").strip()
+            if item.get("confirmed") is True:
+                resolved_name = str(item.get("resolved_name") or "").strip()
+                if original and resolved_name:
+                    confirmed_map[original] = resolved_name
+                    confirmed_count += 1
+        # Fail-safe: unmentioned originals with candidates default to confirmed
+        for orig, cands in unresolved_map.items():
+            if orig not in confirmed_map and cands:
+                confirmed_map[orig] = getattr(cands[0], "function_name", "")
+                confirmed_count += 1
+        self._emit("callee_resolve_done", function=self.func_name,
+                   total=len(unresolved_map), confirmed=confirmed_count, depth=self.dep)
+        return confirmed_map
+
     def run_vuln_mining_after_taint(self, result: TaskResult) -> list[VulnFindingRecord]:
         base_session = str((result.upstream_entry_metadata or {}).get("vuln_mining_base_session") or "")
         dataflow_text = str((result.upstream_entry_metadata or {}).get("vuln_mining_dataflow_text") or result.final_output or "")
