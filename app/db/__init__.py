@@ -221,6 +221,24 @@ _MIGRATIONS = [
         name="ix_dvs_tasks_owner",
         statement="CREATE INDEX ix_dvs_tasks_owner ON secflow_app_dvs_tasks (execution_owner_id, status)",
     ),
+    Migration(
+        kind="column",
+        table_name="secflow_app_dvs_tasks",
+        name="vuln_total_count",
+        statement="ALTER TABLE secflow_app_dvs_tasks ADD COLUMN vuln_total_count INT NOT NULL DEFAULT 0",
+    ),
+    Migration(
+        kind="column",
+        table_name="secflow_app_dvs_tasks",
+        name="vuln_reported_count",
+        statement="ALTER TABLE secflow_app_dvs_tasks ADD COLUMN vuln_reported_count INT NOT NULL DEFAULT 0",
+    ),
+    Migration(
+        kind="column",
+        table_name="secflow_app_dvs_tasks",
+        name="vuln_unreported_count",
+        statement="ALTER TABLE secflow_app_dvs_tasks ADD COLUMN vuln_unreported_count INT NOT NULL DEFAULT 0",
+    ),
 ]
 
 

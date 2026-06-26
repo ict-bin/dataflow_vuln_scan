@@ -40,6 +40,24 @@ JSON 的 key 名保持英文不变（`title`、`summary`、`evidence` 等），v
 
 只有当污点确实来自网络报文、文件输入、SQL 参数、命令行、IPC、反序列化数据等**外部攻击面入口**，且攻击者在威胁模型假设的位置能影响其内容时，才视为可控。
 
+## 跨函数 callee 行为必须有源码取证（硬约束，违反即丢弃）
+
+本 fork 上下文里**只有当前函数的源码/污点分析**。当前函数内部调用的任何 callee（跨函数、尤其跨文件）的**函数体不在你的上下文里**——你看到的只是它的名字和调用点。
+
+因此：**禁止凭函数名/命名语义推断 callee 的内部行为。** 典型陷阱：
+
+| 函数名先验 | 你可能臆断的 | 实际可能完全相反 |
+|---|---|---|
+| `xxx_append` / `xxx_add` | "内部 realloc 扩容" | 容量不足直接 `return NULL`，从不扩容 |
+| `xxx_grow` / `xxx_reserve` | "必然扩容" | 仅在已分配槽位内移动，不扩容 |
+| `xxx_check` / `xxx_verify` | "做了完整校验" | 只查空指针，不查长度 |
+| `xxx_dup` / `xxx_copy` | "返回新分配的副本" | 写入调用方传入的缓冲区，不分配 |
+
+**规则**：在 `summary`/`evidence`/`trigger_path`/`entry_point` 中，**每一条**关于**非当前函数** callee 的行为断言——例如“内部 realloc”“扩容”“扩展缓冲区”“返回新指针”“分配新缓冲区”“做了边界校验”“会拷贝数据”——都必须先用 `extract_func`/`read`/`bash grep` **实际读取该 callee 的函数体**，并在 `evidence` 中引用该 callee 的 `文件:行号` 作为证据。
+
+- 如果你**没有**读取某 callee 的源码，就**不得**对该 callee 的内部行为做任何断言；
+- 此时该 callee 的行为属于“未知”，任何依赖该 callee 行为的漏洞论证都**不成立**，对应 finding 必须丢弃。
+
 ## 四维度判定（每条候选 finding 必须逐项自检，缺一不可）
 
 ### D1 code_accurate — 报告对代码的描述是否准确
@@ -49,6 +67,11 @@ JSON 的 key 名保持英文不变（`title`、`summary`、`evidence` 等），v
   - 忽略宏展开后的隐含 `return`/`break`（如 `CHECK_FAIL_RETURN_*`、`VerifyOrExit`）；
   - 忽略 `if (a <= b)` 类守护条件已经保证后续表达式非负/不溢出；
   - 把"用转换后的大小分配"误读为"用原始大小分配"。
+- **跨函数 callee 行为核对（必须）**：只要 finding 对任何**非当前函数**的 callee 做了行为断言（realloc/扩容/分配/校验/拷贝/返回指针……），必须满足：
+  1. 你已用 `extract_func`/`read`/`bash grep` 读取过该 callee 的真实函数体；
+  2. `evidence` 中引用了该 callee 的 `文件:行号` 并附其源码片段；
+  3. 断言的行为与该 callee 真实源码逐句一致（例如“realloc 扩容”必须能在该 callee 函数体里看到 `realloc` 且确为扩容路径）。
+  - 未读源码、或读到的源码不支持该断言 → `code_accurate=FAIL`，丢弃 finding。
 - 任一事实错误 → 丢弃。
 
 ### D2 path_reachable — 攻击路径是否真实可达
