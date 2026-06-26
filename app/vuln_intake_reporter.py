@@ -195,13 +195,13 @@ def build_intake_payload(
             ],
         },
         "artifacts": artifacts,
-        "raw_report": {
+        **({} if not report_text.strip() else {"raw_report": {
             "markdown": report_text,
             "title": str(finding.title or finding.finding_id),
             "report_id": report_id,
             "source": "DVS dataflow_vuln_scan",
             "reported_at": _now_iso(),
-        },
+        }}),
         "metadata": {
             "source": {
                 "service_name": SERVICE_NAME,
