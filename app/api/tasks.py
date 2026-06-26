@@ -1691,6 +1691,26 @@ def report_all_project_vuln_findings(project_id: str = Query(...), db: Session =
     }
 
 
+@router.get("/tasks/vuln-stats-batch")
+def get_tasks_vuln_stats_batch(task_ids: str = Query(...), db: Session = Depends(get_db)):
+    ids = [tid.strip() for tid in task_ids.split(",") if tid.strip()]
+    result = {}
+    for tid in ids:
+        row = db.query(AppDvsTask).filter(AppDvsTask.task_id == tid, AppDvsTask.is_deleted == False).first()
+        if not row:
+            result[tid] = {"total": 0, "reported": 0, "unreported": 0}
+            continue
+        root = _task_root(row)
+        latest = _latest_epoch_run_root(root) if str(root) else Path()
+        run_root = latest if latest.exists() else root / "run"
+        graph = load_vuln_scan_graph(run_root)
+        findings = graph.get("vulnerability_findings") or []
+        total = len(findings)
+        reported = sum(1 for f in findings if f.get("report_status") == "reported")
+        result[tid] = {"total": total, "reported": reported, "unreported": total - reported}
+    return result
+
+
 @router.get("/tasks/{task_id}")
 
 
