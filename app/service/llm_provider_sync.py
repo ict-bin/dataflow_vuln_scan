@@ -73,6 +73,7 @@ def _model_entries(provider: dict[str, Any]) -> list[dict[str, Any]]:
         entry.setdefault("reasoning", False)
         entry.setdefault("input", ["text"])
         entry.setdefault("contextWindow", context_window)
+        entry.setdefault("contextLength", context_window)
         entry.setdefault("cost", {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0})
         models.append(entry)
     return models
@@ -107,6 +108,7 @@ def build_models_json(providers: list[dict[str, Any]], gateway_model_aliases: li
                     "reasoning": False,
                     "input": ["text"],
                     "contextWindow": _as_positive_int(a.get("max_tokens_default"), _DEFAULT_CONTEXT_WINDOW),
+                    "contextLength": _as_positive_int(a.get("max_tokens_default"), _DEFAULT_CONTEXT_WINDOW),
                     "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
                 })
             if alias_models:
