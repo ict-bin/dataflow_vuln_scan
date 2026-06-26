@@ -40,11 +40,11 @@ def load_vuln_scan_graph(run_root: str | Path) -> dict[str, Any]:
             candidates.extend(epoch_dirs)
     else:
         candidates.extend([
+            root,
             root / "output",
             root.parent / "output",
             root.parent / _nfs_mirror_dir,
             root.parent / _nfs_mirror_dir / "output",
-            root,
         ])
     seen: set[Path] = set()
     for candidate in candidates:
