@@ -813,7 +813,7 @@ def _sync_task_vuln_stats(row: AppDvsTask) -> bool:
     # Prefer run/vuln-scan.sqlite (always complete), fallback to latest epoch
     run_sqlite = root / "run" / "vuln-scan.sqlite"
     if not run_sqlite.exists():
-        latest = _latest_epoch_run_root(root) if str(root) else None
+        latest = _latest_epoch_run_root(row) if str(root) else None
         run_root = latest if latest and latest.exists() else root / "run"
     else:
         run_root = root / "run"
