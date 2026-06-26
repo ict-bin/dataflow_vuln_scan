@@ -810,8 +810,13 @@ def _sync_task_vuln_stats(row: AppDvsTask) -> bool:
     root = _task_root(row)
     if not str(root):
         return False
-    latest = _latest_epoch_run_root(root) if str(root) else Path()
-    run_root = latest if latest.exists() else root / "run"
+    # Prefer run/vuln-scan.sqlite (always complete), fallback to latest epoch
+    run_sqlite = root / "run" / "vuln-scan.sqlite"
+    if not run_sqlite.exists():
+        latest = _latest_epoch_run_root(root) if str(root) else None
+        run_root = latest if latest and latest.exists() else root / "run"
+    else:
+        run_root = root / "run"
     if not run_root.exists():
         return False
     graph = load_vuln_scan_graph(run_root)

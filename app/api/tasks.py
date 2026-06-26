@@ -1561,8 +1561,13 @@ def _do_report_finding(task_id: str, finding_id: str, db: Session):
     from app.vuln_store import VulnFindingRecord
     row = _get_task_row(db, task_id)
     root = _task_root(row)
-    latest_run_root = _latest_epoch_run_root(root) if str(root) else Path()
-    run_root = latest_run_root if latest_run_root.exists() else root / "run"
+    # Prefer run/vuln-scan.sqlite (always complete), fallback to latest epoch
+    run_sqlite = root / "run" / "vuln-scan.sqlite"
+    if run_sqlite.exists():
+        run_root = root / "run"
+    else:
+        latest_run_root = _latest_epoch_run_root(root) if str(root) else Path()
+        run_root = latest_run_root if latest_run_root.exists() else root / "run"
     graph = load_vuln_scan_graph(run_root)
     findings = graph.get("vulnerability_findings") or []
     finding = next((f for f in findings if f.get("finding_id") == finding_id), None)
