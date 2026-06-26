@@ -1644,6 +1644,27 @@ def get_task_result(task_id: str, db: Session = Depends(get_db)):
     available = bool(result_markdown or run_report or dataflow_files or result_json)
     if row.status not in TERMINAL_STATUSES and not available:
         available = False
+
+    summary = _summarize_rounds(rounds, result_json)
+    # Enrich summary with vuln-graph data (function_count, total_findings) when
+    # the round-based summary is incomplete for the new SQLite-based architecture.
+    try:
+        graph_run_root = latest_run_root if latest_run_root.exists() else run_root
+        graph = load_vuln_scan_graph(graph_run_root)
+        graph_summary = summarize_graph(graph)
+        if graph_summary.get("runs", 0) > 0:
+            if not summary.get("function_count"):
+                summary["function_count"] = graph_summary["runs"]
+            summary["total_findings"] = graph_summary["findings"]
+            findings = graph.get("vulnerability_findings") or []
+            by_severity: dict[str, int] = {}
+            for f in findings:
+                sev = str(f.get("severity") or "unknown").upper()
+                by_severity[sev] = by_severity.get(sev, 0) + 1
+            summary["findings_by_severity"] = by_severity
+    except Exception:
+        pass
+
     return {
         "task_id": task_id,
         "available": available,
@@ -1657,7 +1678,7 @@ def get_task_result(task_id: str, db: Session = Depends(get_db)):
         "result_json": result_json,
         "output_files": output_files,
         "dataflow_files": dataflow_files,
-        "summary": _summarize_rounds(rounds, result_json),
+        "summary": summary,
     }
 
 
