@@ -757,8 +757,9 @@ class DataflowVulnWorkflow:
                     report_path=str(report_path),
                     taint_path_report_path=str(taint_report_path),
                 )
+                reported_ok = report_result.get("status") == "reported"
                 self._emit(
-                    "vuln_intake_reported" if report_result.get("status") == "reported" else "vuln_intake_report_failed",
+                    "vuln_intake_reported" if reported_ok else "vuln_intake_report_failed",
                     finding_id=rec.finding_id,
                     report_id=report_result.get("report_id"),
                     case_id=report_result.get("case_id"),
@@ -769,6 +770,12 @@ class DataflowVulnWorkflow:
                     function_name=rec.function_name,
                     line=rec.line,
                 )
+                if reported_ok:
+                    self.store.update_finding_report_status(
+                        rec.finding_id,
+                        status="reported",
+                        case_id=str(report_result.get("case_id") or ""),
+                    )
             except Exception as exc:
                 self._emit("vuln_intake_report_failed", finding_id=rec.finding_id, status="failed", error=str(exc), source_file=rec.source_file, function_name=rec.function_name, line=rec.line)
         return findings

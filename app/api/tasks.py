@@ -1568,6 +1568,18 @@ def report_task_vuln_finding(task_id: str, finding_id: str, db: Session = Depend
         report_path=report_path,
         taint_path_report_path=taint_path,
     )
+    reported_ok = result.get("status") == "reported"
+    if reported_ok:
+        try:
+            from app.vuln_store import VulnScanStore
+            store = VulnScanStore(run_root / "vuln-scan.sqlite")
+            store.update_finding_report_status(
+                finding_id,
+                status="reported",
+                case_id=str(result.get("case_id") or ""),
+            )
+        except Exception:
+            pass
     return {
         "task_id": task_id,
         "finding_id": finding_id,

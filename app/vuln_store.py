@@ -218,6 +218,8 @@ class VulnScanStore:
                   exploitability TEXT NOT NULL DEFAULT '',
                   confidence REAL NOT NULL DEFAULT 0,
                   output_dir TEXT NOT NULL DEFAULT '',
+                  report_status TEXT NOT NULL DEFAULT '',
+                  report_case_id TEXT NOT NULL DEFAULT '',
                   created_at REAL NOT NULL DEFAULT (strftime('%s','now')),
                   FOREIGN KEY(run_id) REFERENCES analysis_runs(run_id)
                 );
@@ -297,6 +299,8 @@ class VulnScanStore:
                 ("vulnerability_findings", "source_file", "ALTER TABLE vulnerability_findings ADD COLUMN source_file TEXT NOT NULL DEFAULT ''"),
                 ("vulnerability_findings", "function_name", "ALTER TABLE vulnerability_findings ADD COLUMN function_name TEXT NOT NULL DEFAULT ''"),
                 ("vulnerability_findings", "line", "ALTER TABLE vulnerability_findings ADD COLUMN line TEXT NOT NULL DEFAULT ''"),
+                ("vulnerability_findings", "report_status", "ALTER TABLE vulnerability_findings ADD COLUMN report_status TEXT NOT NULL DEFAULT ''"),
+                ("vulnerability_findings", "report_case_id", "ALTER TABLE vulnerability_findings ADD COLUMN report_case_id TEXT NOT NULL DEFAULT ''"),
                 ("taint_edges", "validation_facts_json", "ALTER TABLE taint_edges ADD COLUMN validation_facts_json TEXT NOT NULL DEFAULT '[]'"),
                 ("taint_edges", "validation_signature", "ALTER TABLE taint_edges ADD COLUMN validation_signature TEXT NOT NULL DEFAULT 'none'"),
                 ("taint_edges", "validation_risk_rank", "ALTER TABLE taint_edges ADD COLUMN validation_risk_rank INTEGER NOT NULL DEFAULT 100"),
@@ -356,6 +360,15 @@ class VulnScanStore:
             conn.executemany(
                 f"INSERT OR REPLACE INTO followups ({','.join(cols)}) VALUES ({','.join('?' for _ in cols)})",
                 [[row[c] for c in cols] for row in rows],
+            )
+
+    def update_finding_report_status(self, finding_id: str, *, status: str = "reported", case_id: str = "") -> None:
+        if not finding_id:
+            return
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE vulnerability_findings SET report_status=?, report_case_id=? WHERE finding_id=?",
+                (status, case_id, finding_id),
             )
 
     def add_finding(self, rec: VulnFindingRecord) -> None:
