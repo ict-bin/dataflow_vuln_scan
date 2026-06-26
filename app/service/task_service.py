@@ -1897,10 +1897,15 @@ class TaskService:
                             output_dir_removed = True
                     except Exception as exc:
                         cleanup_errors.append(f"{child_name}: {exc}")
-        deleted_events = int(
+        # 保留历史时间线事件（app_dvs_task_events）：这些事件已携带
+        # execution_epoch / control_version，重启后 epoch 自增，新旧事件天然
+        # 可区分（dedupe_key 含 epoch 不会冲突），便于审计与跨重启回溯。
+        # 注意 stages_json（/logs 的 SwarmEvent 回放缓冲）仍会被清空，那是
+        # 前端 trace 树的重建缓冲，与 DB 时间线是两回事，clean restart 需重建。
+        retained_event_count = int(
             db.query(AppDvsTaskEvent)
             .filter(AppDvsTaskEvent.task_id == row.task_id)
-            .delete(synchronize_session=False)
+            .count()
             or 0
         )
         from sqlalchemy.orm.attributes import flag_modified
@@ -1939,7 +1944,7 @@ class TaskService:
                     previous_epoch=previous_epoch,
                     reason="restart_requested",
                 ),
-                "deleted_event_count": deleted_events,
+                "retained_event_count": retained_event_count,
                 "run_dir_removed": run_dir_removed,
                 "output_dir_removed": output_dir_removed,
                 "cleanup_errors": cleanup_errors,

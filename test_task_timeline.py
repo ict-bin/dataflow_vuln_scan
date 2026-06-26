@@ -254,6 +254,44 @@ class TaskTimelineTests(unittest.TestCase):
         finally:
             db.close()
 
+    def test_restart_task_preserves_historical_timeline_events(self):
+        task_id = self._create_task()
+        db = self._session()
+        try:
+            row = db.query(AppDvsTask).filter_by(task_id=task_id).first()
+            row.status = "failed"
+            row.control_version = 2
+            row.execution_epoch = 4
+            row.execution_owner_id = "worker-a"
+            row.dispatch_status = "leased"
+            db.commit()
+
+            events_before = self.service.get_task_timeline(db, task_id)["events"]
+            types_before = [item["event_type"] for item in events_before]
+            self.assertIn("task_created", types_before)
+            count_before = len(events_before)
+
+            with patch.object(self.service, "_cleanup_worker_runtime", return_value=0):
+                self.service.restart_task(db, task_id)
+
+            # 重启不应清空历史时间线事件
+            events_after = self.service.get_task_timeline(db, task_id)["events"]
+            types_after = [item["event_type"] for item in events_after]
+            self.assertIn("task_created", types_after)
+            self.assertIn("task_retried", types_after)
+            # 旧事件仍在，且新增了 task_retried
+            self.assertEqual(count_before + 1, len(events_after))
+            # 旧事件保留原 epoch，新事件使用自增后的 epoch
+            created_event = next(item for item in events_after if item["event_type"] == "task_created")
+            retried_event = next(item for item in events_after if item["event_type"] == "task_retried")
+            self.assertEqual(0, created_event["execution_epoch"])
+            self.assertEqual(5, retried_event["execution_epoch"])
+            self.assertEqual(3, retried_event["control_version"])
+            self.assertEqual(count_before, retried_event["payload"]["retained_event_count"])
+            self.assertFalse("deleted_event_count" in retried_event["payload"])
+        finally:
+            db.close()
+
     def test_dispatch_once_does_not_record_task_auto_recovered_for_normal_pending_task(self):
         task_id = self._create_task()
         started: list[tuple[str, int, int]] = []
