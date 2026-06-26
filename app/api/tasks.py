@@ -852,7 +852,7 @@ def create_task(body: TaskCreateRequest, db: Session = Depends(get_db)):
 
 @router.get("/tasks")
 def list_tasks(
-    project_id: str = Query(...),
+    project_id: Optional[str] = Query(None),
     page: int = Query(1, ge=1),
     per_page: int = Query(100, ge=1, le=1000),
     status: Optional[str] = Query(None),
@@ -879,7 +879,7 @@ def list_tasks(
 
 @router.get("/tasks/stats", response_model=TaskListStatsResponse)
 def get_task_stats(
-    project_id: str = Query(...),
+    project_id: Optional[str] = Query(None),
     status: Optional[str] = Query(None),
     mode: Optional[str] = Query(None),
     parent_task_id: Optional[str] = Query(None),

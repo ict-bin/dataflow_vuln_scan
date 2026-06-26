@@ -1656,17 +1656,16 @@ class TaskService:
             "warnings": warnings,
         }
 
-    def list_tasks(self, db: Session, *, project_id: str, page: int = 1,
+    def list_tasks(self, db: Session, *, project_id: str | None, page: int = 1,
                    per_page: int = 100, status: Optional[str] = None,
                    mode: Optional[str] = None,
                    parent_task_id: Optional[str] = None,
                    parent_stage_item_id: Optional[str] = None,
                    sort_by: str = "created_at",
                    sort_order: str = "desc") -> dict:
-        query = db.query(AppDvsTask).filter(
-            AppDvsTask.project_id == project_id,
-            AppDvsTask.is_deleted.is_(False),
-        )
+        query = db.query(AppDvsTask).filter(AppDvsTask.is_deleted.is_(False))
+        if project_id:
+            query = query.filter(AppDvsTask.project_id == project_id)
         if status:
             query = query.filter(AppDvsTask.status == status)
         normalized_mode = str(mode or "").strip().lower()
@@ -1703,16 +1702,15 @@ class TaskService:
         self,
         db: Session,
         *,
-        project_id: str,
+        project_id: str | None,
         status: Optional[str] = None,
         mode: Optional[str] = None,
         parent_task_id: Optional[str] = None,
         parent_stage_item_id: Optional[str] = None,
     ) -> dict:
-        query = db.query(AppDvsTask.status, func.count(AppDvsTask.id)).filter(
-            AppDvsTask.project_id == project_id,
-            AppDvsTask.is_deleted.is_(False),
-        )
+        query = db.query(AppDvsTask.status, func.count(AppDvsTask.id)).filter(AppDvsTask.is_deleted.is_(False))
+        if project_id:
+            query = query.filter(AppDvsTask.project_id == project_id)
         if status:
             query = query.filter(AppDvsTask.status == status)
         normalized_mode = str(mode or "").strip().lower()
