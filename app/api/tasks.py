@@ -1521,6 +1521,64 @@ def get_task_vuln_findings(task_id: str, db: Session = Depends(get_db)):
     }
 
 
+@router.post("/tasks/{task_id}/vuln-findings/{finding_id}/report")
+def report_task_vuln_finding(task_id: str, finding_id: str, db: Session = Depends(get_db)):
+    """手动重新上报指定漏洞疑点到漏洞中心。"""
+    from app.vuln_intake_reporter import report_finding_to_intake
+    from app.vuln_store import VulnFindingRecord
+    row = _get_task_row(db, task_id)
+    root = _task_root(row)
+    latest_run_root = _latest_epoch_run_root(root) if str(root) else Path()
+    run_root = latest_run_root if latest_run_root.exists() else root / "run"
+    graph = load_vuln_scan_graph(run_root)
+    findings = graph.get("vulnerability_findings") or []
+    finding = next((f for f in findings if f.get("finding_id") == finding_id), None)
+    if not finding:
+        raise HTTPException(404, f"Finding {finding_id} not found")
+    project_id = str(row.project_id or "").strip()
+    task_name = str(row.task_name or "").strip()
+    parent_task_id = str(row.parent_task_id or "").strip()
+    source_root = str(row.source_root_path or "").strip()
+    output_dir = str(finding.get("output_dir") or "")
+    report_path = str(Path(output_dir) / "vulnerability-report.md") if output_dir else ""
+    taint_path = str(Path(output_dir) / "taint-path-report.md") if output_dir else ""
+    rec = VulnFindingRecord(
+        finding_id=finding_id,
+        run_id=str(finding.get("run_id") or ""),
+        node_id=str(finding.get("node_id") or ""),
+        source_file=str(finding.get("source_file") or ""),
+        function_name=str(finding.get("function_name") or ""),
+        line=str(finding.get("line") or ""),
+        vuln_type=str(finding.get("vuln_type") or "unknown"),
+        severity=str(finding.get("severity") or "medium"),
+        title=str(finding.get("title") or finding_id),
+        summary=str(finding.get("summary") or ""),
+        evidence=str(finding.get("evidence") or ""),
+        exploitability=str(finding.get("exploitability") or ""),
+        confidence=float(finding.get("confidence") or 0),
+        output_dir=output_dir,
+    )
+    result = report_finding_to_intake(
+        project_id=project_id,
+        task_id=task_id,
+        task_name=task_name,
+        parent_task_id=parent_task_id,
+        finding=rec,
+        source_root=source_root,
+        report_path=report_path,
+        taint_path_report_path=taint_path,
+    )
+    return {
+        "task_id": task_id,
+        "finding_id": finding_id,
+        "report_id": result.get("report_id"),
+        "case_id": result.get("case_id"),
+        "status": result.get("status"),
+        "duplicate": result.get("duplicate"),
+        "error": result.get("error"),
+    }
+
+
 @router.get("/tasks/{task_id}")
 def get_task(task_id: str, db: Session = Depends(get_db)):
     return get_task_service().get_task(db, task_id)
