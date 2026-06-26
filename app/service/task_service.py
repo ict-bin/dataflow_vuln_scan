@@ -804,6 +804,29 @@ def _sync_task_abnormal_reason(row: AppDvsTask) -> tuple[dict | None, bool]:
     return next_payload, changed
 
 
+def _sync_task_vuln_stats(row: AppDvsTask) -> bool:
+    """Sync vuln stats from task SQLite to MySQL row. Returns True if changed."""
+    from app.vuln_graph_service import load_vuln_scan_graph
+    root = _task_root(row)
+    if not str(root):
+        return False
+    latest = _latest_epoch_run_root(root) if str(root) else Path()
+    run_root = latest if latest.exists() else root / "run"
+    if not run_root.exists():
+        return False
+    graph = load_vuln_scan_graph(run_root)
+    findings = graph.get("vulnerability_findings") or []
+    total = len(findings)
+    reported = sum(1 for f in findings if f.get("report_status") == "reported")
+    unreported = total - reported
+    changed = (row.vuln_total_count != total or row.vuln_reported_count != reported or row.vuln_unreported_count != unreported)
+    if changed:
+        row.vuln_total_count = total
+        row.vuln_reported_count = reported
+        row.vuln_unreported_count = unreported
+    return changed
+
+
 def _record_abnormal_reason(row: AppDvsTask, reason: dict | None, *, changed: bool) -> None:
     if not changed or not isinstance(reason, dict):
         return
@@ -3110,6 +3133,9 @@ class TaskService:
             "agent_task_key_id": str((((row.task_config_json or {}).get("agent_task_key") or {}).get("id") or "")).strip() or None,
             "agent_task_key_prefix": str((((row.task_config_json or {}).get("agent_task_key") or {}).get("prefix") or "")).strip() or None,
             "agent_runtime_mode": _agent_runtime_mode_from_task_config(row.task_config_json),
+            "vuln_total_count": int(row.vuln_total_count or 0),
+            "vuln_reported_count": int(row.vuln_reported_count or 0),
+            "vuln_unreported_count": int(row.vuln_unreported_count or 0),
             **_task_config_snapshot_payload(row.task_config_json),
         }
 
