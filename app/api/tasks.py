@@ -1524,6 +1524,39 @@ def get_task_vuln_findings(task_id: str, db: Session = Depends(get_db)):
 @router.post("/tasks/{task_id}/vuln-findings/{finding_id}/report")
 def report_task_vuln_finding(task_id: str, finding_id: str, db: Session = Depends(get_db)):
     """手动重新上报指定漏洞疑点到漏洞中心。"""
+    result = _do_report_finding(task_id, finding_id, db)
+    if result is None:
+        raise HTTPException(404, f"Finding {finding_id} not found")
+    return result
+
+
+@router.post("/tasks/{task_id}/vuln-findings/report-all")
+def report_all_task_vuln_findings(task_id: str, db: Session = Depends(get_db)):
+    """一键上报所有未提交的漏洞疑点到漏洞中心。"""
+    row = _get_task_row(db, task_id)
+    root = _task_root(row)
+    latest_run_root = _latest_epoch_run_root(root) if str(root) else Path()
+    run_root = latest_run_root if latest_run_root.exists() else root / "run"
+    graph = load_vuln_scan_graph(run_root)
+    findings = graph.get("vulnerability_findings") or []
+    unreported = [f for f in findings if f.get("report_status") != "reported"]
+    results = []
+    for f in unreported:
+        fid = f.get("finding_id", "")
+        if not fid:
+            continue
+        r = _do_report_finding(task_id, fid, db)
+        results.append(r or {"finding_id": fid, "status": "skipped", "error": "not found"})
+    return {
+        "task_id": task_id,
+        "total_findings": len(findings),
+        "unreported": len(unreported),
+        "results": results,
+    }
+
+
+def _do_report_finding(task_id: str, finding_id: str, db: Session):
+    """Common helper to report a single finding. Returns dict or None if not found."""
     from app.vuln_intake_reporter import report_finding_to_intake
     from app.vuln_store import VulnFindingRecord
     row = _get_task_row(db, task_id)
@@ -1534,7 +1567,7 @@ def report_task_vuln_finding(task_id: str, finding_id: str, db: Session = Depend
     findings = graph.get("vulnerability_findings") or []
     finding = next((f for f in findings if f.get("finding_id") == finding_id), None)
     if not finding:
-        raise HTTPException(404, f"Finding {finding_id} not found")
+        return None
     project_id = str(row.project_id or "").strip()
     task_name = str(row.task_name or "").strip()
     parent_task_id = str(row.parent_task_id or "").strip()
