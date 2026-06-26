@@ -283,10 +283,16 @@ def report_finding_to_intake(
             "response": body,
         }
     except Exception as exc:
+        detail = str(exc)
+        try:
+            if hasattr(exc, 'response') and exc.response is not None:
+                detail += " | body: " + str(exc.response.text)[:500]
+        except Exception:
+            pass
         return {
             "status": "failed",
             "enabled": True,
             "report_id": payload.get("report_id"),
-            "error": str(exc),
+            "error": detail,
             "url": url,
         }
