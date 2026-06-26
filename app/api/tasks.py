@@ -1641,26 +1641,24 @@ def get_task(task_id: str, db: Session = Depends(get_db)):
 
 @router.get("/vuln-stats")
 def get_project_vuln_stats(project_id: str = Query(...), db: Session = Depends(get_db)):
-    """聚合项目下所有 DVS 任务的漏洞上报统计。"""
-    rows = db.query(AppDvsTask).filter(
+    """聚合项目下所有 DVS 任务的漏洞上报统计（从 MySQL 读取）。"""
+    from sqlalchemy import func as sa_func
+    result = db.query(
+        sa_func.sum(AppDvsTask.vuln_total_count),
+        sa_func.sum(AppDvsTask.vuln_reported_count),
+        sa_func.sum(AppDvsTask.vuln_unreported_count),
+    ).filter(
         AppDvsTask.project_id == project_id,
         AppDvsTask.is_deleted == False,
-    ).all()
-    total_findings = 0
-    reported = 0
-    for row in rows:
-        root = _task_root(row)
-        latest_run_root = _latest_epoch_run_root(root) if str(root) else Path()
-        run_root = latest_run_root if latest_run_root.exists() else root / "run"
-        graph = load_vuln_scan_graph(run_root)
-        findings = graph.get("vulnerability_findings") or []
-        total_findings += len(findings)
-        reported += sum(1 for f in findings if f.get("report_status") == "reported")
+    ).first()
+    total = int(result[0] or 0)
+    reported = int(result[1] or 0)
+    unreported = int(result[2] or 0)
     return {
         "project_id": project_id,
-        "total_findings": total_findings,
+        "total_findings": total,
         "reported": reported,
-        "unreported": total_findings - reported,
+        "unreported": unreported,
     }
 
 
