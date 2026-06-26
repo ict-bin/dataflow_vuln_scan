@@ -2495,19 +2495,22 @@ class TaskService:
 
             cfg = build_task_config(svc, row.prompt_content, cwd=row.source_root_path or row.input_path)
             # ── Task-level model + key logic ───────────────────────────
-            # 有secret → 替换models.json所有provider的apiKey
-            # 有model → 使用该model
-            # 没model → 默认auto(gaiasec/auto)
-            # 没secret也没model → 手动模式，使用参数配置界面的key和model
+            # 有key+无模型 → auto (gaiasec/auto)
+            # 有key+有模型 → 该模型
+            # 无key+无模型 → 参数配置界面默认
+            # 无key+有模型 → 该模型
             agent_task_key = _task_agent_key(tcfg)
             secret = str((agent_task_key or {}).get("secret") or "").strip()
             _task_model = str(tcfg.get("model") or "").strip()
-            if _task_model and _task_model != "auto":
+            if _task_model:
+                # 有模型 → 使用该模型 (auto → gaiasec/auto)
+                _effective = "gaiasec/auto" if _task_model == "auto" else _task_model
                 for _agent in cfg.workers.agents:
-                    _agent.model = _task_model
+                    _agent.model = _effective
             elif secret:
+                # 无模型 + 有key → 默认 auto
                 cfg.workers.agents[0].model = "gaiasec/auto"
-            # else: no secret + no model → keep service config defaults (manual mode)
+            # else: 无模型 + 无key → 保持参数配置界面默认
             from app.service.pi_runtime import materialize_pi_runtime
             materialize_pi_runtime(secret=secret)
             agent_runtime_mode = "task_scoped" if secret else "global"
