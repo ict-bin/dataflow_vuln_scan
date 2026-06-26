@@ -1,8 +1,13 @@
 """Global PI runtime materialization.
 
 Each Pod runs exactly one task at a time.  Before a task starts the global
-PI config (~/.pi/agent/models.json & settings.json) is regenerated with
-the task's API key.  No task-scoped PI directories needed.
+PI config (~/.pi/agent/models.json & settings.json) is regenerated.
+_write_models_json_from_db() pulls fresh providers from the config center
+into models.json before materialize_pi_runtime() is called.
+
+materialize_pi_runtime():
+  - secret present  → inject secret into ALL providers' apiKey
+  - no secret       → leave models.json as-is (config center keys)
 """
 
 from __future__ import annotations
@@ -41,40 +46,25 @@ def _write_json(path: Path, data: dict[str, Any]) -> None:
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-# ── models.json ───────────────────────────────────────────────────────────────
+def _inject_secret_into_models(secret: str) -> int:
+    """Read the CURRENT models.json and inject secret into every provider.
 
-_ORIGINAL_MODELS: dict[str, Any] | None = None
-
-
-def _ensure_original_models_saved() -> None:
-    """On first call, save a copy of the pristine models.json so we can
-    restore it between tasks.  We only overwrite apiKey, never structure."""
-    global _ORIGINAL_MODELS
-    if _ORIGINAL_MODELS is not None:
-        return
-    models_path = _GLOBAL_PI_DIR / "models.json"
-    original = _read_json(models_path) or {"providers": {}}
-    _ORIGINAL_MODELS = json.loads(json.dumps(original))  # deep copy
-    logger.info("saved pristine models.json snapshot")
-
-
-def regenerate_models_json(secret: str) -> None:
-    """Write the global models.json with apiKey injected into every provider.
-
-    Only apiKey is touched; all other fields are preserved from the original.
+    Returns the number of providers updated.
     """
-    _ensure_original_models_saved()
-    data = json.loads(json.dumps(_ORIGINAL_MODELS))
-    providers = data.get("providers") if isinstance(data, dict) else None
+    models_path = _GLOBAL_PI_DIR / "models.json"
+    data = _read_json(models_path)
+    if not isinstance(data, dict):
+        return 0
+    providers = data.get("providers")
     if not isinstance(providers, dict):
-        return
+        return 0
     injected = 0
     for _key, cfg in providers.items():
         if isinstance(cfg, dict):
             cfg["apiKey"] = secret
             injected += 1
-    _write_json(_GLOBAL_PI_DIR / "models.json", data)
-    logger.info("regenerated global models.json — apiKey injected into %d providers", injected)
+    _write_json(models_path, data)
+    return injected
 
 
 # ── settings.json ─────────────────────────────────────────────────────────────
@@ -101,18 +91,18 @@ def regenerate_settings_json() -> None:
 # ── public entry point ────────────────────────────────────────────────────────
 
 def materialize_pi_runtime(*, secret: str) -> None:
-    """Regenerate global PI config with the task's API key.
+    """Regenerate global PI config for the current task.
 
-    Called once per task before execution starts.
-    No secret → keep current PI config (manual mode uses config center keys).
+    Called once per task after _write_models_json_from_db() has written
+    fresh providers from the config center.
+
+    - secret present → inject secret into ALL providers' apiKey
+    - no secret      → leave models.json as-is (use config center keys)
     """
     _GLOBAL_PI_DIR.mkdir(parents=True, exist_ok=True)
     regenerate_settings_json()
     if not secret:
-        # No secret: restore pristine models.json (manual mode, use config center keys)
-        _ensure_original_models_saved()
-        _write_json(_GLOBAL_PI_DIR / "models.json", _ORIGINAL_MODELS)
         logger.info("global PI runtime materialized — no secret, using config center keys")
         return
-    regenerate_models_json(secret)
-    logger.info("global PI runtime materialized")
+    injected = _inject_secret_into_models(secret)
+    logger.info("global PI runtime materialized — apiKey injected into %d providers", injected)
