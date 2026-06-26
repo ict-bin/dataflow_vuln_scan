@@ -1629,6 +1629,71 @@ def get_task(task_id: str, db: Session = Depends(get_db)):
     return get_task_service().get_task(db, task_id)
 
 
+# ── Project-level vuln stats & batch report ─────────────────────────────────
+
+@router.get("/vuln-stats")
+def get_project_vuln_stats(project_id: str = Query(...), db: Session = Depends(get_db)):
+    """聚合项目下所有 DVS 任务的漏洞上报统计。"""
+    rows = db.query(AppDvsTask).filter(
+        AppDvsTask.project_id == project_id,
+        AppDvsTask.is_deleted == False,
+    ).all()
+    total_findings = 0
+    reported = 0
+    for row in rows:
+        root = _task_root(row)
+        latest_run_root = _latest_epoch_run_root(root) if str(root) else Path()
+        run_root = latest_run_root if latest_run_root.exists() else root / "run"
+        graph = load_vuln_scan_graph(run_root)
+        findings = graph.get("vulnerability_findings") or []
+        total_findings += len(findings)
+        reported += sum(1 for f in findings if f.get("report_status") == "reported")
+    return {
+        "project_id": project_id,
+        "total_findings": total_findings,
+        "reported": reported,
+        "unreported": total_findings - reported,
+    }
+
+
+@router.post("/vuln-stats/report-all")
+def report_all_project_vuln_findings(project_id: str = Query(...), db: Session = Depends(get_db)):
+    """一键上报项目下所有 DVS 任务的未提交漏洞。"""
+    rows = db.query(AppDvsTask).filter(
+        AppDvsTask.project_id == project_id,
+        AppDvsTask.is_deleted == False,
+    ).all()
+    all_results = []
+    total = 0
+    ok = 0
+    for row in rows:
+        task_id = row.task_id
+        root = _task_root(row)
+        latest_run_root = _latest_epoch_run_root(root) if str(root) else Path()
+        run_root = latest_run_root if latest_run_root.exists() else root / "run"
+        graph = load_vuln_scan_graph(run_root)
+        findings = graph.get("vulnerability_findings") or []
+        for f in findings:
+            fid = f.get("finding_id", "")
+            if not fid or f.get("report_status") == "reported":
+                continue
+            total += 1
+            r = _do_report_finding(task_id, fid, db)
+            all_results.append(r or {"task_id": task_id, "finding_id": fid, "status": "skipped", "error": "not found"})
+            if r and r.get("status") == "reported":
+                ok += 1
+    return {
+        "project_id": project_id,
+        "total_unreported": total,
+        "reported_ok": ok,
+        "failed": total - ok,
+        "results": all_results,
+    }
+
+
+@router.get("/tasks/{task_id}")
+
+
 @router.get("/tasks/{task_id}/execution")
 def get_task_execution(task_id: str, db: Session = Depends(get_db)):
     return get_task_service().get_task_execution(db, task_id)
