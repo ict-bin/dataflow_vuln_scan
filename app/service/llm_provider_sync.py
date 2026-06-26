@@ -1,5 +1,13 @@
 """
-llm_provider_sync.py — 从平台配置中心同步 LLM Provider，生成 pi 的 models.json
+llm_provider_sync.py — 从两个来源同步 LLM 模型信息，生成 pi 的 models.json
+
+来源 1: 配置中心 /service/llm/providers (模型配置中心)
+  - 直连 Provider (local_minimax, local_codex 等)
+  - gaiasec Provider (网关入口, model=auto)
+
+来源 2: AIGW MySQL gaiasec_llm_gateway.model_aliases (网关配置)
+  - 网关可路由的模型别名 (auto, max, pro 等)
+  - 合并到 gaiasec provider 的 models 列表
 """
 from __future__ import annotations
 
@@ -70,21 +78,11 @@ def _model_entries(provider: dict[str, Any]) -> list[dict[str, Any]]:
     return models
 
 
-def build_models_json(providers: list[dict[str, Any]]) -> dict:
+def build_models_json(providers: list[dict[str, Any]], gateway_model_aliases: list[dict[str, Any]] | None = None) -> dict:
     """
-    将配置中心的 LlmProviderSummary 列表转换为 pi 的 models.json 格式。
-
-    pi models.json 格式：
-    {
-        "providers": {
-            "<provider_key>": {
-                "baseUrl": "...",
-                "api": "openai-completions",
-                "apiKey": "<raw_key>",
-                "models": [{"id": "<model_id>", "contextWindow": 128000}]
-            }
-        }
-    }
+    将配置中心的 LlmProviderSummary 列表 + AIGW model_aliases 转换为 pi 的 models.json。
+    
+    gateway_model_aliases 中的别名会合并到 gaiasec provider 的 models 列表。
     """
     result: dict[str, Any] = {"providers": {}}
     for p in providers:
@@ -93,13 +91,65 @@ def build_models_json(providers: list[dict[str, Any]]) -> dict:
         key = p.get("provider_key", "").strip()
         if not key:
             continue
+        models = _model_entries(p)
+        # Source 2: AIGW model aliases → 合并到 gaiasec provider
+        if key == "gaiasec" and gateway_model_aliases:
+            alias_models: list[dict[str, Any]] = []
+            for a in gateway_model_aliases:
+                if not a.get("enabled"):
+                    continue
+                alias_name = str(a.get("alias_name") or "").strip()
+                if not alias_name:
+                    continue
+                alias_models.append({
+                    "id": alias_name,
+                    "name": alias_name,
+                    "reasoning": False,
+                    "input": ["text"],
+                    "contextWindow": _as_positive_int(a.get("max_tokens_default"), _DEFAULT_CONTEXT_WINDOW),
+                    "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
+                })
+            if alias_models:
+                models = alias_models
         result["providers"][key] = {
             "baseUrl": p.get("api_base", ""),
             "api": _provider_api(str(p.get("provider_type") or "")),
             "apiKey": p.get("api_key", ""),
-            "models": _model_entries(p),
+            "models": models,
         }
     return result
+
+
+def _fetch_gateway_model_aliases() -> list[dict[str, Any]]:
+    """从 AIGW MySQL 数据库拉取网关配置的 model aliases (来源 2)。
+    
+    环境变量:
+      AIGW_DB_HOST (默认 gaiasec-llm-gateway-mysql)
+      AIGW_DB_PORT (默认 3306)
+      AIGW_DB_USER (默认 sa)
+      AIGW_DB_PASSWORD
+      AIGW_DB_NAME (默认 gaiasec_llm_gateway)
+    """
+    host = os.environ.get("AIGW_DB_HOST", "gaiasec-llm-gateway-mysql")
+    port = int(os.environ.get("AIGW_DB_PORT", "3306"))
+    user = os.environ.get("AIGW_DB_USER", "sa")
+    password = os.environ.get("AIGW_DB_PASSWORD", "")
+    db_name = os.environ.get("AIGW_DB_NAME", "gaiasec_llm_gateway")
+    if not password:
+        logger.warning("AIGW_DB_PASSWORD 未设置，跳过网关模型别名同步")
+        return []
+    try:
+        import pymysql
+        conn = pymysql.connect(host=host, port=port, user=user, password=password, database=db_name, connect_timeout=5)
+        c = conn.cursor(pymysql.cursors.DictCursor)
+        c.execute("SELECT alias_name, max_tokens_default, temperature_default, enabled, description FROM model_aliases")
+        rows = c.fetchall()
+        conn.close()
+        logger.info("从 AIGW DB 同步 %d 个 model aliases", len(rows))
+        return rows
+    except Exception as e:
+        logger.warning("AIGW DB model aliases 同步失败: %s", e)
+        return []
 
 
 def sync_providers_to_pi(
@@ -130,7 +180,7 @@ def sync_providers_to_pi(
             logger.warning("配置中心返回空 Provider 列表，跳过同步")
             return False
 
-        models_json = build_models_json(items)
+        models_json = build_models_json(items, gateway_model_aliases=_fetch_gateway_model_aliases())
         enabled_count = len(models_json["providers"])
 
         pi_dir = Path(_PI_DIR)
