@@ -57,6 +57,7 @@ from .vuln_workflow import build_function_summary_from_result
 from .taint_source_identifier import autodetect_taint_sources, needs_taint_autodetect
 from .entry_point_screener import needs_entry_screen, screen_entry_point
 from .branch_pruner import prune_branches
+from .clang_analyzer import analyze_function_callsites, is_enabled as _clang_mutex_enabled
 
 logger = logging.getLogger("dvs.orchestrator")
 from .judge_runner import JudgeMixin
@@ -1411,6 +1412,43 @@ class Orchestrator(JudgeMixin):
                     self._emit("trace_callees", tid, function=func_name,
                                callees=[c.function_name for c in valid], depth=dep)
 
+                # ── clang 语法解析：调用点校验 + 互斥分支标注 (debug 开关) ──
+                # 默认 OFF(DVS_CLANG_MUTEX_ENABLED 未置真)时跳过整块, valid 保持原状,
+                # 下游 P0 分区因无 branch_group_id 自动退化为原始顺序逻辑, 行为与
+                # pre-clang 完全一致。ON 时才做 clang 解析 + 幽灵边丢弃 + 互斥标注。
+                if _clang_mutex_enabled():
+                    _clang_cache_dir = shared_run_dir / "clang-cache"
+                    _clang_callsites = analyze_function_callsites(
+                        target_dir, src_file, func_name,
+                        [c.function_name for c in valid], _clang_cache_dir)
+                    if _clang_callsites:
+                        _valid_after_clang: list[CalleeRef] = []
+                        for callee in valid:
+                            ci = _clang_callsites.get(callee.function_name)
+                            if ci is None:
+                                _valid_after_clang.append(callee)
+                                continue
+                            if not ci.get("validated"):
+                                if callee.followup_id:
+                                    try:
+                                        VulnScanStore(graph_db_path).update_followup_status(
+                                            callee.followup_id, "skipped", reason="phantom_callsite")
+                                    except Exception as _e:
+                                        logger.warning("unexpected error in orchestrator.py: %s", _e, exc_info=True)
+                                self._emit("followup_skipped", tid, function=callee.function_name,
+                                           reason="phantom_callsite", caller=func_name,
+                                           claimed_line=callee.line)
+                                continue
+                            callee.callsite_validated = True
+                            callee.call_line = int(ci.get("call_line") or 0)
+                            callee.call_expr = str(ci.get("call_expr") or "")
+                            callee.branch_path = ci.get("branch_path") or []
+                            callee.branch_group_id = str(ci.get("branch_group_id") or "")
+                            callee.branch_arm_id = str(ci.get("branch_arm_id") or "")
+                            callee.mutex_siblings = ci.get("mutex_siblings") or []
+                            _valid_after_clang.append(callee)
+                        valid = _valid_after_clang
+
                 # ── 参数语义分析 + P0/P1/P2 分流 ────────────────────────
                 p0_followups: list[CalleeRef] = []
                 p1_followups: list[CalleeRef] = []
@@ -1465,9 +1503,15 @@ class Orchestrator(JudgeMixin):
                         p1_followups = [c for c in p1_followups if c.function_name in _pursue_names]
                         p2_followups = [c for c in p2_followups if c.function_name in _pursue_names]
 
-                # ── P0: 顺序依赖，当前 Slot 内 DFS ────────────────────────
+                # ── P0: 顺序依赖 vs 互斥替代分支 ──────────────────────
+                # clang 标注后: 同 branch_group_id 不同 arm 的 P0 是互斥替代分支
+                # (运行时只可能执行其一), 不得互相继承状态/串成链; 其余 P0 为真串行依赖。
+                # OFF 时 clang 标注被跳过, 所有 callee 的 branch_group_id="" → 无互斥组 →
+                # _mutex_members 为空, 全部走 _sequential_members, 行为与原始顺序 P0 一致。
                 current_taint_state = TaintState()
-                for callee in p0_followups:
+
+                def _enqueue_p0(callee: CalleeRef, validation_context: str,
+                                reason: str, mutex_note: str = "") -> None:
                     self._raise_if_cancelled()
                     sub_file = callee.file or src_file
                     sub_cfg = task_cfg.model_copy(deep=True)
@@ -1489,22 +1533,51 @@ class Orchestrator(JudgeMixin):
                         {"name": p, "description": f"由 {func_name} 在 {_callee_callsite_line or callee.line or 'unknown'} 调用传入", "source_kind": "call_argument"}
                         for p in sub_cfg.taint_params
                     ]
-                    validation_context = current_taint_state.summary()
                     tainted_ctx_str = (
                         f"函数 {callee.function_name} 被 {func_name} 在 {_callee_callsite_line or callee.line} 调用。\n"
                         f"污染参数: {callee.tainted_params}\n说明: {callee.description}"
                     )
-                    if validation_context != "(无)":
+                    if mutex_note:
+                        tainted_ctx_str += f"\n\n# 互斥分支\n{mutex_note}"
+                    if validation_context and validation_context != "(无)":
                         tainted_ctx_str += f"\n\n# 调用链上已累积的校验\n{validation_context}"
                     sub_line_hint = _get_definition_line(target_dir, callee.function_name, sub_file) or callee.line
                     sub_tid = tid + f"-d{dep + 1}-{callee.function_name[:25]}-{(callee.followup_id or hashlib.sha1((callee.function_name + callee.tainted_params + callee.line).encode()).hexdigest())[-6:]}"
                     self._emit("sequence_call", tid,
                                parent_function=func_name, callee_function=callee.function_name,
-                               depth=dep + 1, reason="sequential P0: modifies param")
+                               depth=dep + 1, reason=reason)
                     queue.put((callee.function_name, sub_file, sub_line_hint, sub_cfg,
                                      sub_tid, dep + 1, tainted_ctx_str,
                                      completed_session_file or None, callee.followup_id,
                                      context_by_callee.get(_callee_key(callee), "")))
+
+                # 组内存在不同 arm 的 group_id 集合 = 互斥组
+                _mutex_group_ids = {
+                    c.branch_group_id for c in p0_followups
+                    if getattr(c, "branch_group_id", "")
+                    and any(getattr(o, "branch_group_id", "") == c.branch_group_id
+                            and getattr(o, "branch_arm_id", "") != c.branch_arm_id
+                            for o in p0_followups if o is not c)
+                }
+                _mutex_members = [c for c in p0_followups if c.branch_group_id in _mutex_group_ids]
+                _sequential_members = [c for c in p0_followups if c.branch_group_id not in _mutex_group_ids]
+
+                # 互斥替代分支: 各自独立, 不继承兄弟 arm 状态(运行时只可能执行其一)
+                for callee in _mutex_members:
+                    _note = (
+                        f"本调用处于互斥分支 arm={callee.branch_arm_id} "
+                        f"(group={callee.branch_group_id}); 兄弟 {callee.mutex_siblings or []} "
+                        f"与本调用互斥, 不继承其状态, 二者不得互相传递 taint/校验。"
+                        if callee.branch_group_id else ""
+                    )
+                    _enqueue_p0(callee, current_taint_state.summary(),
+                                reason="mutex-alt P0: mutually-exclusive arm",
+                                mutex_note=_note)
+
+                # 非互斥: 真串行依赖, 累积 current_taint_state (原逻辑; OFF 时全走这里)
+                for callee in _sequential_members:
+                    _enqueue_p0(callee, current_taint_state.summary(),
+                                reason="sequential P0: modifies param")
 
                 # ── P1: 不修改参数但产出校验 ────────────────────────────
                 for callee in p1_followups:
