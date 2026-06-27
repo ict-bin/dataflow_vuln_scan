@@ -776,6 +776,21 @@ class DataflowVulnWorkflow:
                         status="reported",
                         case_id=str(report_result.get("case_id") or ""),
                     )
+                # 无论上报成败都同步 MySQL 统计
+                try:
+                    from app.service.task_service import _sync_task_vuln_stats
+                    from app.db.models import AppDvsTask
+                    from sqlalchemy import create_engine
+                    from sqlalchemy.orm import Session
+                    from app.config import get_service_yaml
+                    engine = create_engine(get_service_yaml().database.url)
+                    with Session(engine) as sess:
+                        row = sess.query(AppDvsTask).filter(AppDvsTask.task_id == self.task_id).first()
+                        if row:
+                            _sync_task_vuln_stats(row)
+                            sess.commit()
+                except Exception:
+                    pass
             except Exception as exc:
                 self._emit("vuln_intake_report_failed", finding_id=rec.finding_id, status="failed", error=str(exc), source_file=rec.source_file, function_name=rec.function_name, line=rec.line)
         return findings

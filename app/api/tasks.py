@@ -1609,20 +1609,21 @@ def _do_report_finding(task_id: str, finding_id: str, db: Session):
         taint_path_report_path=taint_path,
     )
     reported_ok = result.get("status") == "reported"
-    if reported_ok:
-        try:
-            from app.vuln_store import VulnScanStore
-            store = VulnScanStore(run_root / "vuln-scan.sqlite")
+    # 无论上报成败都更新 SQLite 并同步 MySQL 统计
+    try:
+        from app.vuln_store import VulnScanStore
+        store = VulnScanStore(run_root / "vuln-scan.sqlite")
+        if reported_ok:
             store.update_finding_report_status(
                 finding_id,
                 status="reported",
                 case_id=str(result.get("case_id") or ""),
             )
-            from app.service.task_service import _sync_task_vuln_stats
-            _sync_task_vuln_stats(row)
-            db.commit()
-        except Exception:
-            pass
+        from app.service.task_service import _sync_task_vuln_stats
+        _sync_task_vuln_stats(row)
+        db.commit()
+    except Exception:
+        pass
     return {
         "task_id": task_id,
         "finding_id": finding_id,
