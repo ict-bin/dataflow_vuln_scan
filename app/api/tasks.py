@@ -826,6 +826,8 @@ def create_task(body: TaskCreateRequest, db: Session = Depends(get_db)):
         }
     if body.model:
         task_config_json["model"] = str(body.model).strip()
+    task_config_json["parent_task_id"] = str(body.parent_task_id or "").strip()
+    task_config_json["parent_task_name"] = str(body.task_name or "").strip()
 
     svc = get_task_service()
     return svc.create_task(
