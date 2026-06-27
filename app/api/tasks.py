@@ -1643,12 +1643,12 @@ def get_task(task_id: str, db: Session = Depends(get_db)):
 
 @router.get("/vuln-stats")
 def get_project_vuln_stats(project_id: str = Query(...), db: Session = Depends(get_db)):
-    """聚合项目下所有 DVS 任务的漏洞上报统计（从 MySQL 读取）。"""
-    from sqlalchemy import func as sa_func
+    """聚合项目下所有 DVS 任务的漏洞上报统计（从 MySQL 读取，-1 视为未同步）。"""
+    from sqlalchemy import func as sa_func, case
     result = db.query(
-        sa_func.sum(AppDvsTask.vuln_total_count),
-        sa_func.sum(AppDvsTask.vuln_reported_count),
-        sa_func.sum(AppDvsTask.vuln_unreported_count),
+        sa_func.sum(case((AppDvsTask.vuln_total_count >= 0, AppDvsTask.vuln_total_count), else_=0)),
+        sa_func.sum(case((AppDvsTask.vuln_reported_count >= 0, AppDvsTask.vuln_reported_count), else_=0)),
+        sa_func.sum(case((AppDvsTask.vuln_unreported_count >= 0, AppDvsTask.vuln_unreported_count), else_=0)),
     ).filter(
         AppDvsTask.project_id == project_id,
         AppDvsTask.is_deleted == False,
