@@ -225,19 +225,19 @@ _MIGRATIONS = [
         kind="column",
         table_name="secflow_app_dvs_tasks",
         name="vuln_total_count",
-        statement="ALTER TABLE secflow_app_dvs_tasks ADD COLUMN vuln_total_count INT NOT NULL DEFAULT 0",
+        statement="ALTER TABLE secflow_app_dvs_tasks ADD COLUMN vuln_total_count INT NOT NULL DEFAULT -1",
     ),
     Migration(
         kind="column",
         table_name="secflow_app_dvs_tasks",
         name="vuln_reported_count",
-        statement="ALTER TABLE secflow_app_dvs_tasks ADD COLUMN vuln_reported_count INT NOT NULL DEFAULT 0",
+        statement="ALTER TABLE secflow_app_dvs_tasks ADD COLUMN vuln_reported_count INT NOT NULL DEFAULT -1",
     ),
     Migration(
         kind="column",
         table_name="secflow_app_dvs_tasks",
         name="vuln_unreported_count",
-        statement="ALTER TABLE secflow_app_dvs_tasks ADD COLUMN vuln_unreported_count INT NOT NULL DEFAULT 0",
+        statement="ALTER TABLE secflow_app_dvs_tasks ADD COLUMN vuln_unreported_count INT NOT NULL DEFAULT -1",
     ),
 ]
 

@@ -65,9 +65,9 @@ class AppDvsTask(Base):
     control_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     dispatch_status: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
 
-    vuln_total_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    vuln_reported_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    vuln_unreported_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    vuln_total_count: Mapped[int] = mapped_column(Integer, nullable=False, default=-1)
+    vuln_reported_count: Mapped[int] = mapped_column(Integer, nullable=False, default=-1)
+    vuln_unreported_count: Mapped[int] = mapped_column(Integer, nullable=False, default=-1)
 
     is_deleted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
