@@ -37,6 +37,7 @@ from app.service.execution_coordinator import (
     begin_execution_if_owner,
     claim_one_runnable_task,
     commit_terminal_state_if_owner,
+    is_parent_orchestrated_binary_security_task,
     load_execution_snapshot,
     recover_running_task_if_owner,
     release_lease,
@@ -77,6 +78,10 @@ DB_RETRY_BASE_DELAY_SECONDS = float(os.environ.get("DVS_DB_RETRY_BASE_DELAY_SECO
 _RUNNING_TASK_LOCK = threading.RLock()
 _running_tasks: dict[str, "_RunningTaskContext"] = {}
 _runtime_invalidations: dict[str, str] = {}
+
+
+def _parent_orchestrated_binary_security_task(row: AppDvsTask | None) -> bool:
+    return is_parent_orchestrated_binary_security_task(row)
 
 
 def _restart_payload(row: AppDvsTask, *, previous_status: str, previous_error: str | None, previous_epoch: int, reason: str) -> dict[str, Any]:
@@ -2626,6 +2631,39 @@ class TaskService:
                 ctx.lease_stop_requested.set()
 
             if ctx is not None and ctx.termination_reason == "lease_lost":
+                if _parent_orchestrated_binary_security_task(row):
+                    _record_task_event(
+                        db,
+                        row=row,
+                        event_type="task_lease_lost_waiting_parent_observe",
+                        message="任务租约丢失，等待父任务恢复观测，不自动重启业务执行",
+                        level="warning",
+                        status=row.status,
+                        dispatch_status=row.dispatch_status,
+                        worker_id=WORKER_ID,
+                        execution_owner_id=row.execution_owner_id,
+                        execution_epoch=epoch,
+                        control_version=control_version,
+                        payload={
+                            "task_origin_type": row.task_origin_type,
+                            "parent_task_id": row.parent_task_id,
+                            "parent_stage_item_id": row.parent_stage_item_id,
+                            "autonomous_recovery_suppressed": True,
+                            "reason": "lease_lost",
+                        },
+                    )
+                    db.commit()
+                    log_event(
+                        logger,
+                        logging.WARNING,
+                        "task lease lost; waiting for parent observation instead of requeue",
+                        event="task_lease_lost_waiting_parent_observe",
+                        task_id=task_id,
+                        owner_id=WORKER_ID,
+                        epoch=epoch,
+                        control_version=control_version,
+                    )
+                    return
                 recovered = _recover_running_task_for_cleanup(
                     db,
                     task_id=task_id,
@@ -2831,6 +2869,35 @@ class TaskService:
             try:
                 ctx_for_error = _get_running_task_context(task_id)
                 if ctx_for_error is not None and ctx_for_error.termination_reason == "lease_lost":
+                    row = db.query(AppDvsTask).filter_by(task_id=task_id).first()
+                    if _parent_orchestrated_binary_security_task(row):
+                        if row is not None:
+                            _record_task_event(
+                                db,
+                                row=row,
+                                event_type="task_lease_lost_waiting_parent_observe",
+                                message="租约丢失后出现异常，等待父任务恢复观测，不自动重启业务执行",
+                                level="warning",
+                                status=row.status,
+                                dispatch_status=row.dispatch_status,
+                                worker_id=WORKER_ID,
+                                execution_owner_id=row.execution_owner_id,
+                                execution_epoch=epoch,
+                                control_version=control_version,
+                                payload={
+                                    "task_origin_type": row.task_origin_type,
+                                    "parent_task_id": row.parent_task_id,
+                                    "parent_stage_item_id": row.parent_stage_item_id,
+                                    "autonomous_recovery_suppressed": True,
+                                    "reason": "lease_lost_exception",
+                                    "error": str(exc),
+                                },
+                            )
+                            db.commit()
+                        log_event(logger, logging.WARNING, "exception after lease loss waits for parent observation",
+                                  event="task_lease_lost_waiting_parent_observe", task_id=task_id,
+                                  owner_id=WORKER_ID, epoch=epoch, control_version=control_version, error=str(exc))
+                        return
                     recovered = _recover_running_task_for_cleanup(
                         db,
                         task_id=task_id,

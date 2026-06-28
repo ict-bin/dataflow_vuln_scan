@@ -36,6 +36,13 @@ class ExecutionCoordinatorTests(unittest.TestCase):
             row = AppDvsTask(
                 task_id=kwargs.get("task_id", "dvs_test_1"),
                 project_id=kwargs.get("project_id", "p1"),
+                task_origin_type=kwargs.get("task_origin_type"),
+                parent_project_id=kwargs.get("parent_project_id"),
+                parent_task_id=kwargs.get("parent_task_id"),
+                parent_task_type=kwargs.get("parent_task_type"),
+                parent_stage_name=kwargs.get("parent_stage_name"),
+                parent_stage_item_id=kwargs.get("parent_stage_item_id"),
+                parent_stage_item_key=kwargs.get("parent_stage_item_key"),
                 task_name=kwargs.get("task_name", "test"),
                 input_path=kwargs.get("input_path", "/data/files/p1/input"),
                 output_path=kwargs.get("output_path", "/data/files/p1/output"),
@@ -49,6 +56,49 @@ class ExecutionCoordinatorTests(unittest.TestCase):
             )
             db.add(row)
             db.commit()
+        finally:
+            db.close()
+
+    def test_recover_running_task_if_owner_skips_parent_orchestrated_binary_security_task(self):
+        self._insert_task(
+            status="running",
+            execution_owner_id="pod-a",
+            execution_lease_until=now_local(),
+            execution_epoch=2,
+            control_version=3,
+            dispatch_status="running",
+            task_origin_type="binary_security",
+            parent_task_id="parent-1",
+            parent_stage_item_id="stage-item-1",
+        )
+        db = self._session()
+        try:
+            self.assertFalse(recover_running_task_if_owner(db, "dvs_test_1", "pod-a", 2, 3))
+            row = db.query(AppDvsTask).filter_by(task_id="dvs_test_1").first()
+            self.assertEqual("running", row.status)
+            self.assertEqual("pod-a", row.execution_owner_id)
+        finally:
+            db.close()
+
+    def test_reclaim_orphaned_running_tasks_skips_parent_orchestrated_binary_security_task(self):
+        self._insert_task(
+            status="running",
+            execution_owner_id="pod-old",
+            execution_lease_until=now_local(),
+            execution_epoch=2,
+            control_version=3,
+            dispatch_status="running",
+            task_origin_type="binary_security",
+            parent_task_id="parent-1",
+            parent_stage_item_id="stage-item-1",
+        )
+        db = self._session()
+        try:
+            recovered = reclaim_orphaned_running_tasks(db)
+            self.assertEqual([], recovered)
+            row = db.query(AppDvsTask).filter_by(task_id="dvs_test_1").first()
+            self.assertEqual("running", row.status)
+            self.assertEqual("pod-old", row.execution_owner_id)
         finally:
             db.close()
 
@@ -105,6 +155,33 @@ class ExecutionCoordinatorTests(unittest.TestCase):
             self.assertEqual("claim_expired_running", row.task_config_json["_auto_recovered_reason"])
             self.assertEqual("pod-old", row.task_config_json["_auto_recovered_previous_owner_id"])
             self.assertEqual(3, row.task_config_json["_auto_recovered_previous_epoch"])
+        finally:
+            db.close()
+
+    def test_claim_does_not_clean_restart_parent_orchestrated_binary_security_running_task_with_expired_lease(self):
+        self._insert_task(
+            status="running",
+            execution_owner_id="pod-old",
+            execution_lease_until=now_local(),
+            execution_epoch=3,
+            control_version=2,
+            dispatch_status="running",
+            task_origin_type="binary_security",
+            parent_task_id="parent-1",
+            parent_stage_item_id="stage-item-1",
+        )
+        db = self._session()
+        try:
+            claimed = claim_one_runnable_task(db, "pod-new")
+            self.assertIsNotNone(claimed)
+            self.assertEqual(claimed.epoch, 4)
+            row = db.query(AppDvsTask).filter_by(task_id="dvs_test_1").first()
+            self.assertEqual(row.execution_owner_id, "pod-new")
+            self.assertEqual(row.status, "running")
+            self.assertEqual(row.dispatch_status, "leased")
+            self.assertEqual(row.execution_epoch, 4)
+            self.assertFalse(bool((row.task_config_json or {}).get("_auto_recovered_pending")))
+            self.assertNotIn("_auto_recovered_reason", row.task_config_json or {})
         finally:
             db.close()
 

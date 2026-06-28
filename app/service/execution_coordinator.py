@@ -115,6 +115,16 @@ def _auto_recovery_payload(config: Any) -> dict[str, Any] | None:
     }
 
 
+def is_parent_orchestrated_binary_security_task(row: AppDvsTask | None) -> bool:
+    if row is None:
+        return False
+    if str(getattr(row, "task_origin_type", "") or "").strip() != "binary_security":
+        return False
+    parent_task_id = str(getattr(row, "parent_task_id", "") or "").strip()
+    parent_stage_item_id = str(getattr(row, "parent_stage_item_id", "") or "").strip()
+    return bool(parent_task_id and parent_stage_item_id)
+
+
 def _clean_restart_update_fields(row: AppDvsTask | None, *, reason: str) -> dict:
     """Build SQLAlchemy update dict for a clean restart."""
     import datetime as _dt
@@ -221,9 +231,12 @@ def claim_one_runnable_task(db: Session, owner_id: str) -> ClaimedTask | None:
         AppDvsTask.dispatch_status: "leased",
     }
     if expected_status == "running":
-        # No checkpoint/resume support: a reclaimed running task must be a clean business restart.
-        update_fields[AppDvsTask.status] = "pending"
-        update_fields.update(_clean_restart_update_fields(candidate, reason="claim_expired_running"))
+        if is_parent_orchestrated_binary_security_task(candidate):
+            update_fields[AppDvsTask.status] = "running"
+        else:
+            # No checkpoint/resume support: a reclaimed running task must be a clean business restart.
+            update_fields[AppDvsTask.status] = "pending"
+            update_fields.update(_clean_restart_update_fields(candidate, reason="claim_expired_running"))
 
     updated = (
         db.query(AppDvsTask)
@@ -305,6 +318,9 @@ def recover_running_task_if_owner(
     *,
     reason: str = "owner_cleanup",
 ) -> bool:
+    current_row = db.query(AppDvsTask).filter_by(task_id=task_id).first()
+    if is_parent_orchestrated_binary_security_task(current_row):
+        return False
     updated = (
         db.query(AppDvsTask)
         .filter(
@@ -327,7 +343,7 @@ def recover_running_task_if_owner(
                 AppDvsTask.execution_heartbeat_at: None,
                 AppDvsTask.dispatch_status: "pending",
                 **_clean_restart_update_fields(
-                    db.query(AppDvsTask).filter_by(task_id=task_id).first(),  # type: ignore[arg-type]
+                    current_row,  # type: ignore[arg-type]
                     reason=reason,
                 ),
             },
@@ -357,6 +373,8 @@ def reclaim_orphaned_running_tasks(db: Session, *, limit: int = 100) -> list[Rec
     )
     recovered: list[RecoveredRunningTask] = []
     for row in candidates:
+        if is_parent_orchestrated_binary_security_task(row):
+            continue
         if row.execution_owner_id is None:
             reason = "missing_owner"
         elif row.execution_lease_until is None:
