@@ -227,6 +227,15 @@ class CalleeRef(BaseModel):
     followup_id: str = ""
     dispatch_kind: str = "direct_call"
     tainted_nonlocal: list[dict] = Field(default_factory=list)
+    # ── clang 语法解析标注（互斥分支/调用点校验）──
+    callsite_validated: bool = False        # clang 确认 caller 体内存在对该 callee 的 CallExpr
+    call_line: int = 0                       # clang 命中的真实调用行(0=未校验)
+    call_expr: str = ""                      # 调用表达式原文
+    branch_path: list[dict] = Field(default_factory=list)   # 包围该调用的 if/switch 祖先链
+    branch_group_id: str = ""               # 最内层互斥组 id(兄弟 arm 共享)
+    branch_arm_id: str = ""                 # 组内 arm 标识(then/else/case...)
+    mutex_siblings: list[str] = Field(default_factory=list)  # 同组不同 arm 的 callee 名
+    skip_reason: str = ""                   # phantom_callsite / unresolved / ...
 
 
 class TraceNode(BaseModel):

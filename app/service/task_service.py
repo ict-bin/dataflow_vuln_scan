@@ -2799,6 +2799,7 @@ class TaskService:
                 refreshed = _db.query(AppDvsTask).filter_by(task_id=task_id).first()
                 if refreshed is not None:
                     reason, changed = _sync_task_abnormal_reason(refreshed)
+                    _sync_task_vuln_stats(refreshed)
                     _record_abnormal_reason(refreshed, reason, changed=changed)
                     _record_abnormal_reason_timeline(_db, refreshed, reason, changed=changed)
                     terminal_status = result.status.value if result else "error"
