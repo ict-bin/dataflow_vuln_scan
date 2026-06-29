@@ -11,5 +11,4 @@ cryptography
 tree-sitter
 tree-sitter-c
 tree-sitter-cpp
-clang
 libclang

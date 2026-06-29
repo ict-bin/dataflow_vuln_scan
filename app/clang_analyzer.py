@@ -33,21 +33,9 @@ from typing import Any
 logger = logging.getLogger("dvs.clang_analyzer")
 
 # ── libclang bootstrap ───────────────────────────────────────────────────────
-
-_LIBCLANG_CANDIDATES = [
-    "/usr/lib/x86_64-linux-gnu/libclang-19.so.1",
-    "/usr/lib/x86_64-linux-gnu/libclang-19.so",
-    "/usr/lib/x86_64-linux-gnu/libclang.so.1",
-    "/usr/lib/x86_64-linux-gnu/libclang.so",
-    "/usr/lib/llvm-19/lib/libclang-19.so.1",
-    "/usr/lib/llvm-19/lib/libclang-19.so.1",
-]
-_LIBCLANG_DIR_CANDIDATES = [
-    "/usr/lib/llvm-19/lib",
-    "/usr/lib/x86_64-linux-gnu",
-    "/usr/lib/llvm-15/lib",
-    "/usr/lib/llvm-14/lib",
-]
+# 干净策略: 仅用 libclang PyPI 包 (自带与绑定版本匹配的原生库), 不再拼凑系统
+# libclang-*.so (之前强制用系统 libclang-19 与 pip clang 包不匹配 → undefined symbol)。
+# 若 libclang 包不可用, 优雅降级 (返回空结果, 调用方走原逻辑)。
 
 _cindex: Any = None
 _libclang_ready: bool = False
@@ -56,10 +44,7 @@ _init_attempted = False
 
 
 def _ensure_libclang() -> bool:
-    """Load libclang once. Thread-safe. Returns True if usable.
-
-    优先用 libclang PyPI 包自带的原生库 (与绑定版本匹配); 仅当自带不可用时
-    才回退到系统 libclang-*.so (set_library_file)。"""
+    """Load libclang once (via libclang PyPI 包自带库). Thread-safe."""
     global _cindex, _libclang_ready, _init_attempted
     if _init_attempted:
         return _libclang_ready
@@ -71,37 +56,17 @@ def _ensure_libclang() -> bool:
             import clang.cindex as cindex  # type: ignore
             _cindex = cindex
         except ImportError:
-            logger.warning("clang.cindex unavailable (no 'clang'/'libclang' pip package); mutex branch analysis disabled")
+            logger.warning("clang.cindex unavailable (未安装 libclang 包); clang 分析禁用")
             return False
-        # 1) 优先 libclang 包自带库 (不 set_library_file, 直接探针)
         try:
-            _probe = cindex.Index.create()
+            # libclang 包自带原生库, Index.create() 直接可用 (无需 set_library_file)
+            cindex.Index.create()
             _libclang_ready = True
-            logger.info("libclang loaded via bundled (libclang pkg)")
+            logger.info("libclang loaded via libclang 包自带库")
             return True
         except Exception as exc:
-            logger.debug("bundled libclang probe failed: %s", exc)
-        # 2) 回退: 系统 libclang-*.so
-        for p in _LIBCLANG_CANDIDATES:
-            if os.path.exists(p):
-                try:
-                    cindex.Config.set_library_file(p)
-                    _libclang_ready = True
-                    logger.info("libclang loaded: %s", p)
-                    return True
-                except Exception as exc:
-                    logger.warning("libclang set_library_file(%s) failed: %s", p, exc)
-        for d in _LIBCLANG_DIR_CANDIDATES:
-            if os.path.isdir(d):
-                try:
-                    cindex.Config.set_library_path(d)
-                    _libclang_ready = True
-                    logger.info("libclang loaded from dir: %s", d)
-                    return True
-                except Exception as exc:
-                    logger.warning("libclang set_library_path(%s) failed: %s", d, exc)
-        logger.warning("libclang native library not found; mutex branch analysis disabled")
-        return False
+            logger.warning("libclang 包探针失败 (%s); clang 分析禁用", exc)
+            return False
 
 
 # ── TU parse cache (in-process, per file) ────────────────────────────────────
