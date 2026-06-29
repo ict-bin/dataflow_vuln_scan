@@ -52,6 +52,7 @@ from fastapi.responses import StreamingResponse
 
 from .build_info import build_service_meta
 from .config import build_task_config, get_service_yaml, load_service_config
+from .event_adapter import coerce_swarm_event
 from .logging_utils import configure_container_logging
 from .metrics import normalize_http_route, observe_http_request as observe_metrics_request, observe_http_request_inflight, render_aggregate_metrics, render_local_metrics, render_summary_metrics
 from .metrics_summary import build_ai_summary, build_generic_observability_summary, build_rest_api_summary, parse_prometheus_metrics
@@ -441,7 +442,8 @@ def submit_analyse(body: AnalyseRequest):
     cfg = build_task_config(svc, body.prompt, cwd=cwd)
     task_id = make_id()
 
-    def on_event(event: SwarmEvent):
+    def on_event(*args: Any, **kwargs: Any):
+        event = coerce_swarm_event(*args, default_task_id=task_id, **kwargs)
         entry = _tasks.get(task_id)
         if not entry:
             return

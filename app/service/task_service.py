@@ -26,6 +26,7 @@ from app.copy_utils import safe_copy2
 from app.config import build_task_config
 from app.db import is_retryable_db_error
 from app.db.models import AppDvsTask, AppDvsTaskEvent
+from app.event_adapter import coerce_swarm_event
 from app.logging_utils import log_event
 from app.models import SwarmEvent, TaskStatus
 from app.orchestrator import Orchestrator
@@ -2198,8 +2199,9 @@ class TaskService:
         if _prev_row_for_baseline and isinstance(_prev_row_for_baseline.stages_json, dict):
             _baseline_events = list(_prev_row_for_baseline.stages_json.get("events") or [])
 
-        def on_event(event: SwarmEvent) -> None:
+        def on_event(*args: Any, **kwargs: Any) -> None:
             nonlocal guard_counter
+            event = coerce_swarm_event(*args, default_task_id=task_id, **kwargs)
             _mark_task_progress(task_id)
             event_buffer.append({"ts": _time.time(), "type": event.type,
                                   "data": dict(event.data)})

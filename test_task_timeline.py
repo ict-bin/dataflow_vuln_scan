@@ -20,11 +20,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from app.api import router as api_router
 from app.api import tasks as tasks_api
 from app.db.models import AppDvsTask, AppDvsTaskEvent, Base
-from app.models import AgentInstanceConfig, RoleConfig, TaskConfig
+from app.event_adapter import coerce_swarm_event
+from app.models import AgentInstanceConfig, RoleConfig, TaskConfig, TaskResult, TaskStatus
 from app.orchestrator import Orchestrator
+from app.service import pi_runtime as pi_runtime_module
 from app.service import task_events as task_events_module
 from app.service import task_service as task_service_module
 from app.service.task_service import TaskService
+from app.models import SwarmEvent
 
 
 def _unexpected_cleanup_call(*args, **kwargs):
@@ -998,6 +1001,41 @@ class TaskTimelineTests(unittest.TestCase):
             task_service_module.cleanup_task_agent_processes = previous_cleanup_task_agents
             task_service_module.cleanup_worker_runtime_processes = previous_cleanup_worker_runtime
             task_service_module.release_lease = previous_release
+
+    def test_execute_task_accepts_keyword_style_runtime_events(self):
+        task_id = "dvs_keyword_event"
+        event_from_kwargs = coerce_swarm_event(
+            task_id=task_id,
+            event_type="v2_run_started",
+            function="root_fn",
+            default_task_id=task_id,
+        )
+        event_from_string = coerce_swarm_event(
+            "workspace_localized",
+            task_id=task_id,
+            local_path="/tmp/local",
+            default_task_id=task_id,
+        )
+        event_from_swarm = coerce_swarm_event(
+            SwarmEvent(type="task_end", task_id=task_id, data={"result": "ok"}),
+            default_task_id=task_id,
+        )
+
+        self.assertEqual(("v2_run_started", task_id, {"function": "root_fn"}), (
+            event_from_kwargs.type,
+            event_from_kwargs.task_id,
+            event_from_kwargs.data,
+        ))
+        self.assertEqual(("workspace_localized", task_id, {"local_path": "/tmp/local"}), (
+            event_from_string.type,
+            event_from_string.task_id,
+            event_from_string.data,
+        ))
+        self.assertEqual(("task_end", task_id, {"result": "ok"}), (
+            event_from_swarm.type,
+            event_from_swarm.task_id,
+            event_from_swarm.data,
+        ))
 
 
 if __name__ == "__main__":
