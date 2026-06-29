@@ -151,8 +151,11 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
             ))
 
         # clang 标注: 校验调用点 + 分支上下文; 幽灵 callee (不在 caller 函数体) 丢弃
+        # 但 clang 解析失败 (缺 include 等) 时 NOT 丢弃 — 区分 "解析失败"(保留, 仅缺分支标注)
+        # 与 "解析成功但 callee 不在体"(真幽灵 → 丢), 避免过度丢弃。
         validated_props: list[PropagationRecord] = []
-        if callee_names:
+        parse_ok = clang_parse_ok(self.source_root, func.file, func.name) if callee_names else False
+        if parse_ok:
             callsites = analyze_function_callsites(
                 self.source_root, func.file, func.name, callee_names,
                 self.run_dir / "clang-cache")
@@ -163,13 +166,17 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                 # 外部变量传播: 无调用点, 不经 clang; 由 resolve_external_propagation 处理
                 validated_props.append(prop)
                 continue
+            if not parse_ok:
+                # clang 解析失败 → 无法校验, 保留传播 (无分支标注, 下游按顺序链处理)
+                prop.target_func_id = self._resolve_target_func_id(store, prop)
+                validated_props.append(prop)
+                continue
             ci = callsites.get(prop.target_function)
             if ci is None:
                 # 幽灵 callee: caller 函数体根本没调用它 → 丢弃 (修 v1 Gap-1)
                 logger.info("drop phantom callee %s in %s (not in body)", prop.target_function, func.name)
-                self.on_event(  # type: ignore[misc]
-                    "v2_phantom_callee_dropped", function=prop.target_function,
-                    caller=func.name, claimed_line=prop.call_line)
+                self._emit("v2_phantom_callee_dropped", function=prop.target_function,
+                           caller=func.name, claimed_line=prop.call_line)
                 continue
             prop.callsite_validated = True
             prop.call_line = int(ci.get("call_line") or prop.call_line)

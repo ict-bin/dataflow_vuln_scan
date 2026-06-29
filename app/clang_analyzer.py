@@ -524,6 +524,23 @@ def libclang_available() -> bool:
     return _ensure_libclang()
 
 
+def clang_parse_ok(source_root: str, caller_file: str, caller_func: str) -> bool:
+    """True iff libclang 可用 且 caller_file 的 TU 解析成功 且 caller_func 定义能定位。
+
+    用于区分 "clang 解析失败" (调用方应保留传播, 仅缺分支标注) 与
+    "解析成功但 callee 不在体" (真幽灵 → 丢弃), 避免缺 include 时过度丢弃。
+    """
+    if not _ensure_libclang():
+        return False
+    path = Path(source_root) / caller_file
+    if not path.is_file():
+        return False
+    tu = _get_tu(source_root, caller_file)
+    if tu is None:
+        return False
+    return _function_def_cursor(tu, caller_func) is not None
+
+
 # 注: clang 互斥分支分析的启停由任务级 TaskConfig.feature_flags["clang_mutex"] 控制
 # (默认 False = 主线行为)。orchestrator 仅在该开关为真时调用 analyze_function_callsites;
 # 此处不再提供 env 级全局开关, 避免双源真值。
