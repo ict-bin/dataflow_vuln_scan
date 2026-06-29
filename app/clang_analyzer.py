@@ -417,6 +417,108 @@ def analyze_function_callsites(
     return result
 
 
+# ── vuln-verifier 原子能力 (debug: DVS_VULN_VERIFIER_ENABLED) ────────────────
+# 以下函数供 app/vuln_verifier.py 服务端结构化核验使用; 全部 fail-safe:
+# libclang 不可用或解析失败时返回 None, 调用方按 "无法核验→跳过(不阻断)" 处理。
+
+def _collect_all_calls(func_cursor: Any, source_lines: list[str]) -> list[dict]:
+    """Walk func body, collect every CallExpr {name, call_line} (call-graph edges)."""
+    out: list[dict] = []
+
+    def walk(cur: Any) -> None:
+        if cur.kind == _cindex.CursorKind.CALL_EXPR:
+            ref = cur.referenced
+            nm = ref.spelling if ref is not None else ""
+            if not nm:
+                kids = list(cur.get_children())
+                if kids:
+                    nm = kids[0].spelling or _cursor_text(cur, source_lines) or ""
+            out.append({"name": nm, "call_line": _line(cur)})
+            for ch in cur.get_children():
+                walk(ch)
+            return
+        for ch in cur.get_children():
+            walk(ch)
+
+    walk(func_cursor)
+    return out
+
+
+def get_function_callees(source_root: str, caller_file: str, caller_func: str,
+                         cache_dir: Path | str | None = None) -> list[dict] | None:
+    """All callees actually called in caller_func (call-graph edges from this node).
+
+    Returns list of {name, call_line}; None when libclang unavailable / parse
+    fails (verifier treats None as "skipped", never blocks)."""
+    path = Path(source_root) / caller_file
+    if not path.is_file():
+        return None
+    tu = _get_tu(source_root, caller_file)
+    if tu is None:
+        return None
+    fc = _function_def_cursor(tu, caller_func)
+    if fc is None:
+        return None
+    try:
+        source_lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        source_lines = []
+    return _collect_all_calls(fc, source_lines)
+
+
+def get_function_line_range(source_root: str, caller_file: str,
+                             caller_func: str) -> tuple[int, int] | None:
+    """(start_line, end_line) of caller_func's definition, or None."""
+    path = Path(source_root) / caller_file
+    if not path.is_file():
+        return None
+    tu = _get_tu(source_root, caller_file)
+    if tu is None:
+        return None
+    fc = _function_def_cursor(tu, caller_func)
+    if fc is None:
+        return None
+    try:
+        return (fc.extent.start.line, fc.extent.end.line)
+    except Exception:
+        return None
+
+
+def callee_body_text(source_root: str, callee_file: str,
+                      callee_func: str) -> str | None:
+    """Return the callee function body as text (line-range slice), or None."""
+    rng = get_function_line_range(source_root, callee_file, callee_func)
+    if rng is None:
+        return None
+    path = Path(source_root) / callee_file
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+    s, e = rng
+    return "\n".join(lines[max(0, s - 1):e])
+
+
+def function_calls_callee(source_root: str, caller_file: str, caller_func: str,
+                           callee_name: str) -> bool | None:
+    """True if caller_func actually calls callee_name; None if unverifiable."""
+    calls = get_function_callees(source_root, caller_file, caller_func)
+    if calls is None:
+        return None
+    short = callee_name.rsplit("::", 1)[-1]
+    return any(c.get("name") in (callee_name, short) for c in calls)
+
+
+def callee_body_contains_token(source_root: str, callee_file: str,
+                                callee_func: str, token: str) -> bool | None:
+    """True if callee_func's body contains `token` (case-sensitive substring);
+    None if unverifiable. Used for behavior-claim consistency (e.g. 'realloc')."""
+    body = callee_body_text(source_root, callee_file, callee_func)
+    if body is None:
+        return None
+    return token in body
+
+
 def libclang_available() -> bool:
     """Test-only / observability: is libclang loaded or loadable?"""
     return _ensure_libclang()

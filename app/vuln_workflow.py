@@ -717,7 +717,41 @@ class DataflowVulnWorkflow:
             _dim_pass = _check_finding_dimensions(_dims)
             _min_conf = _vuln_intake_min_confidence()
             _submit_eligible = _dim_pass and rec.confidence >= _min_conf
-            if not _submit_eligible:
+            _verifier_failed = False
+            # ── debug: 服务端结构化核验门 (DVS_VULN_VERIFIER_ENABLED, 默认 OFF) ──
+            # OFF 时完全不执行, intake 行为与主线一致; ON 时对每条 finding 做行存在/
+            # 调用点存在/callee 行为一致性/调用链可达/session 读取审计五项核验, 任一
+            # fail 则不提交 intake (本地仍归档), emit vuln_verification_skipped。
+            if _submit_eligible:
+                try:
+                    from .vuln_verifier import is_enabled as _verifier_enabled, verify_finding as _verify_finding
+                except Exception:
+                    _verifier_enabled = lambda: False
+                if _verifier_enabled():
+                    try:
+                        _vr = _verify_finding(
+                            rec, item,
+                            str(self.cfg.cwd or ""),
+                            str(self.ws / "clang-cache"),
+                            str(fork_session),
+                        )
+                        (fdir / "verification.json").write_text(
+                            json.dumps(_vr, ensure_ascii=False, indent=2), encoding="utf-8")
+                        if not _vr.get("passed"):
+                            _submit_eligible = False
+                            _verifier_failed = True
+                            self._emit(
+                                "vuln_verification_skipped",
+                                finding_id=rec.finding_id,
+                                reasons=_vr.get("reasons") or [],
+                                checks=_vr.get("checks") or {},
+                                source_file=rec.source_file,
+                                function_name=rec.function_name,
+                                line=rec.line,
+                            )
+                    except Exception as _ve:
+                        logger.warning("vuln_verifier error: %s", _ve, exc_info=True)
+            if not _submit_eligible and not _verifier_failed:
                 self._emit(
                     "vuln_intake_skipped",
                     finding_id=rec.finding_id,
