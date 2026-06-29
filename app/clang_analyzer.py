@@ -56,7 +56,10 @@ _init_attempted = False
 
 
 def _ensure_libclang() -> bool:
-    """Load libclang once. Thread-safe. Returns True if usable."""
+    """Load libclang once. Thread-safe. Returns True if usable.
+
+    优先用 libclang PyPI 包自带的原生库 (与绑定版本匹配); 仅当自带不可用时
+    才回退到系统 libclang-*.so (set_library_file)。"""
     global _cindex, _libclang_ready, _init_attempted
     if _init_attempted:
         return _libclang_ready
@@ -68,8 +71,17 @@ def _ensure_libclang() -> bool:
             import clang.cindex as cindex  # type: ignore
             _cindex = cindex
         except ImportError:
-            logger.warning("clang.cindex unavailable (no 'clang' pip package); mutex branch analysis disabled")
+            logger.warning("clang.cindex unavailable (no 'clang'/'libclang' pip package); mutex branch analysis disabled")
             return False
+        # 1) 优先 libclang 包自带库 (不 set_library_file, 直接探针)
+        try:
+            _probe = cindex.Index.create()
+            _libclang_ready = True
+            logger.info("libclang loaded via bundled (libclang pkg)")
+            return True
+        except Exception as exc:
+            logger.debug("bundled libclang probe failed: %s", exc)
+        # 2) 回退: 系统 libclang-*.so
         for p in _LIBCLANG_CANDIDATES:
             if os.path.exists(p):
                 try:
@@ -132,7 +144,8 @@ def _get_tu(source_root: str, source_file: str) -> Any | None:
             _TU_CACHE[key] = cached
             return cached
     try:
-        tu = _cindex.TranslationUnit.create_from_source_file(
+        index = _cindex.Index.create()
+        tu = index.parse(
             str(path),
             args=_parse_args(source_root, path),
             options=_cindex.TranslationUnit.PARSE_NONE,
