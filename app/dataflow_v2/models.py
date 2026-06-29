@@ -132,6 +132,7 @@ class PropagationRecord:
     branch_arm_id: str = ""            # arm 标识 (then/else/case...)
     branch_path: list[dict] = field(default_factory=list)  # 祖先分支栈快照
     mutex_siblings: list[str] = field(default_factory=list)  # 互斥兄弟 callee 名
+    actual_args: list[str] = field(default_factory=list)  # clang 调用点实参表达式 (推参数位置)
     validations: list[Validation] = field(default_factory=list)   # 传播过程校验列表
     description: str = ""               # 传播污点内容说明 (如 "struct.field only")
 
@@ -152,6 +153,7 @@ class PropagationRecord:
             "branch_group_id": self.branch_group_id, "branch_arm_id": self.branch_arm_id,
             "branch_path": json.dumps(self.branch_path, ensure_ascii=False),
             "mutex_siblings": json.dumps(self.mutex_siblings, ensure_ascii=False),
+            "actual_args": json.dumps(self.actual_args, ensure_ascii=False),
             "validations": json.dumps([v.to_dict() for v in self.validations], ensure_ascii=False),
             "description": self.description,
         }

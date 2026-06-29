@@ -22,6 +22,7 @@ processed_taints 命中 → 跳过重复分析。
 from __future__ import annotations
 
 import hashlib
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -130,10 +131,24 @@ class DfsOrchestrator:
     """
 
     def __init__(self, store: DataflowStore, cbs: AnalysisCallbacks,
-                 n_workers: int = 4) -> None:
+                 n_workers: int = 4, concurrent: bool = False,
+                 max_concurrent_llm: int = 8) -> None:
         self.store = store
         self.cbs = cbs
-        self.n_workers = n_workers  # TODO: 并发用
+        self.n_workers = n_workers
+        self.concurrent = concurrent
+        self._llm_sem = threading.Semaphore(max_concurrent_llm) if concurrent else None
+
+    def _run_llm(self, fn: Callable, *args: Any, **kw: Any) -> Any:
+        """LLM 调用限流: 信号量 cap 并发 analyze/mine/track 调用, 避免打爆配额。
+        父函数在 join 子路径前已释放信号量, 故不会与子调用死锁。"""
+        if self._llm_sem is not None:
+            self._llm_sem.acquire()
+        try:
+            return fn(*args, **kw)
+        finally:
+            if self._llm_sem is not None:
+                self._llm_sem.release()
 
     def run(self, root_func: FunctionRecord, root_taint: TaintParamInfo,
             base_session: str = "") -> None:
@@ -152,8 +167,8 @@ class DfsOrchestrator:
 
         # 2) LLM 污点分析 (fork 会话)
         ctx.depth = depth
-        result = self.cbs.analyze_function(
-            self.store, func, taint_params, pre_validations, base_session, ctx)
+        result = self._run_llm(
+            self.cbs.analyze_function, self.store, func, taint_params, pre_validations, base_session, ctx)
         for t in result.taints:
             self.store.upsert_taint(t)
         for p in result.propagations:
@@ -175,35 +190,59 @@ class DfsOrchestrator:
 
         # 4) self_contained=True → 立即挖 (设计点 #2)
         if self_contained:
-            self.cbs.mine_vulns(self.store, func, taint_params, ctx)
+            self._run_llm(self.cbs.mine_vulns, self.store, func, taint_params, ctx)
 
         # 5) 构造有序路径 (互斥分叉 + 外部变量分叉)
         paths = self._build_paths(result.propagations, func, ctx, depth)
 
-        # 6) 逐条链 DFS: 链内顺序, 校验链累加 + 回传
-        for path_steps in paths:
-            accumulated = list(pre_validations) + list(my_discovered)
-            for step in path_steps:
+        # 6) 逐条链 DFS: 链内顺序, 校验链累加 + 回传; fork 后多链可并发
+        base_accumulated = list(pre_validations) + list(my_discovered)
+        if self.concurrent and len(paths) > 1:
+            threads: list[threading.Thread] = []
+            errs: list[BaseException] = []
+            for path_steps in paths:
+                t = threading.Thread(target=self._run_path, daemon=True,
+                                     args=(path_steps, base_accumulated, func, base_session, ctx, depth, errs),
+                                     name=f"dvs2-path-{func.name}-{len(threads)}")
+                threads.append(t); t.start()
+            for t in threads:
+                t.join()
+            if errs:
+                raise errs[0]
+        else:
+            for path_steps in paths:
+                self._run_path(path_steps, base_accumulated, func, base_session, ctx, depth, None)
+
+        # 7) self_contained=False → 全部子链完成后挖 (后序)
+        if not self_contained:
+            self._run_llm(self.cbs.mine_vulns, self.store, func, taint_params, ctx)
+
+        return my_discovered
+
+    def _run_path(self, steps: list[ChainStep], base_accumulated: list[Validation],
+                  func: FunctionRecord, base_session: str, ctx: PathContext,
+                  depth: int, errs: list[BaseException] | None) -> None:
+        """运行一条有序链: 链内严格顺序, 校验链累加 + 子回传。"""
+        try:
+            accumulated = list(base_accumulated)
+            for step in steps:
                 incoming = list(accumulated) + list(step.validations)
-                # 编排库记录边
                 self.store.upsert_edge(OrchestrationEdge(
                     path_id=ctx.path_id, source_function=func.name,
                     source_signature=func.signature, source_func_id=func.func_id,
                     target_function=step.func.name, target_signature=step.func.signature,
                     target_func_id=step.func.func_id, taint_params=step.taint_params,
                     depth=depth + 1, edge_order=step.call_line, status="done"))
-                # 递归分析 callee (含其子树)
                 sub_ctx = ctx.fork(_path_id(step.func.func_id, step.taint_params.signature, str(depth + 1)))
                 sub_ctx.pre_validations = list(incoming)
                 child_fb = self._process(step.func, step.taint_params, incoming,
                                          base_session, sub_ctx, depth + 1)
                 accumulated.extend(child_fb)   # 校验链回传: 下一步 callee 可见
-
-        # 7) self_contained=False → 全部子链完成后挖 (后序)
-        if not self_contained:
-            self.cbs.mine_vulns(self.store, func, taint_params, ctx)
-
-        return my_discovered
+        except BaseException as exc:
+            if errs is not None:
+                errs.append(exc)
+            else:
+                raise
 
     # ── 路径构造: 有序链 + 互斥分叉 + 外部分叉 ───────────────────────────────
     def _build_paths(self, props: list[PropagationRecord], func: FunctionRecord,
@@ -237,8 +276,8 @@ class DfsOrchestrator:
                     paths = new_paths
             elif p.is_external:
                 # 外部变量传播 → 跟踪 LLM 找跟入函数, 每个跟入 fork 一条子链
-                targets = self.cbs.resolve_external_propagation(
-                    self.store, func, _prop_source_taint(self.store, p), ctx)
+                targets = self._run_llm(
+                    self.cbs.resolve_external_propagation, self.store, func, _prop_source_taint(self.store, p), ctx)
                 if not targets:
                     continue  # TODO stub 未接: 不 fork
                 new_paths = []
@@ -256,16 +295,31 @@ class DfsOrchestrator:
         return [p for p in paths if p]  # 剔除空链
 
     def _prop_to_step(self, p: PropagationRecord) -> ChainStep | None:
-        """callee 传播 → ChainStep (解析 target_func_id 拿 FunctionRecord)。"""
+        """callee 传播 → ChainStep (解析 target_func_id 拿 FunctionRecord, 由 actual_args 位置)。"""
         if not p.target_func_id:
             return None
         rec = self.store.get_function(p.target_func_id)
         if rec is None:
             return None
-        tp = TaintParamInfo(positions=[],  # TODO: 由 clang actual_args 推位置
+        positions = _derive_positions(p.actual_args, p.target_taint_name, p.source_taint_name)
+        tp = TaintParamInfo(positions=positions,
                             signature=p.target_taint_signature, names=[p.target_taint_name])
         return ChainStep(rec, tp, list(p.validations), p.call_line, p.prop_id,
                          p.branch_group_id, p.branch_arm_id)
+
+
+def _derive_positions(actual_args: list[str], target_taint_name: str,
+                      source_taint_name: str) -> list[int]:
+    """由 clang 调用点实参表达式推导污点参数位置 (0-based)。
+
+    匹配策略: 实参文本含 target_taint_name 或 source_taint_name 的位置即为污点参数。
+    匹配不到时返回空 (下游按签名去重, 不依赖位置)。
+    """
+    if not actual_args:
+        return []
+    names = {n for n in (target_taint_name, source_taint_name) if n}
+    out = [i for i, a in enumerate(actual_args) if any(n and n in a for n in names)]
+    return out
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────

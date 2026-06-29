@@ -1,5 +1,5 @@
 """dataflow-v2 编排器路径构造测试 (互斥分叉 + 顺序链)。"""
-import sys, tempfile, unittest
+import sys, tempfile, time, unittest
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -95,6 +95,67 @@ class TestDedupAndFeedback(unittest.TestCase):
         vs = [Validation("a", "b"), Validation("a", "b"), Validation("c", "d")]
         out = _dedup_validations(vs)
         self.assertEqual(len(out), 2)
+
+
+class _MockCbs(AnalysisCallbacks):
+    """mock: A→{C,D(then)/E(else),F}; 叶子自洽。记录分析/挖掘顺序。"""
+    def __init__(self, store):
+        self.store = store
+        self.analyzed: list[str] = []
+        self.mined: list[str] = []
+        self._lock = __import__("threading").Lock()
+    def _fid(self, name):
+        return self.store.find_function(name).func_id
+    def analyze_function(self, store, func, tp, pre_vals, base_session, ctx):
+        from app.dataflow_v2.orchestrator import AnalysisResult
+        with self._lock: self.analyzed.append(func.name)
+        time.sleep(0.05)  # 暴露并发
+        if func.name == "A":
+            from app.dataflow_v2.models import PropagationRecord
+            props = [
+                PropagationRecord(source_func_id=func.func_id, source_taint_name="msg",
+                    source_taint_signature="m", target_taint_name="m", target_taint_signature="m",
+                    target_function=t, target_func_id=self._fid(t), call_line=ln,
+                    branch_group_id=g, branch_arm_id=arm)
+                for (t, ln, g, arm) in [("C",10,"",""),("D",20,"G","then"),("E",25,"G","else"),("F",30,"","")]
+            ]
+            return AnalysisResult(propagations=props, self_contained=False, description="A")
+        return AnalysisResult(self_contained=True, description=func.name)  # 叶子自洽
+    def resolve_external_propagation(self, store, func, taint, ctx):
+        return []
+    def mine_vulns(self, store, func, tp, ctx):
+        with self._lock: self.mined.append(func.name)
+        return 0
+
+
+class TestConcurrentDfs(unittest.TestCase):
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        self.store = DataflowStore(Path(self.td.name) / "run")
+        for n in ["A","C","D","E","F"]:
+            _func(self.store, n)
+        self.cbs = _MockCbs(self.store)
+    def tearDown(self):
+        self.store.close(); self.td.cleanup()
+    def _run(self, concurrent):
+        from app.dataflow_v2.orchestrator import DfsOrchestrator
+        orch = DfsOrchestrator(self.store, self.cbs, concurrent=concurrent, max_concurrent_llm=4)
+        orch.run(self.store.find_function("A"), TaintParamInfo([0], "m", ["msg"]))
+    def test_all_functions_analyzed(self):
+        self._run(True)
+        self.assertEqual(set(self.cbs.analyzed), {"A","C","D","E","F"})
+    def test_leaves_mined_immediately_root_postorder(self):
+        self._run(True)
+        # 叶子 (C/D/E/F) self_contained=True → 立即挖; A=False → 后序 (最后挖)
+        self.assertIn("A", self.cbs.mined)
+        self.assertEqual(self.cbs.mined[-1], "A", "A 应后序最后挖, 实际: %s" % self.cbs.mined)
+    def test_concurrent_faster_than_sequential(self):
+        import time as _t
+        t0 = _t.time(); self._run(False); seq = _t.time()-t0
+        self.cbs.analyzed.clear(); self.cbs.mined.clear()
+        t0 = _t.time(); self._run(True); par = _t.time()-t0
+        # 并发应不慢于顺序 (5 个 analyze × 0.05s; 并发路径折叠)
+        self.assertLessEqual(par, seq + 0.1, f"par={par} seq={seq}")
 
 
 if __name__ == "__main__":

@@ -77,6 +77,7 @@ _DDL = {
             branch_arm_id          TEXT DEFAULT '',
             branch_path            TEXT DEFAULT '[]',
             mutex_siblings         TEXT DEFAULT '[]',
+            actual_args            TEXT DEFAULT '[]',
             validations            TEXT DEFAULT '[]',
             description            TEXT DEFAULT ''
         );
@@ -236,12 +237,12 @@ class DataflowStore:
                 source_taint_signature,target_taint_name,target_taint_signature,
                 target_func_id,target_function,target_file,call_line,condition,is_external,
                 callsite_validated,branch_group_id,branch_arm_id,branch_path,mutex_siblings,
-                validations,description)
+                actual_args,validations,description)
             VALUES (:prop_id,:source_func_id,:source_taint_name,
                 :source_taint_signature,:target_taint_name,:target_taint_signature,
                 :target_func_id,:target_function,:target_file,:call_line,:condition,:is_external,
                 :callsite_validated,:branch_group_id,:branch_arm_id,:branch_path,:mutex_siblings,
-                :validations,:description)
+                :actual_args,:validations,:description)
             ON CONFLICT(prop_id) DO UPDATE SET
                 target_func_id=excluded.target_func_id, target_function=excluded.target_function,
                 target_file=excluded.target_file, call_line=excluded.call_line,
@@ -249,6 +250,7 @@ class DataflowStore:
                 callsite_validated=excluded.callsite_validated,
                 branch_group_id=excluded.branch_group_id, branch_arm_id=excluded.branch_arm_id,
                 branch_path=excluded.branch_path, mutex_siblings=excluded.mutex_siblings,
+                actual_args=excluded.actual_args,
                 validations=excluded.validations, description=excluded.description
         """, r)
 
@@ -319,6 +321,7 @@ def _row_to_propagation(row: sqlite3.Row) -> PropagationRecord:
         branch_group_id=row["branch_group_id"], branch_arm_id=row["branch_arm_id"],
         branch_path=json.loads(row["branch_path"] or "[]"),
         mutex_siblings=json.loads(row["mutex_siblings"] or "[]"),
+        actual_args=json.loads(row["actual_args"] or "[]"),
         validations=[Validation(**v) for v in vals if isinstance(v, dict)],
         description=row["description"])
 

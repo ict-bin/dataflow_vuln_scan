@@ -24,7 +24,10 @@ from ..copy_utils import safe_copyfile
 from ..models import TaskConfig
 from ..parsers import _extract_json_object
 from ..runner import run_agent
-from ..vuln_workflow import _read_prompt, _safe_name
+from ..vuln_intake_reporter import report_finding_to_intake
+from ..vuln_store import VulnFindingRecord, VulnScanStore
+from ..vuln_workflow import (_EMBEDDED_VULN_MINING_SKILL, _format_vuln_report_md,
+                             _read_prompt, _safe_name)
 from .function_extractor import ensure_file_indexed
 from .models import (
     FunctionRecord, PropagationRecord, TaintParamInfo, TaintRecord, Validation,
@@ -41,7 +44,8 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
     """注入编排器的具体 LLM + clang 实现。"""
 
     def __init__(self, *, cfg: TaskConfig, source_root: str, run_dir: Path,
-                 sessions_dir: Path, cancel_event: Any = None,
+                 sessions_dir: Path, graph_db_path: Path, vuln_root: Path,
+                 run_id: str, task_id: str, cancel_event: Any = None,
                  on_event: Callable[..., None] | None = None) -> None:
         self.cfg = cfg
         self.source_root = source_root
@@ -49,8 +53,15 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
         self.sessions_dir = Path(sessions_dir)
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
         (self.run_dir / "clang-cache").mkdir(parents=True, exist_ok=True)
+        self.vuln_root = Path(vuln_root)
+        self.vuln_root.mkdir(parents=True, exist_ok=True)
+        self.graph_store = VulnScanStore(graph_db_path)
+        self.run_id = run_id
+        self.task_id = task_id
         self.cancel_event = cancel_event
         self.on_event = on_event or (lambda **kw: None)
+        self._vuln_miner_prompt = _read_prompt("prompts/vuln-miners/default.md")
+        self._tracking_prompt = _read_prompt("prompts/v2/external-tracking.md")
 
     # ── 主入口 ─────────────────────────────────────────────────────────────
     def analyze_function(self, store: DataflowStore, func: FunctionRecord,
@@ -166,6 +177,7 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
             prop.branch_group_id = str(ci.get("branch_group_id") or "")
             prop.branch_arm_id = str(ci.get("branch_arm_id") or "")
             prop.mutex_siblings = ci.get("mutex_siblings") or []
+            prop.actual_args = ci.get("actual_args") or []
             # 解析 target_func_id (索引 callee 文件)
             prop.target_func_id = self._resolve_target_func_id(store, prop)
             validated_props.append(prop)
@@ -208,13 +220,154 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                 pass
         return f"// body_path 不可读: {func.body_path}\n// 行 {func.start_line}-{func.end_line}"
 
-    # ── TODO (下一阶段) ─────────────────────────────────────────────────────
+    # ── 外部变量跟踪 (item 1) ────────────────────────────────────────────────
     def resolve_external_propagation(self, store: DataflowStore, func: FunctionRecord,
                                      taint: TaintRecord, ctx: PathContext) -> list[tuple[FunctionRecord, TaintParamInfo]]:
-        # TODO: fork 跟踪 LLM, 在源码树里搜索读取该外部变量的函数, 返回跟入函数列表
-        return []
+        """污点写入外部变量 → fork 跟踪 LLM 在源码树搜读取该变量的跟入函数, 分叉路径。"""
+        fork_session = self.sessions_dir / f"{_safe_name(func.name)}-track-{_safe_name(taint.name)}.jsonl"
+        prompt = (
+            f"# 阶段：外部变量污点跟踪\n\n"
+            f"写入函数: `{func.file}::{func.name}`\n"
+            f"外部变量: `{taint.name}` (签名 {taint.signature})\n"
+            f"说明: {taint.description or '(无)'}\n\n"
+            f"在源码树 (cwd={self.source_root}) 搜索读取 `{taint.name}` 的函数, "
+            f"按系统提示词输出 JSON {{\"follow_ins\":[...]}}。"
+        )
+        acfg = self.cfg.workers.agents[0] if self.cfg.workers.agents else None
+        if acfg is None:
+            return []
+        output = run_agent(
+            prompt=prompt, model=acfg.model, tools=acfg.tools or self.cfg.workers.default_tools,
+            cwd=self.source_root, session_file=str(fork_session),
+            system_prompt=self._tracking_prompt, cancel_event=self.cancel_event,
+            run_timeout_seconds=min(self.cfg.agent_run_timeout_seconds, 1800),
+            timeout_retry_enabled=self.cfg.agent_timeout_retry_enabled,
+            timeout_max_retries=self.cfg.agent_timeout_max_retries,
+            pi_max_retries=self.cfg.pi_max_retries, pi_retry_delay=self.cfg.pi_retry_delay,
+            task_context={"task_id": self.task_id, "task_root": str(self.run_dir.parent),
+                          "task_run_root": str(self.run_dir), "task_pi_dir": self.cfg.role_pi_dir("workers"),
+                          "agent_role": "workers"},
+        )
+        if self.on_event:
+            emit_agent_runtime_events(self.on_event, result=output, stage="external_tracking_v2",
+                                      role="workers", model=acfg.model,
+                                      extra={"function": func.name, "var": taint.name})
+        parsed = _extract_json_object(output.output, "follow_ins") or {}
+        out: list[tuple[FunctionRecord, TaintParamInfo]] = []
+        for item in parsed.get("follow_ins") or []:
+            if not isinstance(item, dict):
+                continue
+            fn = str(item.get("function") or "").strip()
+            if not fn:
+                continue
+            # 索引跟入函数所在文件, 拿 FunctionRecord
+            rec = store.find_function(fn) or store.find_function(fn, str(item.get("file") or ""))
+            if rec is None and item.get("file"):
+                ensure_file_indexed(self.source_root, str(item.get("file")), store)
+                rec = store.find_function(fn) or store.find_function(fn, str(item.get("file") or ""))
+            if rec is None:
+                continue
+            tp = TaintParamInfo(positions=[], signature=taint.signature,
+                                names=[str(item.get("param_name") or taint.name)])
+            out.append((rec, tp))
+        return out
 
+    # ── 漏洞挖掘 (item 2) ────────────────────────────────────────────────────
     def mine_vulns(self, store: DataflowStore, func: FunctionRecord,
                    taint_params: TaintParamInfo, ctx: PathContext) -> int:
-        # TODO: fork 漏洞挖掘会话 (复用 prompts/vuln-miners/default.md), 写 findings
-        return 0
+        """fork 漏洞挖掘会话 (复用 vuln-miners/default.md), 存 finding + 上报 intake。"""
+        acfg = self.cfg.workers.agents[0] if self.cfg.workers.agents else None
+        if acfg is None:
+            return 0
+        fork_session = self.sessions_dir / f"{_safe_name(func.name)}-vuln.jsonl"
+        # 构造本函数污点分析上下文文本 (taints + propagations + 前置校验链)
+        taints = store.list_taints_in_function(func.func_id)
+        props = store.list_propagations_from(func.func_id)
+        dataflow_text = self._format_taint_context(func, taint_params, ctx, taints, props)
+        prompt = (
+            f"# 阶段：漏洞挖掘 Fork\n\n目标函数: `{func.file}::{func.name}`\n"
+            f"污点: 位置 {taint_params.positions} 签名 {taint_params.signature} 名字 {taint_params.names}\n\n"
+            "基于下面的单函数污点传播结果, 判断是否存在漏洞。输出 JSON: {\"findings\":[]}。\n\n"
+            f"```markdown\n{dataflow_text[:30000]}\n```"
+        )
+        miner_system = ("# 内嵌技能：mine-dataflow-vulnerability\n"
+                        "禁止再读取 skills/mine-dataflow-vulnerability/SKILL.md。\n\n"
+                        f"{_EMBEDDED_VULN_MINING_SKILL}\n\n{self._vuln_miner_prompt}")
+        output = run_agent(
+            prompt=prompt, model=acfg.model, tools=acfg.tools or self.cfg.workers.default_tools,
+            cwd=str(self.vuln_root.parent), session_file=str(fork_session),
+            system_prompt=miner_system, cancel_event=self.cancel_event,
+            run_timeout_seconds=self.cfg.agent_run_timeout_seconds,
+            timeout_retry_enabled=self.cfg.agent_timeout_retry_enabled,
+            timeout_max_retries=self.cfg.agent_timeout_max_retries,
+            pi_max_retries=self.cfg.pi_max_retries, pi_retry_delay=self.cfg.pi_retry_delay,
+            task_context={"task_id": self.task_id, "task_root": str(self.run_dir.parent),
+                          "task_run_root": str(self.run_dir), "task_pi_dir": self.cfg.role_pi_dir("workers"),
+                          "agent_role": "workers"},
+        )
+        if self.on_event:
+            emit_agent_runtime_events(self.on_event, result=output, stage="vuln_mining_v2",
+                                      role="workers", model=acfg.model, extra={"function": func.name})
+        from ..parsers import _extract_json_object as _ej
+        parsed = _ej(output.output, "findings") or {"findings": []}
+        node = f"{func.file}::{func.name}"
+        n = 0
+        for idx, item in enumerate(parsed.get("findings") or []):
+            if not isinstance(item, dict):
+                continue
+            finding_id = f"vuln_{hashlib.sha1((self.run_id+str(idx)+json.dumps(item, ensure_ascii=False)).encode()).hexdigest()[:16]}"
+            fdir = self.vuln_root / finding_id; fdir.mkdir(parents=True, exist_ok=True)
+            fsrc = str(item.get("source_file") or func.file)
+            ffn = str(item.get("function_name") or func.name)
+            fline = str(item.get("line") or "")
+            (fdir / "vulnerability-report.md").write_text(
+                _format_vuln_report_md(item, finding_id, fsrc, ffn, fline), encoding="utf-8")
+            (fdir / "taint-path-report.md").write_text(dataflow_text, encoding="utf-8")
+            try:
+                safe_copyfile(str(fork_session), str(fdir / "context.jsonl"))
+            except OSError:
+                (fdir / "context.jsonl").write_text("", encoding="utf-8")
+            _exploit = item.get("exploitability")
+            expl_str = json.dumps(_exploit, ensure_ascii=False) if isinstance(_exploit, (dict, list)) else str(_exploit or "")
+            rec = VulnFindingRecord(
+                finding_id=finding_id, run_id=self.run_id, node_id=node,
+                source_file=fsrc, function_name=ffn, line=fline,
+                vuln_type=str(item.get("vuln_type") or "unknown"),
+                severity=str(item.get("severity") or "unknown"),
+                title=str(item.get("title") or finding_id),
+                summary=str(item.get("summary") or ""),
+                evidence=str(item.get("evidence") or ""),
+                exploitability=expl_str,
+                confidence=float(item.get("confidence") or 0),
+                output_dir=str(fdir))
+            self.graph_store.add_finding(rec)
+            n += 1
+            # 上报 vuln-platform intake
+            try:
+                report_finding_to_intake(
+                    project_id=self.cfg.project_id, task_id=self.task_id,
+                    task_name=self.cfg.task_name, parent_task_name=self.cfg.parent_task_name,
+                    parent_task_id=self.cfg.parent_task_id, finding=rec,
+                    source_root=self.source_root,
+                    report_path=str(fdir / "vulnerability-report.md"),
+                    taint_path_report_path=str(fdir / "taint-path-report.md"))
+            except Exception as exc:
+                logger.warning("v2 intake report failed for %s: %s", finding_id, exc, exc_info=True)
+        return n
+
+    def _format_taint_context(self, func: FunctionRecord, tp: TaintParamInfo,
+                              ctx: PathContext, taints: list[TaintRecord],
+                              props: list[PropagationRecord]) -> str:
+        pre_val = "\n".join(f"- {v.condition}: {v.content}" for v in ctx.pre_validations) or "(无)"
+        lines = [f"## 函数: {func.file}::{func.name} (行 {func.start_line}-{func.end_line})",
+                 f"功能: {func.description or '(待分析)'}",
+                 f"入口污点: 位置 {tp.positions} 签名 {tp.signature} 名字 {tp.names}",
+                 f"前置校验链:\n{pre_val}", "", "## 污点变量:"]
+        for t in taints:
+            lines.append(f"- {t.name} ({t.signature}): {t.description}")
+        lines.append("\n## 传播路径:")
+        for p in props:
+            tgt = p.target_function or "(外部变量)" if p.is_external else p.target_function
+            lines.append(f"- {p.source_taint_name} → {tgt}({p.target_taint_name}) @L{p.call_line} "
+                         f"[{p.condition}] {p.description}")
+        return "\n".join(lines)
