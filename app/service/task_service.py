@@ -1902,6 +1902,36 @@ class TaskService:
                   event="task_created", task_id=task_id, project_id=project_id)
         return self._row_to_dict(row)
 
+    def set_feature_flags(self, db: Session, task_id: str, flags: dict) -> dict:
+        """合并任务级 debug 特性开关到 task_config_json.feature_flags。
+
+        传 false 的键从 feature_flags 中移除 (恢复默认关); 传 true 的键保留。
+        修改后需 restart 任务才生效 (restart 重建 cfg 时读取)。
+        """
+        row = self._get_or_404(db, task_id)
+        tcfg = dict(row.task_config_json or {})
+        cur = {str(k): bool(v) for k, v in (tcfg.get("feature_flags") or {}).items() if v}
+        for k, v in (flags or {}).items():
+            k = str(k)
+            if v:
+                cur[k] = True
+            else:
+                cur.pop(k, None)
+        if cur:
+            tcfg["feature_flags"] = cur
+        else:
+            tcfg.pop("feature_flags", None)
+        row.task_config_json = tcfg
+        db.add(row)
+        db.commit()
+        db.refresh(row)
+        return {
+            "task_id": row.task_id,
+            "feature_flags": (row.task_config_json or {}).get("feature_flags") or {},
+            "status": row.status,
+            "note": "restart 任务后生效",
+        }
+
     def restart_task(self, db: Session, task_id: str) -> dict:
         """在原任务ID上重置并重新执行（SA 模式：in-place restart）。"""
         row = self._get_or_404(db, task_id)
@@ -2560,6 +2590,10 @@ class TaskService:
                 cfg.func_hash = str(tcfg["func_hash"]).strip()
             if "deep_trace_enabled" in tcfg:
                 cfg.deep_trace_enabled = bool(tcfg.get("deep_trace_enabled"))
+            if isinstance(tcfg.get("feature_flags"), dict):
+                cfg.feature_flags = {
+                    str(k): bool(v) for k, v in tcfg["feature_flags"].items() if v
+                }
             if tcfg.get("max_trace_depth"):
                 try:
                     cfg.max_trace_depth = int(tcfg.get("max_trace_depth") or cfg.max_trace_depth)

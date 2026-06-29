@@ -151,6 +151,11 @@ class TaskConfig(BaseModel):
     entry_screen_whitelist: list[str] = Field(default_factory=lambda: list(DEFAULT_ENTRY_WHITELIST))
     entry_screen_thinking_level: str = Field(default="off")
     branch_pruning_enabled: bool = Field(default=False)
+    # 任务级 debug 特性开关 (单任务独立启停, 默认全关 = 主线行为)。
+    # 已注册键:
+    #   clang_mutex    - clang 互斥分支分析 + 幽灵调用点丢弃 (污点跟踪正确性)
+    #   vuln_verifier  - 服务端 finding 结构化核验门 (finding 正确性)
+    feature_flags: dict[str, bool] = Field(default_factory=dict)
     workers: RoleConfig = Field(default_factory=RoleConfig)
     judges: RoleConfig = Field(default_factory=RoleConfig)
     output_dir: str = Field(default="/data/output")

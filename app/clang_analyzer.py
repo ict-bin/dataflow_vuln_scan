@@ -417,7 +417,7 @@ def analyze_function_callsites(
     return result
 
 
-# ── vuln-verifier 原子能力 (debug: DVS_VULN_VERIFIER_ENABLED) ────────────────
+# ── vuln-verifier 原子能力 (任务级开关: TaskConfig.feature_flags) ───────────
 # 以下函数供 app/vuln_verifier.py 服务端结构化核验使用; 全部 fail-safe:
 # libclang 不可用或解析失败时返回 None, 调用方按 "无法核验→跳过(不阻断)" 处理。
 
@@ -524,13 +524,6 @@ def libclang_available() -> bool:
     return _ensure_libclang()
 
 
-def is_enabled() -> bool:
-    """Debug switch for the clang-based mutex-branch analysis.
-
-    Default OFF (env unset / falsy): the orchestrator MUST run the original
-    pre-clang code path verbatim — no clang parse, no phantom-callsite
-    rejection, no mutex P0 partition. Only when explicitly enabled does the
-    new code path execute. This keeps mainline behavior 100% unchanged until
-    the switch is turned on for testing.
-    """
-    return str(os.environ.get("DVS_CLANG_MUTEX_ENABLED", "")).strip().lower() in {"1", "true", "yes", "on"}
+# 注: clang 互斥分支分析的启停由任务级 TaskConfig.feature_flags["clang_mutex"] 控制
+# (默认 False = 主线行为)。orchestrator 仅在该开关为真时调用 analyze_function_callsites;
+# 此处不再提供 env 级全局开关, 避免双源真值。

@@ -42,6 +42,13 @@ class TaskCreateRequest(BaseModel):
     agent_task_key_secret: Optional[str] = None
     agent_task_key_source: Optional[str] = None
     model: Optional[str] = None
+    # 任务级 debug 特性开关, 见 TaskConfig.feature_flags (clang_mutex / vuln_verifier)
+    feature_flags: Dict[str, bool] = {}
+
+
+class TaskFeatureFlagsRequest(BaseModel):
+    """PATCH /tasks/{task_id}/feature-flags 请求体: 合并到 task_config_json.feature_flags。"""
+    feature_flags: Dict[str, bool]
 
 
 class GeneratePromptRequest(BaseModel):

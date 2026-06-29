@@ -1,6 +1,9 @@
 # dataflow_vuln_scan（数据流漏洞挖掘服务）— 当前架构总览
 
-> 本文基于代码现状（submodule HEAD `b222b67`，分支 `v2.0-34-gb222b67`）撰写，描述**实际运行**的架构，与 README 中的早期 Worker+Judge 模型已有重大差异。
+> 本文基于代码现状（submodule HEAD `e8effb0`，分支 `v2.0-56-ge8effb0`）撰写，描述**实际运行**的架构，与 README 中的早期 Worker+Judge 模型已有重大差异。
+>
+> 更新履历：`b222b67`（本文初版基线）→ `e8effb0` 期间新增内容见文末「§12 自初版以来的增量」。
+
 
 ---
 
@@ -17,7 +20,9 @@
 | 项 | 值 |
 |----|----|
 | 代码位置 | `13-secflow-service/image_build/secflow-app-dataflow-vuln-scan`（**git submodule**，独立仓库） |
+| 子模块仓库 | `https://github.com/ict-bin/dataflow_vuln_scan.git`，分支 `main`，HEAD `e8effb0`（describe `v2.0-56-ge8effb0`） |
 | 父仓库分支 | `v2.1`，远程 `https://github.com/runshine/sothoth.git` |
+| 前端 submodule | `secflow-frontend`，仓库 `https://github.com/GaiaSecHW/Chimera.git`，分支 `local` |
 | CI workflow | `.github/workflows/build-secflow-app-dataflow-vuln-scan-image.yaml`（多架构 push 到 `ghcr.io/runshine/secflow-app-dataflow-vuln-scan` 与 Docker Hub） |
 | 镜像 | `ghcr.io/runshine/secflow-app-dataflow-vuln-scan:latest`（基础镜像 `dfa-base:layer5`：Node+pi、Python3、ripgrep、`extract_func`） |
 | K8s 命名空间 | `secflow-ns` |
@@ -309,8 +314,11 @@ ROOT (depth=0)
 
 ### 6.2 DB 任务表（`app/db/models.py`，`app_dvs_*`）
 
+### 6.2 DB 任务表（`app/db/models.py`，`app_dvs_*`）
+
 - `app_dvs_tasks`：task_id、project_id、status、task_config_json、result_json、stages_json、execution_owner_id/epoch/lease_until/heartbeat_at（租约）、control_version、dispatch_status、latest_abnormal_reason_json、started_at/finished_at、is_deleted。
-- `app_dvs_task_events`：任务时间线事件（SwarmEvent 落库，前端 timeline 回放）。
+  - **自 `8bcac6c`/`340f202` 起新增 vuln stats 列**（启动时自动迁移）：`vuln_total_findings`、`vuln_findings_by_severity`（JSON）、`vuln_stats_synced_at`、`vuln_reported_at` 等。任务列表/统计优先读 MySQL 列，`-1` 为「未同步」哨兵值，与 0 findings 区分（`d18f17f`/`82d57ef`）。
+- `app_dvs_task_events`：任务时间线事件（SwarmEvent 落库，前端 timeline 回放）。`f500cb0` 起 restart **保留**历史事件，不再清空。
 - worker_slot 表：worker_id/pod_name/pod_ip/max_concurrent/last_heartbeat/status。
 
 ### 6.3 阶段事件流（SwarmEvent，可观测）
@@ -339,7 +347,10 @@ task_start → trace_start →
 | POST | `/tasks` | 创建任务（project_id/task_name/prompt/cwd/source_file/function_name/taint_*） |
 | GET | `/tasks` | 任务列表（project_id 过滤、分页） |
 | GET | `/tasks/{id}` | 任务详情（result_json + stages） |
-| GET | `/tasks/{id}/logs` | 实时阶段事件（timeline） |
+| GET | `/tasks/{id}/logs` | 实时阶段事件（timeline，旧别名） |
+| GET | `/tasks/{id}/timeline` | 任务时间线事件（分页，`f500cb0` 起 restart 不再清空） |
+| DELETE | `/tasks/{id}/timeline` | 清空任务时间线 |
+| DELETE | `/tasks/{id}/timeline/{event_id}` | 删除单条时间线事件 |
 | GET | `/tasks/{id}/evaluation` | 任务评估（rounds/worker/session 摘要） |
 | GET | `/tasks/{id}/sessions` | session 索引（回放目录） |
 | GET | `/tasks/{id}/sessions/content` | session 文件内容 |
@@ -354,6 +365,10 @@ task_start → trace_start →
 | GET | `/prompts` / POST `/prompts` / ... | 提示词模板 CRUD |
 | POST | `/generate-prompt` | 根据路径生成 prompt |
 | GET | `/metrics` `/metrics/aggregate` `/metrics/summary` `/metrics/rest-api-summary` `/metrics/ai-summary` | prometheus + 可观测摘要 |
+| GET | `/vuln-stats` | 全局漏洞统计（从 MySQL `app_dvs_tasks` 聚合，不再逐任务走 NFS sqlite，`22f1957`） |
+| GET | `/tasks/vuln-stats-batch` | 任务列表批量漏洞统计（`1a58ea1`） |
+| POST | `/vuln-stats/report-all` | 批量重算并同步所有任务 vuln stats |
+| POST | `/tasks/{id}/vuln-findings/report-all` | 批量把该任务 finding 提交到漏洞平台 intake（`vuln_intake_reporter`） |
 | GET | `/health` `/ready` | 业务观测（非 kube probe） |
 
 旧版兼容路由（`PUBLIC_API_ENABLED` 才开放）：`POST /analyse`、`GET /task/{id}`、`GET /task/{id}/stream`(SSE)、`POST /task/{id}/abort`、`GET /tasks`、`GET /health`。
@@ -431,3 +446,19 @@ curl -s http://secflow-app-dataflow-vuln-scan.secflow-ns/api/app/dataflow-vuln-s
 4. **resume 已移除**，任何恢复（rollout/失联/租约过期）= clean restart（清空任务目录从头跑）。
 5. **API/Worker 同镜像双 Deployment**，靠 `DVS_ROLE` 切角色；改后台线程逻辑注意两份 deployment env。
 6. 任务级 pi runtime（models.json/api key/skills/提示词）由 `task_service._materialize_task_pi_runtime` 在执行前物化到任务目录，按角色隔离。
+
+---
+
+## 12. 自初版（`b222b67`）以来的增量
+
+以下能力在本文初版之后合入，当前默认均为 **OFF/不影响主线**，但 bug 修复时需知晓：
+
+| 提交 | 能力 | 开关 | 说明 |
+|------|------|------|------|
+| `e8effb0` | 服务端漏洞核验门 | `DVS_VULN_VERIFIER_ENABLED`（默认 OFF） | `app/vuln_verifier.py` + `app/clang_analyzer.py`。在 vuln-miner fork 产出 finding 后、提交 intake 前，对每条 finding 做确定性结构化核验（V1 行存在/V2 调用点存在/V3 callee 行为断言/V4 trigger_path 可达/V5 session 读取审计），杀 LLM 常见假象。fail-safe：只判 FAIL，clang 不可用记 skipped 不阻断。OFF 时不调用。 |
+| `2275f9d` | clang 互斥分支分析 | `DVS_CLANG_MUTEX_ENABLED`（默认 OFF） | `orchestrator.py` process_item 内整块跳过，valid 保持原状。 |
+| `1f71d9d`/`2aafa8c` | 批量 report-all + 项目级 vuln stats | — | `POST /tasks/{id}/vuln-findings/report-all`、`POST /vuln-stats/report-all`，复用 `vuln_intake_reporter` 单条 helper。 |
+| `8bcac6c`→`22f1957` | vuln stats 入 MySQL + 列迁移 | — | 任务列表不再逐任务开 NFS sqlite，直接读 MySQL 列；`-1` 哨兵区分未同步。任务完成/报告时同步（`fde2626`/`30f3d95`）。 |
+| `cc072b2`/`2d1e8be` | vuln stats 源优先级 | — | `load_vuln_scan_graph` 优先 `run/vuln-scan.sqlite` 而非 epoch 子目录或 `output/`，反映最新报告状态。 |
+| `b222b67`/`799e5cb` | parent_task_id 传播 | — | 漏洞 intake 的 `metadata.source.task_id` 用 parent_task_id，DVS 自身 task_id 不在 schedule 注册。 |
+| `f500cb0` | restart 保留时间线 | — | restart 不再清空 `app_dvs_task_events`；新增 `/timeline` GET/DELETE 接口。 |

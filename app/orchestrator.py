@@ -57,7 +57,7 @@ from .vuln_workflow import build_function_summary_from_result
 from .taint_source_identifier import autodetect_taint_sources, needs_taint_autodetect
 from .entry_point_screener import needs_entry_screen, screen_entry_point
 from .branch_pruner import prune_branches
-from .clang_analyzer import analyze_function_callsites, is_enabled as _clang_mutex_enabled
+from .clang_analyzer import analyze_function_callsites
 
 logger = logging.getLogger("dvs.orchestrator")
 from .judge_runner import JudgeMixin
@@ -1412,11 +1412,12 @@ class Orchestrator(JudgeMixin):
                     self._emit("trace_callees", tid, function=func_name,
                                callees=[c.function_name for c in valid], depth=dep)
 
-                # ── clang 语法解析：调用点校验 + 互斥分支标注 (debug 开关) ──
-                # 默认 OFF(DVS_CLANG_MUTEX_ENABLED 未置真)时跳过整块, valid 保持原状,
+                # ── clang 语法解析：调用点校验 + 互斥分支标注 (任务级开关) ──
+                # task_cfg.feature_flags["clang_mutex"] 默认 False → 跳过整块, valid 保持原状,
                 # 下游 P0 分区因无 branch_group_id 自动退化为原始顺序逻辑, 行为与
-                # pre-clang 完全一致。ON 时才做 clang 解析 + 幽灵边丢弃 + 互斥标注。
-                if _clang_mutex_enabled():
+                # pre-clang 完全一致。仅当该任务显式开启 clang_mutex 时才做 clang 解析
+                # + 幽灵边丢弃 + 互斥标注。
+                if task_cfg.feature_flags.get("clang_mutex", False):
                     _clang_cache_dir = shared_run_dir / "clang-cache"
                     _clang_callsites = analyze_function_callsites(
                         target_dir, src_file, func_name,

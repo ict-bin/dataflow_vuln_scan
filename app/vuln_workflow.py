@@ -718,16 +718,18 @@ class DataflowVulnWorkflow:
             _min_conf = _vuln_intake_min_confidence()
             _submit_eligible = _dim_pass and rec.confidence >= _min_conf
             _verifier_failed = False
-            # ── debug: 服务端结构化核验门 (DVS_VULN_VERIFIER_ENABLED, 默认 OFF) ──
-            # OFF 时完全不执行, intake 行为与主线一致; ON 时对每条 finding 做行存在/
-            # 调用点存在/callee 行为一致性/调用链可达/session 读取审计五项核验, 任一
-            # fail 则不提交 intake (本地仍归档), emit vuln_verification_skipped。
-            if _submit_eligible:
+            # ── 任务级开关: 服务端结构化核验门 (feature_flags.vuln_verifier) ──
+            # 默认 False → 完全不执行, intake 行为与主线一致; 仅当该任务显式开启
+            # vuln_verifier 时对每条 finding 做行存在/调用点存在/callee 行为一致性/
+            # 调用链可达/session 读取审计五项核验, 任一 fail 则不提交 intake (本地仍归档),
+            # emit vuln_verification_skipped。
+            _verifier_on = bool(self.cfg.feature_flags.get("vuln_verifier", False))
+            if _submit_eligible and _verifier_on:
                 try:
-                    from .vuln_verifier import is_enabled as _verifier_enabled, verify_finding as _verify_finding
+                    from .vuln_verifier import verify_finding as _verify_finding
                 except Exception:
-                    _verifier_enabled = lambda: False
-                if _verifier_enabled():
+                    _verify_finding = None
+                if _verify_finding is not None:
                     try:
                         _vr = _verify_finding(
                             rec, item,

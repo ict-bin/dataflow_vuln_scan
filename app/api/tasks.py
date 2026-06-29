@@ -26,6 +26,7 @@ from app.vuln_graph_service import load_vuln_scan_graph, summarize_graph, build_
 from .deps import ensure_admin_user, ensure_project_access, get_current_user
 from .task_models import (
     TaskCreateRequest,
+    TaskFeatureFlagsRequest,
     GeneratePromptRequest,
     TaskSessionIndexNodeResponse,
     TaskSessionIndexEdgeResponse,
@@ -826,6 +827,10 @@ def create_task(body: TaskCreateRequest, db: Session = Depends(get_db)):
         }
     if body.model:
         task_config_json["model"] = str(body.model).strip()
+    if body.feature_flags:
+        task_config_json["feature_flags"] = {
+            str(k): bool(v) for k, v in body.feature_flags.items() if v
+        }
     task_config_json["parent_task_id"] = str(body.parent_task_id or "").strip()
     task_config_json["parent_task_name"] = str(body.task_name or "").strip()
 
@@ -1877,6 +1882,17 @@ def restart_task(task_id: str, db: Session = Depends(get_db)):
 def resume_task(task_id: str, db: Session = Depends(get_db)):
     """resume 暂未实现，等同于 restart（重新执行）。"""
     return get_task_service().restart_task(db, task_id)
+
+
+@router.patch("/tasks/{task_id}/feature-flags")
+def patch_task_feature_flags(task_id: str, body: TaskFeatureFlagsRequest, db: Session = Depends(get_db)):
+    """合并任务级 debug 特性开关到 task_config_json.feature_flags。
+
+    用于单任务独立启停 debug 代码路径 (clang_mutex / vuln_verifier 等),
+    不影响其他任务。修改后需 restart 任务才生效 (restart 重建 cfg 时读取)。
+    传 false 值的键会从 feature_flags 中移除 (恢复默认关)。
+    """
+    return get_task_service().set_feature_flags(db, task_id, body.feature_flags)
 
 
 @router.delete("/tasks/{task_id}", status_code=204)

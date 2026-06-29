@@ -1,4 +1,4 @@
-"""服务端漏洞 finding 结构化核验门 (debug: DVS_VULN_VERIFIER_ENABLED).
+"""服务端漏洞 finding 结构化核验门 (任务级开关: TaskConfig.feature_flags["vuln_verifier"]).
 
 在 vuln-miner fork 产出 finding 之后、提交 vuln-platform intake 之前, 对每条
 finding 做确定性结构化核验, 杀掉 LLM 常见的几类假象 (引用不存在的行/调用点、
@@ -11,7 +11,7 @@ finding 做确定性结构化核验, 杀掉 LLM 常见的几类假象 (引用不
   在 clang call-graph 里不存在)。
 - libclang 不可用 / 解析失败 → 该检查记为 "skipped", **不**阻断 finding。只有
   不依赖 clang 的检查 (行存在性 V1、session 工具调用审计 V5) 始终执行。
-- 默认 OFF (env DVS_VULN_VERIFIER_ENABLED 未置真)。OFF 时本模块不被调用, 行为与
+- 默认 OFF (任务未在 feature_flags 开启 vuln_verifier)。OFF 时本模块不被调用, 行为与
   主线完全一致。
 
 核验项:
@@ -24,7 +24,6 @@ finding 做确定性结构化核验, 杀掉 LLM 常见的几类假象 (引用不
 from __future__ import annotations
 
 import json
-import os
 import re
 from pathlib import Path
 from typing import Any
@@ -36,9 +35,6 @@ from .clang_analyzer import (
 )
 
 
-def is_enabled() -> bool:
-    """Debug switch for the server-side vuln verifier. Default OFF."""
-    return str(os.environ.get("DVS_VULN_VERIFIER_ENABLED", "")).strip().lower() in {"1", "true", "yes", "on"}
 
 
 # ── 解析辅助 ────────────────────────────────────────────────────────────────
