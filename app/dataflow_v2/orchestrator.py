@@ -132,11 +132,12 @@ class DfsOrchestrator:
 
     def __init__(self, store: DataflowStore, cbs: AnalysisCallbacks,
                  n_workers: int = 4, concurrent: bool = False,
-                 max_concurrent_llm: int = 8) -> None:
+                 max_concurrent_llm: int = 8, max_depth: int = 10) -> None:
         self.store = store
         self.cbs = cbs
         self.n_workers = n_workers
         self.concurrent = concurrent
+        self.max_depth = max_depth
         self._llm_sem = threading.Semaphore(max_concurrent_llm) if concurrent else None
 
     def _run_llm(self, fn: Callable, *args: Any, **kw: Any) -> Any:
@@ -192,8 +193,11 @@ class DfsOrchestrator:
         if self_contained:
             self._run_llm(self.cbs.mine_vulns, self.store, func, taint_params, ctx)
 
-        # 5) 构造有序路径 (互斥分叉 + 外部变量分叉)
-        paths = self._build_paths(result.propagations, func, ctx, depth)
+        # 5) 构造有序路径 (互斥分叉 + 外部变量分叉); 达深度上限则当叶子 (不递归)
+        if depth < self.max_depth:
+            paths = self._build_paths(result.propagations, func, ctx, depth)
+        else:
+            paths = []
 
         # 6) 逐条链 DFS: 链内顺序, 校验链累加 + 回传; fork 后多链可并发
         base_accumulated = list(pre_validations) + list(my_discovered)

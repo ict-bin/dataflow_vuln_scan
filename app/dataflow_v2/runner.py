@@ -84,7 +84,8 @@ class DataflowV2Runner:
                 cancel_event=self._cancel_event, on_event=self.on_event)
             orch = DfsOrchestrator(
                 store, cbs, concurrent=True,
-                max_concurrent_llm=max(1, int(getattr(cfg, "callee_concurrency", 4) or 4)))
+                max_concurrent_llm=max(1, int(getattr(cfg, "callee_concurrency", 4) or 4)),
+                max_depth=int(getattr(cfg, "max_trace_depth", 10) or 10))
 
             self.on_event(task_id=tid, event_type="v2_run_started",
                           function=cfg.function_name, source_file=cfg.source_file)
