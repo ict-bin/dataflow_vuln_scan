@@ -14,7 +14,7 @@ import threading
 from pathlib import Path
 from typing import Any, Callable
 
-from ..models import TaskConfig, TaskResult, TaskStatus
+from ..models import SwarmEvent, TaskConfig, TaskResult, TaskStatus
 from .analysis import TaintAnalysisCallbacks
 from .function_extractor import ensure_file_indexed
 from .models import TaintParamInfo
@@ -30,13 +30,26 @@ class DataflowV2Runner:
     def __init__(self, config: TaskConfig, on_event: Callable[..., None] | None = None,
                  task_id: str = "") -> None:
         self.cfg = config
-        self.on_event = on_event or (lambda **kw: None)
+        self._raw_on_event = on_event
         self.task_id = task_id
         self._cancel_event: threading.Event | None = threading.Event()
+
+    def _emit(self, etype: str, **data: Any) -> None:
+        """适配: (etype, **data) → SwarmEvent → task_service on_event(SwarmEvent)。"""
+        try:
+            if self._raw_on_event is not None:
+                self._raw_on_event(SwarmEvent(type=etype, task_id=self.task_id, data=data))
+        except Exception:
+            logger.debug("v2 _emit %s failed", etype, exc_info=True)
 
     def cancel(self) -> None:
         if self._cancel_event is not None:
             self._cancel_event.set()
+
+    @property
+    def on_event(self) -> Callable[..., None]:
+        """callbacks 收到的 emit 接口 (etype, **data)。"""
+        return self._emit
 
     def execute_recursive(
         self,
@@ -87,8 +100,7 @@ class DataflowV2Runner:
                 max_concurrent_llm=max(1, int(getattr(cfg, "callee_concurrency", 4) or 4)),
                 max_depth=int(getattr(cfg, "max_trace_depth", 10) or 10))
 
-            self.on_event(task_id=tid, event_type="v2_run_started",
-                          function=cfg.function_name, source_file=cfg.source_file)
+            self._emit("v2_run_started", function=cfg.function_name, source_file=cfg.source_file)
             orch.run(root_func, root_taint, base_session="")
 
             if self._cancel_event is not None and self._cancel_event.is_set():

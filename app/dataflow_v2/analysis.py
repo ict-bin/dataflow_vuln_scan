@@ -59,7 +59,7 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
         self.run_id = run_id
         self.task_id = task_id
         self.cancel_event = cancel_event
-        self.on_event = on_event or (lambda **kw: None)
+        self.on_event = on_event or (lambda *a, **k: None)
         self._vuln_miner_prompt = _read_prompt("prompts/vuln-miners/default.md")
         self._tracking_prompt = _read_prompt("prompts/v2/external-tracking.md")
 
