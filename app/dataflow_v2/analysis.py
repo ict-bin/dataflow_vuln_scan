@@ -175,7 +175,7 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
             if ci is None:
                 # 幽灵 callee: caller 函数体根本没调用它 → 丢弃 (修 v1 Gap-1)
                 logger.info("drop phantom callee %s in %s (not in body)", prop.target_function, func.name)
-                self._emit("v2_phantom_callee_dropped", function=prop.target_function,
+                self.on_event("v2_phantom_callee_dropped", function=prop.target_function,
                            caller=func.name, claimed_line=prop.call_line)
                 continue
             prop.callsite_validated = True
