@@ -29,6 +29,7 @@ from app.db.models import AppDvsTask, AppDvsTaskEvent
 from app.logging_utils import log_event
 from app.models import SwarmEvent, TaskStatus
 from app.orchestrator import Orchestrator
+from app.dataflow_v2.runner import DataflowV2Runner
 from app.runtime_context import HEARTBEAT_INTERVAL_SECONDS, WORKER_ID, MAX_LOCAL_RUNNING_TASKS
 from app.workspace_manager import WorkspaceManager
 from app.service.execution_coordinator import (
@@ -2623,7 +2624,9 @@ class TaskService:
             entry_context = _build_entry_analysis_context(tcfg)
             if entry_context:
                 cfg.context = ((cfg.context or "").rstrip() + "\n\n" + entry_context).strip()
-            orch = Orchestrator(config=cfg, on_event=on_event)
+            orch = DataflowV2Runner(config=cfg, on_event=on_event, task_id=task_id) \
+                if cfg.feature_flags.get("dataflow_v2") \
+                else Orchestrator(config=cfg, on_event=on_event)
             orch_holder["orch"] = orch
             ctx = _register_running_task_context(
                 task_id,

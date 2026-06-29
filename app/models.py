@@ -155,6 +155,7 @@ class TaskConfig(BaseModel):
     # 已注册键:
     #   clang_mutex    - clang 互斥分支分析 + 幽灵调用点丢弃 (污点跟踪正确性)
     #   vuln_verifier  - 服务端 finding 结构化核验门 (finding 正确性)
+    #   dataflow_v2    - 启用 v2 数据流漏洞挖掘 (四库+路径敏感DFS, 替代 v1)
     feature_flags: dict[str, bool] = Field(default_factory=dict)
     workers: RoleConfig = Field(default_factory=RoleConfig)
     judges: RoleConfig = Field(default_factory=RoleConfig)
