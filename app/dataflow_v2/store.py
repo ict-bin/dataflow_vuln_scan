@@ -67,12 +67,22 @@ _DDL = {
             target_taint_name      TEXT NOT NULL,
             target_taint_signature TEXT NOT NULL,
             target_func_id         TEXT,
+            target_function        TEXT,
+            target_file            TEXT,
+            call_line              INTEGER,
             condition              TEXT DEFAULT '',
+            is_external            INTEGER DEFAULT 0,
+            callsite_validated     INTEGER DEFAULT 0,
+            branch_group_id        TEXT DEFAULT '',
+            branch_arm_id          TEXT DEFAULT '',
+            branch_path            TEXT DEFAULT '[]',
+            mutex_siblings         TEXT DEFAULT '[]',
             validations            TEXT DEFAULT '[]',
             description            TEXT DEFAULT ''
         );
         CREATE INDEX IF NOT EXISTS idx_prop_source ON propagations(source_func_id);
         CREATE INDEX IF NOT EXISTS idx_prop_target ON propagations(target_func_id);
+        CREATE INDEX IF NOT EXISTS idx_prop_branch ON propagations(branch_group_id);
     """,
     "orchestration": """
         CREATE TABLE IF NOT EXISTS orchestration (
@@ -224,13 +234,22 @@ class DataflowStore:
         self._exec("propagations", """
             INSERT INTO propagations (prop_id,source_func_id,source_taint_name,
                 source_taint_signature,target_taint_name,target_taint_signature,
-                target_func_id,condition,validations,description)
+                target_func_id,target_function,target_file,call_line,condition,is_external,
+                callsite_validated,branch_group_id,branch_arm_id,branch_path,mutex_siblings,
+                validations,description)
             VALUES (:prop_id,:source_func_id,:source_taint_name,
                 :source_taint_signature,:target_taint_name,:target_taint_signature,
-                :target_func_id,:condition,:validations,:description)
+                :target_func_id,:target_function,:target_file,:call_line,:condition,:is_external,
+                :callsite_validated,:branch_group_id,:branch_arm_id,:branch_path,:mutex_siblings,
+                :validations,:description)
             ON CONFLICT(prop_id) DO UPDATE SET
-                condition=excluded.condition, validations=excluded.validations,
-                description=excluded.description
+                target_func_id=excluded.target_func_id, target_function=excluded.target_function,
+                target_file=excluded.target_file, call_line=excluded.call_line,
+                condition=excluded.condition, is_external=excluded.is_external,
+                callsite_validated=excluded.callsite_validated,
+                branch_group_id=excluded.branch_group_id, branch_arm_id=excluded.branch_arm_id,
+                branch_path=excluded.branch_path, mutex_siblings=excluded.mutex_siblings,
+                validations=excluded.validations, description=excluded.description
         """, r)
 
     def get_propagation(self, prop_id: str) -> PropagationRecord | None:
@@ -294,7 +313,12 @@ def _row_to_propagation(row: sqlite3.Row) -> PropagationRecord:
         prop_id=row["prop_id"], source_func_id=row["source_func_id"],
         source_taint_name=row["source_taint_name"], source_taint_signature=row["source_taint_signature"],
         target_taint_name=row["target_taint_name"], target_taint_signature=row["target_taint_signature"],
-        target_func_id=row["target_func_id"], condition=row["condition"],
+        target_func_id=row["target_func_id"], target_function=row["target_function"],
+        target_file=row["target_file"], call_line=row["call_line"], condition=row["condition"],
+        is_external=bool(row["is_external"]), callsite_validated=bool(row["callsite_validated"]),
+        branch_group_id=row["branch_group_id"], branch_arm_id=row["branch_arm_id"],
+        branch_path=json.loads(row["branch_path"] or "[]"),
+        mutex_siblings=json.loads(row["mutex_siblings"] or "[]"),
         validations=[Validation(**v) for v in vals if isinstance(v, dict)],
         description=row["description"])
 

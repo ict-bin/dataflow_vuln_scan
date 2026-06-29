@@ -120,22 +120,38 @@ class PropagationRecord:
     source_taint_signature: str = ""
     target_taint_name: str = ""
     target_taint_signature: str = ""
-    target_func_id: str = ""            # 若传播到 callee, 目标函数; ""=函数内变量
-    condition: str = ""                 # 传播条件 (分支 arm / "always")
+    target_func_id: str = ""            # 若传播到 callee, 目标函数; ""=函数内变量/外部
+    target_function: str = ""           # 目标 callee 名 (便于查询, clang 校验对象)
+    target_file: str = ""               # 目标 callee 文件
+    call_line: int = 0                  # 调用点行号 (clang 据此标注分支)
+    condition: str = ""                 # 传播条件 (人类可读; 分支互斥性由 clang 判)
+    is_external: bool = False           # 传播到外部/全局变量 → 触发跟踪 LLM
+    # clang 标注 (analyze_function 填, 编排器路径分叉消费):
+    callsite_validated: bool = False    # clang 确认该 call_line 确有对 target_function 的 CallExpr
+    branch_group_id: str = ""          # 调用点所属分支组 (if/switch); 同组不同 arm = 互斥
+    branch_arm_id: str = ""            # arm 标识 (then/else/case...)
+    branch_path: list[dict] = field(default_factory=list)  # 祖先分支栈快照
+    mutex_siblings: list[str] = field(default_factory=list)  # 互斥兄弟 callee 名
     validations: list[Validation] = field(default_factory=list)   # 传播过程校验列表
     description: str = ""               # 传播污点内容说明 (如 "struct.field only")
 
     def __post_init__(self) -> None:
         if not self.prop_id:
             self.prop_id = _sha(self.source_func_id, self.source_taint_name,
-                                self.target_taint_name, self.condition)
+                                self.target_taint_name, str(self.call_line), self.condition)
 
     def to_row(self) -> dict:
         return {
             "prop_id": self.prop_id, "source_func_id": self.source_func_id,
             "source_taint_name": self.source_taint_name, "source_taint_signature": self.source_taint_signature,
             "target_taint_name": self.target_taint_name, "target_taint_signature": self.target_taint_signature,
-            "target_func_id": self.target_func_id, "condition": self.condition,
+            "target_func_id": self.target_func_id, "target_function": self.target_function,
+            "target_file": self.target_file, "call_line": self.call_line,
+            "condition": self.condition, "is_external": 1 if self.is_external else 0,
+            "callsite_validated": 1 if self.callsite_validated else 0,
+            "branch_group_id": self.branch_group_id, "branch_arm_id": self.branch_arm_id,
+            "branch_path": json.dumps(self.branch_path, ensure_ascii=False),
+            "mutex_siblings": json.dumps(self.mutex_siblings, ensure_ascii=False),
             "validations": json.dumps([v.to_dict() for v in self.validations], ensure_ascii=False),
             "description": self.description,
         }
