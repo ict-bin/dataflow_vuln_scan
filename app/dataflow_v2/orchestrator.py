@@ -24,6 +24,7 @@ from __future__ import annotations
 import hashlib
 import threading
 from collections import deque
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
@@ -32,6 +33,18 @@ from .models import (
     TaintParamInfo, TaintRecord, Validation,
 )
 from .store import DataflowStore
+
+
+@dataclass
+class AnalysisResult:
+    """LLM 污点分析的产出。self_contained 由 LLM 判断 (设计点 #2):
+    True  = 该函数对污点的处理自洽 (sink/漏洞判定仅靠函数自身即可) → 立即挖;
+    False = 需下游子路径信息才能判定 → 后序挖 (等全部子路径完成)。
+    """
+    taints: list[TaintRecord] = field(default_factory=list)
+    propagations: list[PropagationRecord] = field(default_factory=list)
+    self_contained: bool = False
+    description: str = ""        # 函数功能说明 (回写函数库)
 
 
 class PathContext:
@@ -60,13 +73,16 @@ class AnalysisCallbacks:
 
     def analyze_function(self, store: DataflowStore, func: FunctionRecord,
                          taint_params: TaintParamInfo, pre_validations: list[Validation],
-                         base_session: str, ctx: PathContext) -> tuple[list[TaintRecord], list[PropagationRecord]]:
-        """fork 会话用 LLM 分析函数功能 + 污点传播; 返回 (该函数的污点记录, 传播记录)。
+                         base_session: str, ctx: PathContext) -> AnalysisResult:
+        """fork 会话用 LLM 分析函数功能 + 污点传播; 返回 AnalysisResult
+        (taints/propagations/self_contained/description)。
 
-        TODO: 接入 run_agent + prompts/v2/taint-analysis.md; 解析 LLM 输出建
-        TaintRecord/PropagationRecord; 用 clang 判定分支 (互斥 arm → 分叉路径)。
+        self_contained 由 LLM 判断: 该函数对污点的处理是否自洽 (仅靠自身即可
+        判定 sink/漏洞), 决定漏洞挖掘时机 (立即 vs 后序)。TODO: 接入 run_agent
+        + prompts/v2/taint-analysis.md; 用 clang 标注每条 propagation 的调用点
+        分支上下文 (互斥 arm → 独立路径)。
         """
-        return [], []
+        return AnalysisResult()
 
     def resolve_external_propagation(self, store: DataflowStore, func: FunctionRecord,
                                      taint: TaintRecord, ctx: PathContext) -> list[tuple[FunctionRecord, TaintParamInfo]]:
@@ -113,12 +129,16 @@ class DfsOrchestrator:
             return  # 已分析过, 跳过
 
         # 2) LLM 污点分析 (fork 会话)
-        taints, propagations = self.cbs.analyze_function(
+        result = self.cbs.analyze_function(
             self.store, func, taint_params, ctx.pre_validations, base_session, ctx)
-        for t in taints:
+        for t in result.taints:
             self.store.upsert_taint(t)
-        for p in propagations:
+        for p in result.propagations:
             self.store.upsert_propagation(p)
+        if result.description:
+            func.description = result.description
+            self.store.upsert_function(func)
+        self_contained = result.self_contained
 
         # 3) 记录 processed_taint (去重锚点)
         self.store.add_processed_taint(func.func_id, ProcessedTaint(
@@ -129,7 +149,7 @@ class DfsOrchestrator:
 
         # 4) 展开 propagations → 子路径
         child_edges: list[tuple[FunctionRecord, TaintParamInfo, list[Validation]]] = []
-        for prop in propagations:
+        for prop in result.propagations:
             # 传播过程校验累积进子路径的前置校验链
             child_vals = list(prop.validations)
             if not prop.target_func_id:
@@ -162,8 +182,11 @@ class DfsOrchestrator:
             sub_ctx.edges = list(ctx.edges)
             self._enqueue(tgt, tp, sub_ctx, base_session)
 
-        # 6) 漏洞挖掘时机 (后序): 无子任务 → 立刻挖; 有子任务 → 等全部完成
-        if not child_edges:
+        # 6) 漏洞挖掘时机 (设计点 #2: LLM 判自洽):
+        #    self_contained=True        → 立即挖 (不论是否有子路径)
+        #    self_contained=False 且有子 → 后序 (等全部子路径完成)
+        #    self_contained=False 无子  → 无下游可等, 立即挖
+        if self_contained or not child_edges:
             self.cbs.mine_vulns(self.store, func, taint_params, ctx)
         else:
             self._register_pending_mine(func, taint_params, ctx, len(child_edges))
