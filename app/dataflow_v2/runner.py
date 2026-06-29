@@ -9,12 +9,16 @@ result.json) 无感。
 """
 from __future__ import annotations
 
+import json
 import logging
+import shutil
 import threading
 from pathlib import Path
 from typing import Any, Callable
 
+from ..copy_utils import safe_copy2
 from ..models import SwarmEvent, TaskConfig, TaskResult, TaskStatus
+from ..vuln_store import VulnScanStore
 from .analysis import TaintAnalysisCallbacks
 from .function_extractor import ensure_file_indexed
 from .models import TaintParamInfo
@@ -62,12 +66,25 @@ class DataflowV2Runner:
     ) -> TaskResult:
         tid = task_id or self.task_id
         cfg = self.cfg
-        run_dir = Path(_root_out_dir) if _root_out_dir is not None else Path(cfg.output_dir) / tid / "run"
-        v2_run_dir = run_dir / "dataflow-v2"
-        sessions_dir = run_dir / "sessions"
-        graph_db_path = run_dir / "vuln-scan.sqlite"
-        vuln_root = run_dir / "vulnerabilities"
+        # 路径镜像 v1: shared_run_dir=run/ (NFS, 存 vuln-scan.sqlite/vulnerabilities/数据库),
+        # root_out_dir=run/epochs/<epoch>/ (存 sessions), output/=任务根/output
+        if _root_out_dir is not None:
+            root_out_dir = Path(_root_out_dir)
+            shared_run_dir = root_out_dir.parent.parent if ("epochs" in root_out_dir.parts and "run" in root_out_dir.parts) else root_out_dir
+        else:
+            root_out_dir = Path(cfg.output_dir) / tid / "run"
+            shared_run_dir = root_out_dir
+        root_out_dir.mkdir(parents=True, exist_ok=True)
+        shared_run_dir.mkdir(parents=True, exist_ok=True)
+        root_output_path = Path(_root_output_dir) if _root_output_dir is not None else (shared_run_dir.parent / "output")
+        root_output_path.mkdir(parents=True, exist_ok=True)
+        v2_run_dir = shared_run_dir / "dataflow-v2"
+        sessions_dir = root_out_dir / "sessions"
+        graph_db_path = shared_run_dir / "vuln-scan.sqlite"
+        vuln_root = shared_run_dir / "vulnerabilities"
         source_root = cfg.cwd
+        status = TaskStatus.PASSED
+        err_msg = ""
 
         try:
             store = DataflowStore(v2_run_dir)
@@ -104,12 +121,119 @@ class DataflowV2Runner:
             orch.run(root_func, root_taint, base_session="")
 
             if self._cancel_event is not None and self._cancel_event.is_set():
-                return TaskResult(task_id=tid, status=TaskStatus.FAILED, task=cfg.task,
-                                  error="v2: cancelled")
-            return TaskResult(
-                task_id=tid, status=TaskStatus.PASSED, task=cfg.task,
-                final_output="dataflow-v2 completed",
-                vuln_summary={"functions": len(store.list_functions())})
+                status, err_msg = TaskStatus.FAILED, "v2: cancelled"
+            final_output = self._build_final_report(tid, cfg, store, graph_db_path)
+            vuln_summary = {"functions": len(store.list_functions()),
+                            "findings": self._count_findings(graph_db_path)}
+            result = TaskResult(task_id=tid, status=status, task=cfg.task,
+                                final_output=final_output, vuln_summary=vuln_summary, error=err_msg or None)
+            # 归档: 与 v1 一致的 output/ 件 + v2 四库归档; 不写 flag
+            self._archive(root_out_dir, shared_run_dir, root_output_path, result, v2_run_dir,
+                          graph_db_path, vuln_root)
+            return result
         except Exception as exc:
             logger.exception("dataflow-v2 runner failed task=%s", tid)
             return TaskResult(task_id=tid, status=TaskStatus.ERROR, task=cfg.task, error=str(exc))
+
+    # ── 归档 (镜像 v1 output/ 件 + v2 四库归档, 不写 flag) ────────────────────
+    def _archive(self, root_out_dir: Path, shared_run_dir: Path, root_output_path: Path,
+                 result: TaskResult, v2_run_dir: Path, graph_db_path: Path, vuln_root: Path) -> None:
+        # run/report.md + run/result.json (与 v1 一致)
+        try:
+            (root_out_dir / "report.md").write_text(result.final_output or "", encoding="utf-8")
+            (root_out_dir / "result.json").write_text(result.model_dump_json(indent=2), encoding="utf-8")
+        except OSError:
+            pass
+        # output/final_report.md
+        try:
+            (root_output_path / "final_report.md").write_text(result.final_output or "", encoding="utf-8")
+        except OSError:
+            pass
+        # output/vuln-scan.sqlite (findings 图谱)
+        if graph_db_path.exists():
+            try:
+                safe_copy2(graph_db_path, root_output_path / "vuln-scan.sqlite")
+            except OSError as e:
+                logger.warning("v2 archive vuln-scan.sqlite: %s", e)
+        # output/vulnerabilities/ (漏洞报告目录)
+        if vuln_root.exists():
+            try:
+                dst = root_output_path / "vulnerabilities"
+                if dst.exists():
+                    shutil.rmtree(dst)
+                shutil.copytree(vuln_root, dst)
+            except OSError as e:
+                logger.warning("v2 archive vulnerabilities: %s", e)
+        # output/dataflow-v2/ (归档 v2 四库 + functions/ + clang-cache/)
+        if v2_run_dir.exists():
+            try:
+                dst = root_output_path / "dataflow-v2"
+                if dst.exists():
+                    shutil.rmtree(dst)
+                shutil.copytree(v2_run_dir, dst)
+            except OSError as e:
+                logger.warning("v2 archive dataflow-v2 db: %s", e)
+        # output/artifact-manifest.json (v2 件清单)
+        manifest = [
+            {"stage": "dataflow_v2", "kind": "markdown", "role": "final_report", "path": str(root_output_path / "final_report.md")},
+            {"stage": "dataflow_v2", "kind": "sqlite", "role": "vuln_graph", "path": str(root_output_path / "vuln-scan.sqlite")},
+            {"stage": "dataflow_v2", "kind": "directory", "role": "vulnerabilities", "path": str(root_output_path / "vulnerabilities")},
+            {"stage": "dataflow_v2", "kind": "directory", "role": "dataflow_v2_db", "path": str(root_output_path / "dataflow-v2")},
+        ]
+        try:
+            (root_output_path / "artifact-manifest.json").write_text(
+                json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+        except OSError:
+            pass
+        # 不写 flag 文件 (已废弃)
+
+    def _build_final_report(self, tid: str, cfg: TaskConfig, store: DataflowStore,
+                            graph_db_path: Path) -> str:
+        """构建最终报告 (漏洞简报列表, 与 v1 _report 风格一致)。"""
+        findings = []
+        if graph_db_path.exists():
+            try:
+                findings = VulnScanStore(graph_db_path).export_json().get("vulnerability_findings") or []
+            except Exception:
+                findings = []
+        lines = [
+            f"# 数据流漏洞挖掘简报 (v2): {cfg.function_name}",
+            "",
+            "## 结果概览",
+            "",
+            f"- 任务ID: `{tid}`",
+            f"- 状态: `{TaskStatus.PASSED.value}`",
+            f"- 漏洞数量: {len(findings)}",
+            f"- 函数库函数数: {len(store.list_functions())}",
+            f"- 图谱数据库: `output/vuln-scan.sqlite`",
+            f"- v2 四库: `output/dataflow-v2/`",
+            "",
+            "## 漏洞简报列表",
+            "",
+        ]
+        if not findings:
+            lines.append("未确认漏洞发现。")
+        else:
+            for idx, item in enumerate(findings, 1):
+                lines += [
+                    f"### {idx}. {item.get('title') or item.get('finding_id')}",
+                    "",
+                    f"- ID: `{item.get('finding_id')}`",
+                    f"- 所在文件: `{item.get('source_file') or ''}`",
+                    f"- 所在函数: `{item.get('function_name') or ''}`",
+                    f"- 所在行号: `{item.get('line') or 'unknown'}`",
+                    f"- 漏洞类型: `{item.get('vuln_type') or 'unknown'}`",
+                    f"- 严重程度: `{item.get('severity') or 'unknown'}`",
+                    f"- 置信度: `{item.get('confidence')}`",
+                    f"- 概述: {item.get('summary') or ''}",
+                    "",
+                ]
+        return "\n".join(lines).strip() + "\n"
+
+    def _count_findings(self, graph_db_path: Path) -> int:
+        if not graph_db_path.exists():
+            return 0
+        try:
+            return len(VulnScanStore(graph_db_path).export_json().get("vulnerability_findings") or [])
+        except Exception:
+            return 0
