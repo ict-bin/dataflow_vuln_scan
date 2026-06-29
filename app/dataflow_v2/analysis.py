@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..agent_runtime_events import emit_agent_runtime_events
-from ..clang_analyzer import analyze_function_callsites
+from ..clang_analyzer import analyze_function_callsites, clang_parse_ok
 from ..copy_utils import safe_copyfile
 from ..models import TaskConfig
 from ..parsers import _extract_json_object
