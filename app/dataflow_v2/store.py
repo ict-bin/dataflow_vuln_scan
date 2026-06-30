@@ -170,9 +170,18 @@ class DataflowStore:
         return _row_to_function(row[0]) if row else None
 
     def find_function(self, name: str, file: str = "") -> FunctionRecord | None:
+        """按名查找函数。C++ 方法: LLM 报短名 (ReadDataTask), 库存限定名
+        (Class::ReadDataTask) → 先精确匹配, 再后缀匹配 (::短名 或 =短名)。"""
         rows = self._q("functions", "SELECT * FROM functions WHERE name=? ORDER BY start_line",
                        (name,)) if not file else self._q("functions",
                        "SELECT * FROM functions WHERE name=? AND file=? ORDER BY start_line", (name, file))
+        if rows:
+            return _row_to_function(rows[0])
+        # 后缀匹配: 短名 ReadDataTask 匹配 Class::ReadDataTask
+        suf = "%::" + name
+        rows = self._q("functions",
+                       "SELECT * FROM functions WHERE name LIKE ? ORDER BY start_line", (suf,)) if not file \
+            else self._q("functions", "SELECT * FROM functions WHERE name LIKE ? AND file=? ORDER BY start_line", (suf, file))
         return _row_to_function(rows[0]) if rows else None
 
     def list_functions(self) -> list[FunctionRecord]:
