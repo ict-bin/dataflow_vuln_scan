@@ -451,6 +451,15 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                 exploitability=expl_str,
                 confidence=float(item.get("confidence") or 0),
                 output_dir=str(fdir))
+            # 确保 FK 满足: analysis_run + taint_node 必须先存在
+            try:
+                with self.graph_store.connect() as conn:
+                    conn.execute("INSERT OR IGNORE INTO analysis_runs (run_id,task_id,root_file,root_function,source_root,status) VALUES (?,?,?,?,?,?)",
+                                 (self.run_id, self.task_id, func.file, func.name, self.source_root, "completed"))
+                    conn.execute("INSERT OR IGNORE INTO taint_nodes (node_id,source_file,function_name,taint_kind,symbol,line,call_expr,description,parent_node_id,depth,context_session) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                                 (node, func.file, func.name, "vuln_site", ffline, str(fline), "", func.description or "", "", 0, ""))
+            except Exception as _fe:
+                logger.debug("v2 ensure FK run/node: %s", _fe)
             self.graph_store.add_finding(rec)
             n += 1
             # 上报 vuln-platform intake
