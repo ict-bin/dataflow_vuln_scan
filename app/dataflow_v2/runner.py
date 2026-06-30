@@ -112,10 +112,14 @@ class DataflowV2Runner:
                 sessions_dir=sessions_dir, graph_db_path=graph_db_path,
                 vuln_root=vuln_root, run_id=tid, task_id=tid,
                 cancel_event=self._cancel_event, on_event=self.on_event)
+            # 配置沿用 v1: deep_trace_enabled=无限深度; callee_concurrency -1=auto(4)/1=串行/N
+            _cc = int(getattr(cfg, "callee_concurrency", 4) or 4)
+            _concurrent = (_cc != 1)
+            _max_llm = 4 if _cc in (-1, 0) else max(1, _cc)
+            _max_depth = 10**9 if getattr(cfg, "deep_trace_enabled", False) else int(getattr(cfg, "max_trace_depth", 10) or 10)
             orch = DfsOrchestrator(
-                store, cbs, concurrent=True,
-                max_concurrent_llm=max(1, int(getattr(cfg, "callee_concurrency", 4) or 4)),
-                max_depth=int(getattr(cfg, "max_trace_depth", 10) or 10))
+                store, cbs, concurrent=_concurrent,
+                max_concurrent_llm=_max_llm, max_depth=_max_depth)
 
             self._emit("v2_run_started", function=cfg.function_name, source_file=cfg.source_file)
             orch.run(root_func, root_taint, base_session="")
