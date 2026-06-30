@@ -23,6 +23,7 @@ from app.service.worker_snapshot import build_worker_cluster_snapshot
 from app.service.session_index import build_session_catalog
 from app.service.task_service import generate_prompt_from_path, get_task_service
 from app.vuln_graph_service import load_vuln_scan_graph, summarize_graph, build_trace_tree
+from app.dataflow_v2.graph_export import load_dataflow_v2_graph, build_v2_trace_tree, summarize_v2_graph
 from .deps import ensure_admin_user, ensure_project_access, get_current_user
 from .task_models import (
     TaskCreateRequest,
@@ -1500,11 +1501,27 @@ def get_task_vuln_graph(task_id: str, db: Session = Depends(get_db)):
     root = _task_root(row)
     latest_run_root = _latest_epoch_run_root(root) if str(root) else Path()
     run_root = latest_run_root if latest_run_root.exists() else root / "run"
+    # debug 开关: feature_flags.dataflow_v2 开启 → 读 v2 四库 (dataflow-v2/), 否则读 v1 vuln-scan.sqlite
+    tcfg = row.task_config_json or {}
+    if (tcfg.get("feature_flags") or {}).get("dataflow_v2"):
+        graph = load_dataflow_v2_graph(run_root)
+        trace_tree = build_v2_trace_tree(graph)
+        summary = summarize_v2_graph(graph)
+        return {
+            "task_id": task_id,
+            "available": bool(graph.get("v2_available")),
+            "mode": "dataflow_v2",
+            "run_root": str(run_root),
+            "summary": summary,
+            "trace_tree": trace_tree,
+            "graph": graph,
+        }
     graph = load_vuln_scan_graph(run_root)
     trace_tree = build_trace_tree(graph)
     return {
         "task_id": task_id,
         "available": bool(graph.get("analysis_runs") or graph.get("taint_nodes") or graph.get("taint_edges") or graph.get("vulnerability_findings")),
+        "mode": "v1",
         "run_root": str(run_root),
         "summary": summarize_graph(graph),
         "trace_tree": trace_tree,
