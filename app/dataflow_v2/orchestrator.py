@@ -44,6 +44,7 @@ class AnalysisResult:
     propagations: list[PropagationRecord] = field(default_factory=list)
     self_contained: bool = False
     description: str = ""        # 函数功能说明 (回写函数库)
+    session_path: str = ""      # 本函数 taint 分析 fork session 路径 (供子函数/mining 继承链)
 
 
 class PathContext:
@@ -100,8 +101,10 @@ class AnalysisCallbacks:
         return []
 
     def mine_vulns(self, store: DataflowStore, func: FunctionRecord,
-                   taint_params: TaintParamInfo, ctx: PathContext) -> int:
-        """fork 漏洞挖掘会话; 返回 finding 数。TODO: 由回调实现接入。"""
+                   taint_params: TaintParamInfo, ctx: PathContext,
+                   base_session: str = "") -> int:
+        """fork 漏洞挖掘会话 (复用 vuln-miners/default.md), 存 finding + 上报 intake。
+        继承整条链 taint 分析 session (base_session), 再提示分析当前函数内的漏洞。"""
         return 0
 
 
@@ -186,6 +189,8 @@ class DfsOrchestrator:
             func.description = result.description
             self.store.upsert_function(func)
         self_contained = result.self_contained
+        # 父函数 taint session (整条链累积于此) → 子函数/mining 继承
+        chain_session = result.session_path
 
         # 3) 记录 processed_taint (去重锚点)
         self.store.add_processed_taint(func.func_id, ProcessedTaint(
@@ -197,9 +202,9 @@ class DfsOrchestrator:
         my_discovered = _dedup_validations(
             [v for p in result.propagations for v in p.validations])
 
-        # 4) self_contained=True → 立即挖 (设计点 #2)
+        # 4) self_contained=True → 立即挖 (设计点 #2); 继承链 session
         if self_contained:
-            self._run_llm(self.cbs.mine_vulns, self.store, func, taint_params, ctx)
+            self._run_llm(self.cbs.mine_vulns, self.store, func, taint_params, ctx, chain_session)
 
         # 5) 构造有序路径 (互斥分叉 + 外部变量分叉); 达深度上限则当叶子 (不递归)
         if depth < self.max_depth:
@@ -207,14 +212,14 @@ class DfsOrchestrator:
         else:
             paths = []
 
-        # 6) 逐条链 DFS: 链内顺序, 校验链累加 + 回传; fork 后多链可并发
+        # 6) 逐条链 DFS: 链内顺序, 校验链累加 + 回传; fork 后多链可并发; 子继承父 session
         base_accumulated = list(pre_validations) + list(my_discovered)
         if self.concurrent and len(paths) > 1:
             threads: list[threading.Thread] = []
             errs: list[BaseException] = []
             for path_steps in paths:
                 t = threading.Thread(target=self._run_path, daemon=True,
-                                     args=(path_steps, base_accumulated, func, base_session, ctx, depth, errs),
+                                     args=(path_steps, base_accumulated, func, chain_session, ctx, depth, errs),
                                      name=f"dvs2-path-{func.name}-{len(threads)}")
                 threads.append(t); t.start()
             for t in threads:
@@ -223,11 +228,11 @@ class DfsOrchestrator:
                 raise errs[0]
         else:
             for path_steps in paths:
-                self._run_path(path_steps, base_accumulated, func, base_session, ctx, depth, None)
+                self._run_path(path_steps, base_accumulated, func, chain_session, ctx, depth, None)
 
-        # 7) self_contained=False → 全部子链完成后挖 (后序)
+        # 7) self_contained=False → 全部子链完成后挖 (后序); 继承链 session
         if not self_contained:
-            self._run_llm(self.cbs.mine_vulns, self.store, func, taint_params, ctx)
+            self._run_llm(self.cbs.mine_vulns, self.store, func, taint_params, ctx, chain_session)
 
         return my_discovered
 

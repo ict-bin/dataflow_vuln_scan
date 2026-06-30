@@ -32,7 +32,6 @@
       "target_taint": "pkt",
       "target_signature": "pkt_t*",
       "target_function": "C",
-      "target_file": "net/c.c",
       "call_line": 234,
       "condition": "always",
       "validations": [
@@ -53,8 +52,8 @@
   的 CallExpr；幽灵调用点直接丢弃）。若该传播不是经由函数调用（如写到外部变量），
   `call_line` 填写发生赋值/传播的行号，`target_function` 留空，`is_external=true`。
 - `target_function`：必须是本函数**真实调用**的 callee 名（clang 校验）。未在本函数调用的
-  callee 不得出现。传播到外部/全局变量时留空 + `is_external=true`。
-- `target_file`：callee 所在文件（相对源码根）。不确定时留空，服务端用函数库解析。
+  callee 不得出现。**只填 callee 名，不要填其所在文件**——文件由服务端按名从全局函数库解析。
+  传播到外部/全局变量时留空 + `is_external=true`。
 - `condition`：人类可读传播条件（如 `"if(x) then"`、`"always"`、`"msg->len>0 守护"`）。
   **仅作辅助说明，不作为分支分叉依据**——分支互斥性由 clang 按调用点 AST 判定。
 - `validations`：本传播过程中（从源污点到调用点）累积的校验，每项 `{condition, content}`。

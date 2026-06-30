@@ -123,7 +123,7 @@ class _MockCbs(AnalysisCallbacks):
         return AnalysisResult(self_contained=True, description=func.name)  # 叶子自洽
     def resolve_external_propagation(self, store, func, taint, ctx):
         return []
-    def mine_vulns(self, store, func, tp, ctx):
+    def mine_vulns(self, store, func, tp, ctx, base_session=""):
         with self._lock: self.mined.append(func.name)
         return 0
 

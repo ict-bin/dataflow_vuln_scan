@@ -116,3 +116,36 @@ def ensure_file_indexed(source_root: str | Path, rel_file: str,
     if existing:
         return existing
     return extract_file_functions(source_root, rel_file, store)
+
+
+_SRC_EXTS = (".c", ".cc", ".cpp", ".cxx")
+
+
+def index_source_tree(source_root: str | Path, store: DataflowStore,
+                       on_progress: Any = None) -> int:
+    """冷启动全局函数索引: 遍历源码目录所有 .c/.cpp 文件, tree-sitter 提取全部函数入库。
+
+    一次性建全局函数库 (复用), 之后任何 callee 按名即可系统解析其所在文件,
+    不依赖 LLM 提供 target_file。跳过测试/build 产物目录。
+    """
+    root = Path(source_root)
+    n = 0
+    for path in root.rglob("*"):
+        if path.suffix.lower() not in _SRC_EXTS:
+            continue
+        parts = set(path.parts)
+        if parts & {"test", "tests", "fuzz", "build", "out", "cmake-build-debug",
+                   "cmake-build-release", ".git", "third_party", "vendor"}:
+            continue
+        try:
+            rel = path.relative_to(root).as_posix()
+        except ValueError:
+            continue
+        try:
+            extract_file_functions(source_root, rel, store)
+            n += 1
+            if on_progress:
+                on_progress(n)
+        except Exception:
+            continue
+    return n
