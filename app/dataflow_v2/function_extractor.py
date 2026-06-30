@@ -74,13 +74,15 @@ def extract_file_functions(source_root: str | Path, rel_file: str,
     def walk(node: Any) -> None:
         if node.type == "function_definition":
             name_node = node.child_by_field_name("declarator")
-            # 取最内层 direct_declarator 的标识符
+            # 取函数名: C 直接 identifier; C++ 方法可能 scoped_identifier (Class::method)
             nm = ""
             cur = name_node
             while cur is not None:
-                if cur.type in ("identifier", "type_identifier"):
-                    nm = cur.text.decode("utf-8", "replace")
-                    break
+                ct = cur.type
+                if ct in ("identifier", "type_identifier"):
+                    nm = cur.text.decode("utf-8", "replace"); break
+                if ct in ("scoped_identifier", "qualified_identifier", "namespace_qualified_name"):
+                    nm = cur.text.decode("utf-8", "replace"); break
                 cur = cur.child_by_field_name("declarator") or (cur.children[0] if cur.children else None)
             start_line = int(node.start_point[0]) + 1
             end_line = int(node.end_point[0]) + 1
