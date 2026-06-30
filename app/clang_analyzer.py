@@ -33,8 +33,19 @@ from typing import Any
 
 logger = logging.getLogger("dvs.clang_analyzer")
 
-# CallExpr callee 名提取正则 (从调用文本取 ident)
-_CALL_NAME_RE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*")
+# CallExpr callee 名提取: 从调用文本找 ident( , 跳过 C 关键字 (if/for/while...)
+_C_KEYWORDS = {"if", "for", "while", "switch", "return", "sizeof", "typeof", "do", "else", "case", "goto"}
+_CALL_NAME_RE = re.compile(r"([A-Za-z_]\w*)\s*\(")
+
+
+def _extract_call_name(text: str) -> str:
+    if not text:
+        return ""
+    for m in _CALL_NAME_RE.finditer(text):
+        nm = m.group(1)
+        if nm not in _C_KEYWORDS:
+            return nm
+    return ""
 
 # ── libclang bootstrap ───────────────────────────────────────────────────────
 # 干净策略: 仅用 libclang PyPI 包 (自带与绑定版本匹配的原生库), 不再拼凑系统
@@ -244,11 +255,8 @@ def _walk(cursor: Any, branch_stack: list[dict], source_lines: list[str],
             if kids:
                 name = kids[0].spelling or ""
         if not name:
-            # 回退 2: 从调用表达式文本正则取 ident(
-            txt = _cursor_text(cursor, source_lines)
-            m = _CALL_NAME_RE.match(txt)
-            if m:
-                name = m.group(1)
+            # 回退 2: 从调用表达式文本提取 ident( (跳过 if/for/while 等关键字)
+            name = _extract_call_name(_cursor_text(cursor, source_lines))
         if name and name in callee_names:
             children = list(cursor.get_children())
             # children: [callee_expr, arg0, arg1, ...]
@@ -427,9 +435,9 @@ def _collect_all_calls(func_cursor: Any, source_lines: list[str]) -> list[dict]:
                 if kids:
                     nm = kids[0].spelling or ""
             if not nm:
-                m = _CALL_NAME_RE.match(_cursor_text(cur, source_lines) or "")
+                m = _extract_call_name(_cursor_text(cur, source_lines))
                 if m:
-                    nm = m.group(1)
+                    nm = m
             out.append({"name": nm, "call_line": _line(cur)})
             for ch in cur.get_children():
                 walk(ch)
