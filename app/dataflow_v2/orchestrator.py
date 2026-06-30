@@ -93,7 +93,7 @@ class AnalysisCallbacks:
 
     def mine_vulns(self, store: DataflowStore, func: FunctionRecord,
                    taint_params: TaintParamInfo, ctx: PathContext) -> int:
-        """fork 漏洞挖掘会话; 返回 finding 数。TODO: 接入 vuln_workflow fork。"""
+        """fork 漏洞挖掘会话; 返回 finding 数。TODO: 由回调实现接入。"""
         return 0
 
 

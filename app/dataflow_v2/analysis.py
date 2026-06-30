@@ -25,9 +25,10 @@ from ..models import TaskConfig
 from ..parsers import _extract_json_object
 from ..runner import run_agent
 from ..vuln_intake_reporter import report_finding_to_intake
+from ..vuln_report_utils import (EMBEDDED_VULN_MINING_SKILL as _EMBEDDED_VULN_MINING_SKILL,
+                                  format_vuln_report_md as _format_vuln_report_md,
+                                  read_prompt as _read_prompt, safe_name as _safe_name)
 from ..vuln_store import VulnFindingRecord, VulnScanStore
-from ..vuln_workflow import (_EMBEDDED_VULN_MINING_SKILL, _format_vuln_report_md,
-                             _read_prompt, _safe_name)
 from .function_extractor import ensure_file_indexed
 from .models import (
     FunctionRecord, PropagationRecord, TaintParamInfo, TaintRecord, Validation,

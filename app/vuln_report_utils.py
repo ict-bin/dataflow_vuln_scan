@@ -1,0 +1,124 @@
+"""共享的漏洞报告工具 (v1 vuln_workflow 与 v2 dataflow_v2 共用)。
+
+抽出这些 helper 是为了让 v2 不依赖 v1 专属的 vuln_workflow 模块 —— 后续完全
+剥离 v1 时, 删除 vuln_workflow/orchestrator/taint_workflow 等, 本模块 + v2 保留。
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+from pathlib import Path
+from typing import Any
+
+
+def read_prompt(path: str) -> str:
+    """读取仓库内提示词文件 (相对 app/ 目录)。"""
+    try:
+        return (Path(__file__).resolve().parents[1] / path).read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
+def safe_name(value: str, *, max_len: int = 96) -> str:
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("._-") or "item"
+    if len(safe) <= max_len:
+        return safe
+    return f"{safe[:max_len - 9]}-{hashlib.sha1(value.encode()).hexdigest()[:8]}"
+
+
+def format_exploitability_md(value: Any) -> str:
+    """Render the exploitability field as Markdown (struct or legacy string)."""
+    if not value:
+        return "未知"
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        pre = str(value.get("preconditions") or value.get("precondition") or "").strip()
+        tc = str(value.get("trigger_complexity") or "").strip()
+        wci = str(value.get("worst_case_impact") or value.get("impact") or "").strip()
+        parts: list[str] = []
+        if pre:
+            parts.append(f"- **前置条件**: {pre}")
+        if tc:
+            parts.append(f"- **触发难度**: {tc}")
+        if wci:
+            parts.append(f"- **最坏后果**: {wci}")
+        return "\n".join(parts) if parts else json.dumps(value, ensure_ascii=False, indent=2)
+    return json.dumps(value, ensure_ascii=False, indent=2)
+
+
+_DIM_LABEL = {
+    "code_accurate": "代码准确性",
+    "path_reachable": "路径可达性",
+    "unmitigated": "防御可绕过",
+    "security_impact": "实质安全影响",
+}
+
+
+def format_dimensions_md(value: Any) -> str:
+    """Render the four-dimension self-check as Markdown ("" when absent)."""
+    if not isinstance(value, dict) or not value:
+        return ""
+    lines: list[str] = ["## 四维度自检", ""]
+    rows = []
+    for key, label in _DIM_LABEL.items():
+        entry = value.get(key)
+        if isinstance(entry, dict):
+            passed = entry.get("passed")
+            if passed is True:
+                status = "PASS"
+            elif passed is False:
+                status = "FAIL"
+            else:
+                status = "N/A"
+            reason = str(entry.get("reason") or entry.get("detail") or "").strip()
+        else:
+            status = "➖ 未判定"
+            reason = str(entry or "").strip()
+        rows.append(f"| {label} | {status} | {reason} |")
+    if rows:
+        lines.append("| 维度 | 结论 | 理由 |")
+        lines.append("|------|------|------|")
+        lines.extend(rows)
+        lines.append("")
+        return "\n".join(lines)
+    return ""
+
+
+def format_vuln_report_md(item: dict, finding_id: str, source_file: str,
+                          function_name: str, line: str) -> str:
+    """Build the vulnerability-report.md body with 9 standardized sections."""
+    title = str(item.get("title") or finding_id)
+    summary = str(item.get("summary") or "")
+    entry_point = str(item.get("entry_point") or "")
+    trigger_path = str(item.get("trigger_path") or "")
+    evidence = str(item.get("evidence") or "")
+    vuln_type = str(item.get("vuln_type") or "unknown")
+    severity = str(item.get("severity") or "unknown")
+    confidence = item.get("confidence")
+    sections = [
+        f"# {title}", "",
+        "## 漏洞最初入口", entry_point or "（未提供）", "",
+        "## 漏洞所在文件", f"`{source_file}`", "",
+        "## 漏洞所在函数", f"`{function_name}`", "",
+        "## 漏洞所在行号", f"`{line or 'unknown'}`", "",
+        "## 漏洞概述", summary, "",
+        "## 漏洞判断依据", evidence, "",
+        "## 漏洞触发路径", trigger_path or "（未提供）", "",
+        "## 漏洞危害", format_exploitability_md(item.get("exploitability")), "",
+        "## 漏洞基本信息",
+        f"- **漏洞类型**: `{vuln_type}`",
+        f"- **严重程度**: `{severity}`",
+        f"- **置信度**: `{confidence}`",
+    ]
+    dim_md = format_dimensions_md(item.get("dimensions"))
+    if dim_md:
+        sections.append("")
+        sections.append("## 四维度判断指标")
+        sections.append(dim_md.replace("## 四维度自检", "", 1).strip())
+    return "\n".join(sections) + "\n"
+
+
+# 内嵌技能文本 (v1 vuln_workflow 与 v2 mine_vulns 共用)
+EMBEDDED_VULN_MINING_SKILL = read_prompt("skills/mine-dataflow-vulnerability/SKILL.md")
