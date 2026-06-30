@@ -23,49 +23,40 @@
   "description": "本函数功能说明（一句话职责）",
   "self_contained": true,
   "taints": [
-    { "name": "msg", "signature": "msg_t*", "description": "入口报文指针" }
+    { "name": "msg", "description": "入口报文指针" }
   ],
   "propagations": [
     {
       "source_taint": "msg",
-      "source_signature": "msg_t*",
       "target_taint": "pkt",
-      "target_signature": "pkt_t*",
       "target_function": "C",
-      "call_line": 234,
-      "condition": "always",
       "validations": [
         { "condition": "msg->length>0", "content": "长度已校验" }
       ],
       "description": "msg 透传给 C 的 pkt 参数",
-      "is_external": false,
-      "is_indirect_call": false,
-      "dispatch_kind": ""
+      "is_external": false
     }
   ]
 }
 ```
 
-## 字段硬约束（违反即丢弃该 propagation）
+## 字段说明 (LLM 只输出语义字段; 结构字段由 clang/脚本提供)
 
-- `call_line`：**必须是本函数体内真实存在的行号**（clang 会校验该行确有对 `target_function`
-  的 CallExpr；幽灵调用点直接丢弃）。若该传播不是经由函数调用（如写到外部变量），
-  `call_line` 填写发生赋值/传播的行号，`target_function` 留空，`is_external=true`。
-- `target_function`：必须是本函数**真实调用**的 callee 名（clang 校验）。未在本函数调用的
-  callee 不得出现。**只填 callee 名，不要填其所在文件**——文件由服务端按名从全局函数库解析。
+LLM 只负责**污点跟踪语义**: 哪些变量被污染 (source_taint/target_taint)、污点流到哪个 callee
+(target_function, 仅填 callee 名)、传播过程的校验 (validations)、是否传播到外部变量
+(is_external)、行为描述 (description, 如"返回借用指针""分配新缓冲""不释放")。
+
+**不要输出** call_line / condition / is_indirect_call / dispatch_kind / signature /
+target_file —— 这些由服务端 clang/脚本从 AST 精确获取 (行号/分支/间接调用/签名/文件)。
+
+- `target_function`：本函数**真实调用**的 callee 名 (clang 会校验并定位精确 CallExpr)。
   传播到外部/全局变量时留空 + `is_external=true`。
-- `condition`：人类可读传播条件（如 `"if(x) then"`、`"always"`、`"msg->len>0 守护"`）。
-  **仅作辅助说明，不作为分支分叉依据**——分支互斥性由 clang 按调用点 AST 判定。
-- `validations`：本传播过程中（从源污点到调用点）累积的校验，每项 `{condition, content}`。
-  包括上游传入的前置校验中**在本函数内仍然生效**的部分，以及本函数新增加的校验。
-- `is_external`：仅当污点传播到**非函数指针的外部/全局数据变量**（如 `g_msg = msg`、`ctx->user_data = msg` 这类**数据赋值**）时为 true。
-  此时编排器会触发 nonlocal 跟踪 LLM 查找读取该变量的跟入函数。
-- `is_indirect_call`：当传播是经由**函数指针/回调/dispatch 间接调用**（如 `ctxt->sax->processingInstruction(...)`、
-  `(*fp)(msg)`、`ptr->handler(msg)`、`dispatch_table[id](msg)`）时为 true，并填 `dispatch_kind`
-  （`function_pointer_field`/`callback`/`vtable`/`dispatch_map`）。此时 `target_function` 填被调用的
-  函数指针表达式（如 `ctxt->sax->processingInstruction`）。编排器会触发 function_pointer tracker
-  搜索注册点（`sax->processingInstruction = handler` / `register_handler` / init 表）解析真实处理函数。
-  **不要把函数指针调用标为 is_external** —— 函数指针字段是动态分派, 不是“持有污点的外部数据变量”。
+- `validations`：本传播过程中 (从源污点到调用点) 累积的校验, 每项 `{condition, content}`。
+  包括上游传入的前置校验中**在本函数内仍然生效**的部分, 以及本函数新增加的校验。
+- `description`：传播语义 + callee 行为事实 (如"C 返回 PyBytes_AsString 借用指针, 非 xmlMalloc"),
+  供下游漏洞挖掘识别跨函数漏洞 (如 double-free)。
+- `is_external`：仅当污点传播到**外部/全局数据变量**（如 `g_msg = msg`、`ctx->user_data = msg` 这类**数据赋值**）时为 true。此时编排器会触发 nonlocal 跟踪。
+- **函数指针/回调间接调用**：若污点经由函数指针调用传出（如 `ctxt->sax->processingInstruction(...)`、`(*fp)(msg)`、`ptr->handler(msg)`），`target_function` 填被调用的**函数指针表达式**（如 `ctxt->sax->processingInstruction`），`is_external=false`。服务端 clang 会自动判定为间接调用 (is_indirect_call) 并触发 function_pointer tracker 搜注册点解析真实处理函数。**不要把函数指针调用标为 is_external**。
 
 ## self_contained 判定准则（设计核心）
 
@@ -93,5 +84,5 @@
 
 ## taints 字段
 
-列出本函数内的污点变量/参数（含入口污点及派生污点）。`signature` 用类型或归一化签名。
+列出本函数内的污点变量/参数（含入口污点及派生污点），只需 `name` + `description`（签名由服务端从 AST 获取）。
 `name` 用代码中的变量名。这部分用于建污点库索引，便于去重与回溯。

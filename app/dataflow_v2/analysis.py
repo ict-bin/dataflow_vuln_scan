@@ -74,10 +74,15 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
         body = self._read_body(func)
 
         # 2) fork session
-        fork_session = self.sessions_dir / f"{_safe_name(func.name)}-taint.jsonl"
+        # 链 session 累积: 追加写到 base_session (根→子→孙 同一文件, 链上下文增长);
+        # mining fork 自此即得全链。根 (base_session 空) 新建链 session。
+        if base_session and Path(base_session).exists():
+            session_file = base_session  # 追加 (链累积)
+        else:
+            session_file = str(self.sessions_dir / f"{_safe_name(func.name)}-chain.jsonl")
         try:
             if base_session and Path(base_session).exists():
-                safe_copyfile(base_session, str(fork_session))
+                pass  # 追加模式, 不复制
         except OSError:
             pass
 
@@ -90,7 +95,7 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
         # 4) run_agent
         output = run_agent(
             prompt=prompt, model=acfg.model, tools=acfg.tools or self.cfg.workers.default_tools,
-            cwd=str(self.run_dir), session_file=str(fork_session),
+            cwd=str(self.run_dir), session_file=session_file,
             system_prompt=_TAINT_ANALYSIS_PROMPT, cancel_event=self.cancel_event,
             run_timeout_seconds=self.cfg.agent_run_timeout_seconds,
             timeout_retry_enabled=self.cfg.agent_timeout_retry_enabled,
@@ -107,7 +112,7 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
 
         # 5) 解析 JSON
         parsed = _extract_json_object(output.output, "propagations") or {}
-        return self._build_result(store, func, taint_params, parsed, fork_session)
+        return self._build_result(store, func, taint_params, parsed, Path(session_file))
 
     # ── 结果构造 + clang 标注 ───────────────────────────────────────────────
     def _build_result(self, store: DataflowStore, func: FunctionRecord,
@@ -123,10 +128,11 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                 continue
             taints.append(TaintRecord(
                 func_id=func.func_id, name=str(t.get("name") or ""),
-                signature=str(t.get("signature") or ""), file=func.file, function=func.name,
+                signature="", file=func.file, function=func.name,
                 description=str(t.get("description") or "")))
 
-        # propagations (先建裸记录, 再 clang 标注)
+        # propagations: LLM 只输出语义字段; 结构字段 (call_line/condition/is_indirect/signature)
+        # 由 clang/脚本提供。is_indirect_call 由 target_function 表达式模式检测 (脚本)。
         raw_props: list[PropagationRecord] = []
         callee_names: list[str] = []
         for p in parsed.get("propagations") or []:
@@ -134,20 +140,21 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                 continue
             target_fn = str(p.get("target_function") or "").strip()
             is_ext = bool(p.get("is_external", False))
-            is_indirect = bool(p.get("is_indirect_call", False))
-            dispatch_kind = str(p.get("dispatch_kind") or "")
+            # 系统检测间接调用: target_function 是函数指针表达式 (含 -> / (* / [)
+            is_indirect = bool(target_fn) and ("->" in target_fn or target_fn.startswith("*") or "[" in target_fn)
+            dispatch_kind = "function_pointer_field" if is_indirect else ""
             if target_fn and not is_ext and not is_indirect:
-                callee_names.append(target_fn)
+                callee_names.append(target_fn)  # 直接调用: clang 按名定位 CallExpr
             raw_props.append(PropagationRecord(
                 source_func_id=func.func_id,
                 source_taint_name=str(p.get("source_taint") or ""),
-                source_taint_signature=str(p.get("source_signature") or ""),
+                source_taint_signature="",  # 签名由 AST/funcdb 提供
                 target_taint_name=str(p.get("target_taint") or ""),
-                target_taint_signature=str(p.get("target_signature") or ""),
+                target_taint_signature="",
                 target_function=target_fn,
-                target_file="",  # 不再信任 LLM 的 target_file; 系统按名从全局函数库解析
-                call_line=int(p.get("call_line") or 0),
-                condition=str(p.get("condition") or "always"),
+                target_file="",  # 系统按名从全局函数库解析
+                call_line=0,  # clang 标注时填 (直接调用)
+                condition="",  # clang 标注时填分支
                 is_external=is_ext,
                 is_indirect_call=is_indirect,
                 dispatch_kind=dispatch_kind,
