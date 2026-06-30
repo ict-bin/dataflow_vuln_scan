@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any, Callable
 
@@ -193,9 +194,28 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
         return AnalysisResult(taints=taints, propagations=validated_props,
                               self_contained=self_contained, description=description)
 
+    def _within_source_root(self, file: str) -> bool:
+        """文件是否在源码目录内 (目录内=合理可分析, 目录外=不分析; 不按文件名过滤,
+        因为被分析的函数本身可能就是 fuzz 工具)。防 ../ 逃逸与绝对路径越界。"""
+        if not file:
+            return False
+        try:
+            root = os.path.realpath(self.source_root)
+            # 相对路径 → 拼到 source_root 下; 绝对路径 → 原样
+            p = file if os.path.isabs(file) else os.path.join(self.source_root, file)
+            rp = os.path.realpath(p)
+            return rp == root or rp.startswith(root + os.sep)
+        except Exception:
+            return False
+
     def _resolve_target_func_id(self, store: DataflowStore, prop: PropagationRecord) -> str:
-        """从函数库解析 callee 的 func_id; 未索引则 tree-sitter 提取 callee 文件。"""
+        """从函数库解析 callee 的 func_id; 未索引则 tree-sitter 提取 callee 文件。
+        仅跟入源码目录内的文件 (目录外不分析)。"""
         if not prop.target_function:
+            return ""
+        if prop.target_file and not self._within_source_root(prop.target_file):
+            self._emit("v2_out_of_scope_skipped", function=prop.target_function,
+                       file=prop.target_file, reason="outside_source_root")
             return ""
         rec = store.find_function(prop.target_function, prop.target_file) \
             or store.find_function(prop.target_function)
@@ -268,11 +288,17 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
             fn = str(item.get("function") or "").strip()
             if not fn:
                 continue
+            fpath = str(item.get("file") or "")
+            # 仅跟入源码目录内的文件 (目录外不分析, 不按文件名过滤)
+            if fpath and not self._within_source_root(fpath):
+                self._emit("v2_out_of_scope_skipped", function=fn, file=fpath,
+                           reason="outside_source_root")
+                continue
             # 索引跟入函数所在文件, 拿 FunctionRecord
-            rec = store.find_function(fn) or store.find_function(fn, str(item.get("file") or ""))
-            if rec is None and item.get("file"):
-                ensure_file_indexed(self.source_root, str(item.get("file")), store)
-                rec = store.find_function(fn) or store.find_function(fn, str(item.get("file") or ""))
+            rec = store.find_function(fn) or store.find_function(fn, fpath)
+            if rec is None and fpath:
+                ensure_file_indexed(self.source_root, fpath, store)
+                rec = store.find_function(fn) or store.find_function(fn, fpath)
             if rec is None:
                 continue
             tp = TaintParamInfo(positions=[], signature=taint.signature,
