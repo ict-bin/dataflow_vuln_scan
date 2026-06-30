@@ -39,7 +39,9 @@
         { "condition": "msg->length>0", "content": "长度已校验" }
       ],
       "description": "msg 透传给 C 的 pkt 参数",
-      "is_external": false
+      "is_external": false,
+      "is_indirect_call": false,
+      "dispatch_kind": ""
     }
   ]
 }
@@ -57,8 +59,14 @@
   **仅作辅助说明，不作为分支分叉依据**——分支互斥性由 clang 按调用点 AST 判定。
 - `validations`：本传播过程中（从源污点到调用点）累积的校验，每项 `{condition, content}`。
   包括上游传入的前置校验中**在本函数内仍然生效**的部分，以及本函数新增加的校验。
-- `is_external`：仅当污点传播到**非局部变量**（全局/静态/外部对象，如 `g_msg = msg`）时为 true。
-  此时编排器会触发跟踪 LLM 查找该变量的跟入函数。
+- `is_external`：仅当污点传播到**非函数指针的外部/全局数据变量**（如 `g_msg = msg`、`ctx->user_data = msg` 这类**数据赋值**）时为 true。
+  此时编排器会触发 nonlocal 跟踪 LLM 查找读取该变量的跟入函数。
+- `is_indirect_call`：当传播是经由**函数指针/回调/dispatch 间接调用**（如 `ctxt->sax->processingInstruction(...)`、
+  `(*fp)(msg)`、`ptr->handler(msg)`、`dispatch_table[id](msg)`）时为 true，并填 `dispatch_kind`
+  （`function_pointer_field`/`callback`/`vtable`/`dispatch_map`）。此时 `target_function` 填被调用的
+  函数指针表达式（如 `ctxt->sax->processingInstruction`）。编排器会触发 function_pointer tracker
+  搜索注册点（`sax->processingInstruction = handler` / `register_handler` / init 表）解析真实处理函数。
+  **不要把函数指针调用标为 is_external** —— 函数指针字段是动态分派, 不是“持有污点的外部数据变量”。
 
 ## self_contained 判定准则（设计核心）
 

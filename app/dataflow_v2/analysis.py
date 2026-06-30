@@ -134,7 +134,9 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                 continue
             target_fn = str(p.get("target_function") or "").strip()
             is_ext = bool(p.get("is_external", False))
-            if target_fn:
+            is_indirect = bool(p.get("is_indirect_call", False))
+            dispatch_kind = str(p.get("dispatch_kind") or "")
+            if target_fn and not is_ext and not is_indirect:
                 callee_names.append(target_fn)
             raw_props.append(PropagationRecord(
                 source_func_id=func.func_id,
@@ -147,6 +149,8 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                 call_line=int(p.get("call_line") or 0),
                 condition=str(p.get("condition") or "always"),
                 is_external=is_ext,
+                is_indirect_call=is_indirect,
+                dispatch_kind=dispatch_kind,
                 validations=[Validation(str(v.get("condition") or ""), str(v.get("content") or ""))
                              for v in (p.get("validations") or []) if isinstance(v, dict)],
                 description=str(p.get("description") or ""),
@@ -164,8 +168,8 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
         else:
             callsites = {}
         for prop in raw_props:
-            if prop.is_external or not prop.target_function:
-                # 外部变量传播: 无调用点, 不经 clang; 由 resolve_external_propagation 处理
+            if (prop.is_external or prop.is_indirect_call) or not prop.target_function:
+                # 外部变量 / 函数指针间接调用 / 无 callee: 不经 clang (由各自 tracker 处理)
                 validated_props.append(prop)
                 continue
             if not parse_ok:
@@ -247,6 +251,63 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
             except OSError:
                 pass
         return f"// body_path 不可读: {func.body_path}\n// 行 {func.start_line}-{func.end_line}"
+
+    # ── 函数指针间接调用跟踪 (复用 V1 function_pointer tracker) ──────────────
+    def resolve_indirect_call(self, store: DataflowStore, func: FunctionRecord,
+                              prop: PropagationRecord, ctx: PathContext) -> list[tuple[FunctionRecord, TaintParamInfo]]:
+        """函数指针/回调/dispatch 间接调用 → fork function_pointer tracker 搜注册点 → 处理函数。
+
+        与 external (nonlocal, 数据变量读取) 区分: 函数指针真实 callee 由注册点决定
+        (sax->cb = handler / register_handler / init table), 不是"读取者"。
+        """
+        from ..tracker import run_tracker, TrackerResult  # 共享基建 (V1 删除后保留)
+        acfg = self.cfg.workers.agents[0] if self.cfg.workers.agents else None
+        if acfg is None:
+            return []
+        fork_session = self.sessions_dir / f"{_safe_name(func.name)}-fptrack-{_safe_name(prop.target_function or prop.target_taint_name)}.jsonl"
+        tracker_ctx = {
+            "caller_file": func.file, "caller_func": func.name,
+            "dispatch_kind": prop.dispatch_kind or "function_pointer",
+            "callee_function": prop.target_function or prop.target_taint_name,
+            "callee_file": func.file, "callee_line": f"L{prop.call_line}",
+            "tainted_params": prop.target_taint_name or prop.source_taint_name,
+            "description": prop.description,
+        }
+        tr = run_tracker(
+            "function_pointer", tracker_ctx,
+            workspace=Path(self.source_root), model=acfg.model,
+            tools=acfg.tools or self.cfg.workers.default_tools,
+            session_file=str(fork_session), cancel_event=self.cancel_event,
+            run_timeout_seconds=min(self.cfg.agent_run_timeout_seconds, 1800),
+            pi_max_retries=self.cfg.pi_max_retries, pi_retry_delay=self.cfg.pi_retry_delay,
+            task_context={"task_id": self.task_id, "task_root": str(self.run_dir.parent),
+                          "task_run_root": str(self.run_dir), "task_pi_dir": self.cfg.role_pi_dir("workers"),
+                          "agent_role": "workers"},
+        )
+        if self.on_event:
+            emit_agent_runtime_events(self.on_event, result=type("R",(),{"output":tr.raw_output,"error":tr.error,"runtime_dir":"","context_window":0,"compaction_requested":False,"compaction_completed":False,"context_budget_exceeded_preflight":False,"fatal_retry_event_due":False,"context_overflow_retrying":False,"context_overflow_retry_event_due":False,"retry_delay_seconds":0,"consecutive_fatal_retry_count":0,"fatal_retry_reason":"","proxy_reserved_tokens":0})(),
+            stage="indirect_call_tracking_v2", role="workers", model=acfg.model,
+            extra={"function": func.name, "dispatch": prop.target_function or prop.target_taint_name})
+        out: list[tuple[FunctionRecord, TaintParamInfo]] = []
+        for item in tr.functions:
+            fn = str(item.get("function") or "").strip()
+            if not fn:
+                continue
+            fpath = str(item.get("file") or "")
+            if fpath and not self._within_source_root(fpath):
+                self._emit("v2_out_of_scope_skipped", function=fn, file=fpath, reason="outside_source_root")
+                continue
+            rec = store.find_function(fn) or store.find_function(fn, fpath)
+            if rec is None and fpath:
+                ensure_file_indexed(self.source_root, fpath, store)
+                rec = store.find_function(fn) or store.find_function(fn, fpath)
+            if rec is None:
+                continue
+            tp_names = [str(x) for x in (item.get("tainted_params") or []) if str(x).strip()] or [prop.target_taint_name]
+            tp = TaintParamInfo(positions=[], signature=prop.target_taint_signature,
+                                names=tp_names)
+            out.append((rec, tp))
+        return out
 
     # ── 外部变量跟踪 (item 1) ────────────────────────────────────────────────
     def resolve_external_propagation(self, store: DataflowStore, func: FunctionRecord,

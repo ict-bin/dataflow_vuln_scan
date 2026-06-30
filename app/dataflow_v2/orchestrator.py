@@ -91,6 +91,14 @@ class AnalysisCallbacks:
         """
         return []
 
+    def resolve_indirect_call(self, store: DataflowStore, func: FunctionRecord,
+                              prop: PropagationRecord, ctx: PathContext) -> list[tuple[FunctionRecord, TaintParamInfo]]:
+        """函数指针/回调/dispatch 间接调用 → function_pointer tracker 搜注册点 → 处理函数。
+
+        返回 [(处理函数, 污点参数)] 用于分叉路径。TODO: 接入。
+        """
+        return []
+
     def mine_vulns(self, store: DataflowStore, func: FunctionRecord,
                    taint_params: TaintParamInfo, ctx: PathContext) -> int:
         """fork 漏洞挖掘会话; 返回 finding 数。TODO: 由回调实现接入。"""
@@ -284,6 +292,17 @@ class DfsOrchestrator:
                     self.cbs.resolve_external_propagation, self.store, func, _prop_source_taint(self.store, p), ctx)
                 if not targets:
                     continue  # TODO stub 未接: 不 fork
+                new_paths = []
+                for base in paths:
+                    for tgt_func, tp in targets:
+                        new_paths.append(base + [ChainStep(tgt_func, tp, list(p.validations),
+                                                           p.call_line, p.prop_id)])
+                paths = new_paths
+            elif p.is_indirect_call:
+                # 函数指针/回调间接调用 → function_pointer tracker 搜注册点 → 处理函数
+                targets = self._run_llm(self.cbs.resolve_indirect_call, self.store, func, p, ctx)
+                if not targets:
+                    continue  # 无法静态解析注册点, 不 fork
                 new_paths = []
                 for base in paths:
                     for tgt_func, tp in targets:

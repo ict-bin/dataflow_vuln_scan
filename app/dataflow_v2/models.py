@@ -125,7 +125,9 @@ class PropagationRecord:
     target_file: str = ""               # 目标 callee 文件
     call_line: int = 0                  # 调用点行号 (clang 据此标注分支)
     condition: str = ""                 # 传播条件 (人类可读; 分支互斥性由 clang 判)
-    is_external: bool = False           # 传播到外部/全局变量 → 触发跟踪 LLM
+    is_external: bool = False           # 传播到外部/全局数据变量 → 触发 nonlocal 跟踪 LLM
+    is_indirect_call: bool = False     # 函数指针/回调/dispatch 间接调用 → 触发 function_pointer tracker
+    dispatch_kind: str = ""            # 间接调用类型 (function_pointer_field/callback/vtable/dispatch_map)
     # clang 标注 (analyze_function 填, 编排器路径分叉消费):
     callsite_validated: bool = False    # clang 确认该 call_line 确有对 target_function 的 CallExpr
     branch_group_id: str = ""          # 调用点所属分支组 (if/switch); 同组不同 arm = 互斥
@@ -149,6 +151,7 @@ class PropagationRecord:
             "target_func_id": self.target_func_id, "target_function": self.target_function,
             "target_file": self.target_file, "call_line": self.call_line,
             "condition": self.condition, "is_external": 1 if self.is_external else 0,
+            "is_indirect_call": 1 if self.is_indirect_call else 0, "dispatch_kind": self.dispatch_kind,
             "callsite_validated": 1 if self.callsite_validated else 0,
             "branch_group_id": self.branch_group_id, "branch_arm_id": self.branch_arm_id,
             "branch_path": json.dumps(self.branch_path, ensure_ascii=False),
