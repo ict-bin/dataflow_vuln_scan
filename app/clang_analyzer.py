@@ -25,12 +25,16 @@ import hashlib
 import json
 import logging
 import os
+import re
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger("dvs.clang_analyzer")
+
+# CallExpr callee 名提取正则 (从调用文本取 ident)
+_CALL_NAME_RE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*")
 
 # ── libclang bootstrap ───────────────────────────────────────────────────────
 # 干净策略: 仅用 libclang PyPI 包 (自带与绑定版本匹配的原生库), 不再拼凑系统
@@ -234,6 +238,17 @@ def _walk(cursor: Any, branch_stack: list[dict], source_lines: list[str],
     if kind == _cindex.CursorKind.CALL_EXPR:
         ref = cursor.referenced
         name = ref.spelling if ref is not None else ""
+        if not name:
+            # 回退 1: 首子节点 (callee expr) spelling
+            kids = list(cursor.get_children())
+            if kids:
+                name = kids[0].spelling or ""
+        if not name:
+            # 回退 2: 从调用表达式文本正则取 ident(
+            txt = _cursor_text(cursor, source_lines)
+            m = _CALL_NAME_RE.match(txt)
+            if m:
+                name = m.group(1)
         if name and name in callee_names:
             children = list(cursor.get_children())
             # children: [callee_expr, arg0, arg1, ...]
@@ -410,7 +425,11 @@ def _collect_all_calls(func_cursor: Any, source_lines: list[str]) -> list[dict]:
             if not nm:
                 kids = list(cur.get_children())
                 if kids:
-                    nm = kids[0].spelling or _cursor_text(cur, source_lines) or ""
+                    nm = kids[0].spelling or ""
+            if not nm:
+                m = _CALL_NAME_RE.match(_cursor_text(cur, source_lines) or "")
+                if m:
+                    nm = m.group(1)
             out.append({"name": nm, "call_line": _line(cur)})
             for ch in cur.get_children():
                 walk(ch)
