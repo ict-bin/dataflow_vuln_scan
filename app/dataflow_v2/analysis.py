@@ -74,13 +74,10 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
         body = self._read_body(func)
 
         # 2) fork session
-        # fork session (非追加, 避免 session 膨胀; mining 用 _format_taint_context 摘要)
+        # fresh session (不 fork 父 session, 避免深度越深 session 膨胀 → LLM 输入巨大)
+        # mining 用 _format_taint_context 摘要 (callee 行为由 propagation description 携带)
         fork_session = self.sessions_dir / f"{_safe_name(func.name)}-taint.jsonl"
-        try:
-            if base_session and Path(base_session).exists():
-                safe_copyfile(base_session, str(fork_session))
-        except OSError:
-            pass
+        # 不复制 base_session: 每函数独立分析, 快且不膨胀
 
         # 3) 构造 prompt
         prompt = self._build_prompt(func, body, taint_params, pre_validations)
