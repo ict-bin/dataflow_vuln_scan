@@ -1505,8 +1505,8 @@ def get_task_vuln_graph(task_id: str, db: Session = Depends(get_db)):
     tcfg = row.task_config_json or {}
     if (tcfg.get("feature_flags") or {}).get("dataflow_v2"):
         graph = load_dataflow_v2_graph(run_root)
-        trace_tree = build_trace_tree(graph)  # 用 v1 的 trace tree builder (v2 数据已映射为 v1 格式)
-        summary = summarize_graph(graph)
+        trace_tree = build_v2_trace_tree(run_root)  # v2 专属 builder, 直接从 orchestration DFS 路径构建
+        summary = summarize_v2_graph(graph)
         return {
             "task_id": task_id,
             "available": bool(graph.get("analysis_runs") or graph.get("taint_nodes") or graph.get("vulnerability_findings")),
@@ -1797,8 +1797,13 @@ def get_task_result(task_id: str, db: Session = Depends(get_db)):
     # the round-based summary is incomplete for the new SQLite-based architecture.
     try:
         graph_run_root = latest_run_root if latest_run_root.exists() else run_root
-        graph = load_vuln_scan_graph(graph_run_root)
-        graph_summary = summarize_graph(graph)
+        tcfg = row.task_config_json or {}
+        if (tcfg.get("feature_flags") or {}).get("dataflow_v2"):
+            graph = load_dataflow_v2_graph(graph_run_root)
+            graph_summary = summarize_v2_graph(graph)
+        else:
+            graph = load_vuln_scan_graph(graph_run_root)
+            graph_summary = summarize_graph(graph)
         if graph_summary.get("runs", 0) > 0:
             if not summary.get("function_count"):
                 summary["function_count"] = graph_summary["runs"]

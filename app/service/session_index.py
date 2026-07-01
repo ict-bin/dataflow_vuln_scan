@@ -137,6 +137,22 @@ def _infer_path_descriptor(relative_path: str) -> dict:
         "flow_kind": "worker",
     }
     if normalized.startswith("sessions/"):
+        # V2 dataflow-v2 session pattern: d{NN}-{func}-{type}[-{suffix}]
+        v2_match = re.fullmatch(r"d(\d{2})-(.+)-(taint|vuln|track-.+|fptrack-.+)", stem)
+        if v2_match:
+            v2_depth = int(v2_match.group(1))
+            v2_func = v2_match.group(2)
+            v2_kind = v2_match.group(3)
+            v2_role = "vuln" if v2_kind == "vuln" else ("tracker" if (v2_kind.startswith("track") or v2_kind.startswith("fptrack")) else "sub_worker")
+            desc.update({
+                "role": v2_role,
+                "role_label": {"vuln": "Vuln Mining", "tracker": "Tracker", "sub_worker": "Taint Analysis"}.get(v2_role, "Worker"),
+                "module_name": v2_func,
+                "attempt": v2_depth,
+                "family_key": f"d{v2_depth:02d}::{v2_func}",
+                "flow_kind": "parallel",
+            })
+            return desc
         if stem.endswith("-base"):
             desc["family_key"] = stem
             return desc

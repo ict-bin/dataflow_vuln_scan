@@ -82,7 +82,7 @@ def _hits_to_candidates(hits: list[dict], store: DataflowStore) -> list[dict]:
 def resolve_external(
     cfg, source_root: str, sessions_dir: Path, store: DataflowStore,
     func: FunctionRecord, taint_name: str, taint_description: str,
-    cancel_event: Any = None, on_event: Callable = None,
+    cancel_event: Any = None, on_event: Callable = None, depth: int = 0,
 ) -> list[tuple[FunctionRecord, TaintParamInfo]]:
     """外部变量下游追踪: 脚本 grep + LLM 语义判断 (fresh session, 一个函数一个 user)"""
     acfg = cfg.workers.agents[0] if cfg.workers.agents else None
@@ -94,7 +94,7 @@ def resolve_external(
     candidates = _hits_to_candidates(hits, store)
     if not candidates:
         return []
-    fork_session = sessions_dir / f"{safe_name(func.name)}-track-{safe_name(taint_name)}.jsonl"
+    fork_session = sessions_dir / f"d{depth:02d}-{safe_name(func.name)}-track-{safe_name(taint_name)}.jsonl"
     system_prompt = (
         "你是数据流污点分析中的非局部变量使用点追踪器。\n"
         "目标: 判断给定函数是否是外部变量的真实下游使用点。\n"
@@ -187,7 +187,7 @@ def _prefix_suffix_candidates(source_root: str, keys: list[str],
 def resolve_indirect(
     cfg, source_root: str, sessions_dir: Path, store: DataflowStore,
     func: FunctionRecord, prop: PropagationRecord,
-    cancel_event: Any = None, on_event: Callable = None,
+    cancel_event: Any = None, on_event: Callable = None, depth: int = 0,
 ) -> list[tuple[FunctionRecord, TaintParamInfo]]:
     """函数指针注册点追踪: 前后缀匹配缩小候选 + LLM 判断 (fresh session)"""
     acfg = cfg.workers.agents[0] if cfg.workers.agents else None
@@ -202,7 +202,7 @@ def resolve_indirect(
     candidates = _prefix_suffix_candidates(source_root, keys, store)
     if not candidates:
         candidates = [{"name": "", "file": "", "func_id": ""}]
-    fork_session = sessions_dir / f"{safe_name(func.name)}-fptrack-{safe_name(fp_expr)}.jsonl"
+    fork_session = sessions_dir / f"d{depth:02d}-{safe_name(func.name)}-fptrack-{safe_name(fp_expr)}.jsonl"
     system_prompt = (
         "你是数据流污点分析中的函数指针/回调目标追踪器。\n"
         "目标: 从候选列表中找出函数指针的真实注册处理函数。\n"

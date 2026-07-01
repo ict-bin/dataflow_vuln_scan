@@ -74,7 +74,7 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
         body = self._read_body(func)
 
         # 2) fork session (v1 模型: copy base_session → 累积链上下文 A→A+B→A+B+C)
-        fork_session = self.sessions_dir / f"{_safe_name(func.name)}-taint.jsonl"
+        fork_session = self.sessions_dir / f"d{ctx.depth:02d}-{_safe_name(func.name)}-taint.jsonl"
         try:
             if base_session and Path(base_session).exists():
                 safe_copyfile(base_session, str(fork_session))
@@ -286,7 +286,7 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
         """函数指针注册点追踪: 前后缀匹配缩小候选 + LLM 判断 (fresh session)"""
         from .trackers import resolve_indirect
         return resolve_indirect(self.cfg, self.source_root, self.sessions_dir, store,
-                               func, prop, self.cancel_event, self.on_event)
+                               func, prop, self.cancel_event, self.on_event, ctx.depth)
 
     # ── 外部变量跟踪 (item 1) ────────────────────────────────────────────────
     def resolve_external_propagation(self, store: DataflowStore, func: FunctionRecord,
@@ -295,7 +295,7 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
         from .trackers import resolve_external
         return resolve_external(self.cfg, self.source_root, self.sessions_dir, store,
                                func, taint.name, taint.description or "",
-                               self.cancel_event, self.on_event)
+                               self.cancel_event, self.on_event, ctx.depth)
 
     # ── 漏洞挖掘 (item 2) ────────────────────────────────────────────────────
     def mine_vulns(self, store: DataflowStore, func: FunctionRecord,
@@ -306,7 +306,7 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
         acfg = self.cfg.workers.agents[0] if self.cfg.workers.agents else None
         if acfg is None:
             return 0
-        fork_session = self.sessions_dir / f"{_safe_name(func.name)}-vuln.jsonl"
+        fork_session = self.sessions_dir / f"d{ctx.depth:02d}-{_safe_name(func.name)}-vuln.jsonl"
         try:
             if base_session and Path(base_session).exists():
                 safe_copyfile(base_session, str(fork_session))
