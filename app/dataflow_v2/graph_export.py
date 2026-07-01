@@ -83,9 +83,9 @@ def load_dataflow_v2_graph(run_root: str | Path) -> dict[str, Any]:
         return {"analysis_runs": [], "taint_nodes": [], "taint_edges": [], "followups": [],
                 "vulnerability_findings": [], "v2_paths": [], "v2_available": False}
 
-    # functions → analysis_runs
+    # functions → analysis_runs (只含已分析函数, 非全量索引)
     fc = sqlite3.connect(v2 / "functions.db")
-    functions = _q(fc, "SELECT func_id, file, name, signature, start_line, end_line, description, processed_taints FROM functions")
+    functions = _q(fc, "SELECT func_id, file, name, signature, start_line, end_line, description, processed_taints FROM functions WHERE processed_taints != '[]'")
     fc.close()
     analysis_runs = [{
         "run_id": f["func_id"], "function": f["name"], "source_file": f["file"],

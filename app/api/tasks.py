@@ -1505,12 +1505,11 @@ def get_task_vuln_graph(task_id: str, db: Session = Depends(get_db)):
     tcfg = row.task_config_json or {}
     if (tcfg.get("feature_flags") or {}).get("dataflow_v2"):
         graph = load_dataflow_v2_graph(run_root)
-        trace_tree = build_v2_trace_tree(graph)
-        summary = summarize_v2_graph(graph)
+        trace_tree = build_trace_tree(graph)  # 用 v1 的 trace tree builder (v2 数据已映射为 v1 格式)
+        summary = summarize_graph(graph)
         return {
             "task_id": task_id,
-            "available": bool(graph.get("v2_available")),
-            "mode": "dataflow_v2",
+            "available": bool(graph.get("analysis_runs") or graph.get("taint_nodes") or graph.get("vulnerability_findings")),
             "run_root": str(run_root),
             "summary": summary,
             "trace_tree": trace_tree,
@@ -1521,7 +1520,6 @@ def get_task_vuln_graph(task_id: str, db: Session = Depends(get_db)):
     return {
         "task_id": task_id,
         "available": bool(graph.get("analysis_runs") or graph.get("taint_nodes") or graph.get("taint_edges") or graph.get("vulnerability_findings")),
-        "mode": "v1",
         "run_root": str(run_root),
         "summary": summarize_graph(graph),
         "trace_tree": trace_tree,
