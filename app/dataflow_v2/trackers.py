@@ -1,19 +1,12 @@
-"""dataflow-v2 tracker: 脚本搜索 + LLM 语义判断 (fresh session)。
+"""dataflow-v2 tracker: 数据库驱动 + LLM 语义判断 (fresh session)。
 
-两个 tracker:
-  - resolve_external: 外部变量下游使用追踪 (grep + LLM 判断, 一个函数一个 user)
-  - resolve_indirect: 函数指针注册点追踪 (前后缀匹配缩小候选 + LLM 判断)
-
-设计原则:
-  - 脚本做搜索 (grep/前后缀匹配, 快)
-  - LLM 做语义判断 (fresh session, 父函数信息放 prompt, 可有限探索)
-  - tracker 用全新 session (不 fork 父链, 避免膨胀)
+不 grep NFS: 查 functions.db 获取候选函数 + read_function_body 从原源文件按行读函数体。
+LLM 只做语义判断 (fresh session, 父函数信息放 prompt, 可有限探索)。
 """
 from __future__ import annotations
 
 import logging
 import re
-import subprocess
 from pathlib import Path
 from typing import Any, Callable
 
@@ -22,59 +15,43 @@ from ..vuln_report_utils import safe_name
 from ..parsers import _extract_json_object
 from .models import FunctionRecord, TaintParamInfo, PropagationRecord
 from .store import DataflowStore
-from .function_extractor import ensure_file_indexed
+from .function_extractor import ensure_file_indexed, read_function_body
 
 logger = logging.getLogger("dvs.dataflow_v2.trackers")
 
 
-def _grep_variable_refs(source_root: str, var_name: str, timeout: int = 15) -> list[dict]:
-    """Python grep 源码树找外部变量引用点 -> [{file, line, context}]"""
-    short = var_name.rsplit("->", 1)[-1].split(".")[-1]
-    try:
-        r = subprocess.run(
-            ["grep", "-rn", "--include=*.c", "--include=*.cpp", "--include=*.cc",
-             "--include=*.h", "--include=*.hpp", "-w", short, source_root],
-            capture_output=True, text=True, timeout=timeout)
-        hits = []
-        for line in r.stdout.strip().split("\n"):
-            if not line:
-                continue
-            parts = line.split(":", 2)
-            if len(parts) < 3:
-                continue
-            fpath, lineno, content = parts[0], parts[1], parts[2]
-            try:
-                rel = str(Path(fpath).relative_to(source_root).as_posix())
-            except ValueError:
-                continue
-            hits.append({"file": rel, "line": int(lineno), "context": content.strip()})
-        return hits
-    except Exception:
+def _find_refs_in_db(source_root: str, var_name: str, store: DataflowStore,
+                     exclude_func_id: str = "") -> list[dict]:
+    """查数据库所有函数, 读函数体, 找引用 var_name 的候选 (不 grep NFS)。"""
+    short = var_name.rsplit("->", 1)[-1].split(".")[-1].strip("() ")
+    if len(short) < 2:
         return []
-
-
-def _hits_to_candidates(hits: list[dict], store: DataflowStore) -> list[dict]:
-    """将 grep 命中点映射到所在函数 + 提取函数体 -> 候选列表"""
     candidates = []
-    seen_funcs = set()
-    for hit in hits:
-        rec = None
-        for f in store.list_functions():
-            if f.file == hit["file"] and f.start_line <= hit["line"] <= f.end_line:
-                rec = f
-                break
-        if rec is None or rec.func_id in seen_funcs:
+    seen = set()
+    for f in store.list_functions():
+        if f.func_id == exclude_func_id:
             continue
-        seen_funcs.add(rec.func_id)
-        body = ""
-        if rec.body_path and Path(rec.body_path).is_file():
-            try:
-                body = Path(rec.body_path).read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                pass
+        # 短名匹配 (C++ 限定名也查短名部分)
+        nm = f.name.rsplit("::", 1)[-1]
+        if short.lower() not in nm.lower():
+            # 读函数体检查是否引用该变量
+            body = read_function_body(source_root, f, max_lines=500)
+            if short not in body:
+                continue
+        else:
+            body = read_function_body(source_root, f, max_lines=500)
+        if f.func_id in seen:
+            continue
+        seen.add(f.func_id)
+        # 找到引用行
+        ref_line = ""
+        for i, line in enumerate(body.splitlines(), f.start_line):
+            if short in line:
+                ref_line = f"L{i}: {line.strip()}"
+                break
         candidates.append({
-            "function": rec.name, "file": rec.file, "line": hit["line"],
-            "context": hit["context"], "body": body[:8000], "func_id": rec.func_id,
+            "function": f.name, "file": f.file, "func_id": f.func_id,
+            "line": ref_line, "body": body[:8000],
         })
     return candidates
 
@@ -84,22 +61,23 @@ def resolve_external(
     func: FunctionRecord, taint_name: str, taint_description: str,
     cancel_event: Any = None, on_event: Callable = None, depth: int = 0,
 ) -> list[tuple[FunctionRecord, TaintParamInfo]]:
-    """外部变量下游追踪: 脚本 grep + LLM 语义判断 (fresh session, 一个函数一个 user)"""
+    """外部变量下游追踪: 查数据库 + 读函数体找引用 → LLM 判断 (fresh session)。"""
     acfg = cfg.workers.agents[0] if cfg.workers.agents else None
     if acfg is None:
         return []
-    hits = _grep_variable_refs(source_root, taint_name)
-    if not hits:
-        return []
-    candidates = _hits_to_candidates(hits, store)
+
+    # 1. 查数据库找候选 (不 grep NFS)
+    candidates = _find_refs_in_db(source_root, taint_name, store, exclude_func_id=func.func_id)
     if not candidates:
         return []
+
+    # 2. LLM fresh session, 一个函数一个 user
     fork_session = sessions_dir / f"d{depth:02d}-{safe_name(func.name)}-track-{safe_name(taint_name)}.jsonl"
     system_prompt = (
         "你是数据流污点分析中的非局部变量使用点追踪器。\n"
         "目标: 判断给定函数是否是外部变量的真实下游使用点。\n"
         "每个 user 消息提供一个候选函数的完整函数体和引用命中点。\n"
-        "可以 read/grep 探索 (如 g_1=g_2 链), 但候选已预筛。\n"
+        "可以 read 验证 (如 g_1=g_2 链), 但候选已从数据库预筛。\n"
         '只输出 JSON: {"confirmed": true/false, "reason": "..."}\n'
     )
     confirmed = []
@@ -107,8 +85,8 @@ def resolve_external(
         user_msg = (
             f"## 父函数: {func.file}::{func.name}\n"
             f"外部变量: `{taint_name}` ({taint_description})\n\n"
-            f"## 候选函数: {cand['function']} ({cand['file']} L{cand['line']})\n"
-            f"引用命中: `{cand['context']}`\n\n"
+            f"## 候选函数: {cand['function']} ({cand['file']})\n"
+            f"引用命中: `{cand['line']}`\n\n"
             f"## 函数体:\n```c\n{cand['body']}\n```\n\n"
             f"这个函数是否是 `{taint_name}` 的真实下游污点使用点?"
         )
@@ -134,9 +112,7 @@ def resolve_external(
 
 
 def _extract_fp_key(fp_expr: str) -> list[str]:
-    """从函数指针表达式提取关键部分用于前后缀匹配。
-    ctxt->sax->processingInstruction -> [processingInstruction, processing, Instruction]
-    """
+    """从函数指针表达式提取关键部分用于前后缀匹配。"""
     last = fp_expr.rsplit("->", 1)[-1].rsplit(".", 1)[-1].strip("() ")
     if not last:
         return []
@@ -148,39 +124,22 @@ def _extract_fp_key(fp_expr: str) -> list[str]:
     return list(dict.fromkeys(k for k in keys if len(k) >= 3))
 
 
-def _prefix_suffix_candidates(source_root: str, keys: list[str],
-                               store: DataflowStore, timeout: int = 15) -> list[dict]:
-    """按前后缀匹配在全局索引中缩小候选范围"""
+def _prefix_suffix_candidates_from_db(source_root: str, keys: list[str],
+                                       store: DataflowStore) -> list[dict]:
+    """查数据库按前后缀匹配缩小候选范围 (不 grep NFS)。"""
     candidates = []
     seen = set()
-    all_funcs = store.list_functions()
-    for f in all_funcs:
+    for f in store.list_functions():
         nm = f.name.rsplit("::", 1)[-1]
         for key in keys:
             if nm.lower().startswith(key.lower()) or nm.lower().endswith(key.lower()):
                 if f.func_id not in seen:
                     seen.add(f.func_id)
-                    candidates.append({"name": f.name, "file": f.file, "func_id": f.func_id})
+                    body = read_function_body(source_root, f, max_lines=200)
+                    candidates.append({
+                        "name": f.name, "file": f.file, "func_id": f.func_id, "body": body[:4000],
+                    })
                 break
-    for key in keys:
-        try:
-            r = subprocess.run(
-                ["grep", "-rl", "--include=*.c", "--include=*.cpp", "--include=*.h",
-                 "-i", f"\\b{key}", source_root],
-                capture_output=True, text=True, timeout=timeout)
-            for line in r.stdout.strip().split("\n"):
-                if not line:
-                    continue
-                try:
-                    rel = str(Path(line).relative_to(source_root).as_posix())
-                except ValueError:
-                    continue
-                for f in all_funcs:
-                    if f.file == rel and f.func_id not in seen:
-                        seen.add(f.func_id)
-                        candidates.append({"name": f.name, "file": f.file, "func_id": f.func_id})
-        except Exception:
-            pass
     return candidates
 
 
@@ -189,7 +148,7 @@ def resolve_indirect(
     func: FunctionRecord, prop: PropagationRecord,
     cancel_event: Any = None, on_event: Callable = None, depth: int = 0,
 ) -> list[tuple[FunctionRecord, TaintParamInfo]]:
-    """函数指针注册点追踪: 前后缀匹配缩小候选 + LLM 判断 (fresh session)"""
+    """函数指针注册点追踪: 数据库前后缀匹配 + LLM 判断 (fresh session)。"""
     acfg = cfg.workers.agents[0] if cfg.workers.agents else None
     if acfg is None:
         return []
@@ -199,32 +158,27 @@ def resolve_indirect(
     keys = _extract_fp_key(fp_expr)
     if not keys:
         return []
-    candidates = _prefix_suffix_candidates(source_root, keys, store)
+
+    # 1. 查数据库前后缀匹配 (不 grep NFS)
+    candidates = _prefix_suffix_candidates_from_db(source_root, keys, store)
     if not candidates:
-        candidates = [{"name": "", "file": "", "func_id": ""}]
+        candidates = [{"name": "", "file": "", "func_id": "", "body": ""}]
+
+    # 2. LLM fresh session: 从候选中找注册处理函数
     fork_session = sessions_dir / f"d{depth:02d}-{safe_name(func.name)}-fptrack-{safe_name(fp_expr)}.jsonl"
     system_prompt = (
         "你是数据流污点分析中的函数指针/回调目标追踪器。\n"
         "目标: 从候选列表中找出函数指针的真实注册处理函数。\n"
-        "可以 read/grep 验证候选, 但候选已前后缀预筛, 优先在候选中判断。\n"
+        "可以 read 验证候选, 但候选已从数据库前后缀预筛, 优先在候选中判断。\n"
         '输出 JSON: {"handlers": [{"function": "...", "file": "...", "reason": "..."}]}\n'
     )
-    cand_info = []
-    for c in candidates[:30]:
-        rec = store.get_function(c["func_id"]) if c["func_id"] else None
-        body = ""
-        if rec and rec.body_path and Path(rec.body_path).is_file():
-            try:
-                body = Path(rec.body_path).read_text(encoding="utf-8", errors="replace")[:4000]
-            except OSError:
-                pass
-        cand_info.append(f"### {c['name']} ({c['file']})\n```c\n{body}\n```")
+    cand_info = [f"### {c['name']} ({c['file']})\n```c\n{c['body']}\n```" for c in candidates[:30]]
     prompt = (
         f"## 父函数: {func.file}::{func.name}\n"
         f"函数指针: `{fp_expr}`\n"
         f"污点: {prop.target_taint_name or prop.source_taint_name}\n"
         f"调用点: L{prop.call_line}\n\n"
-        f"## 候选函数 (前后缀匹配预筛):\n" + "\n".join(cand_info) + "\n\n"
+        f"## 候选函数 (数据库前后缀匹配预筛):\n" + "\n".join(cand_info) + "\n\n"
         f"从候选中找出 `{fp_expr}` 的真实注册处理函数。如果候选中无匹配, 可自行 grep 搜索。"
     )
     output = run_agent(

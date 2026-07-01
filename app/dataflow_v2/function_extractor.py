@@ -1,80 +1,101 @@
-"""dataflow-v2 函数提取器 (tree-sitter)。
+"""tree-sitter 函数提取: 全量索引源码目录所有函数到 functions.db。
 
-对整个文件做 tree-sitter parse, 提取所有函数定义入函数库, 并把每个函数体
-单独写入 run/functions/<rel>__<name>__<hash>.c (body_path 索引指向这里)。
-
-复用 function_resolver._extract_functions_tree_sitter 的 tree-sitter 装载方式,
-扩展为: 提取 end_line + signature + 函数体切片落盘。
+不单独存函数体文件 (避免拷贝整份源码)。数据库存 file + start_line + end_line,
+需要函数体时用 read_function_body() 从原源文件按行读取。
 """
 from __future__ import annotations
 
 import hashlib
+import logging
 from pathlib import Path
 from typing import Any
 
 from .models import FunctionRecord
 from .store import DataflowStore
 
-_CPP_EXTS = {".cc", ".cpp", ".cxx", ".hpp", ".hh", ".hxx"}
+logger = logging.getLogger("dvs.dataflow_v2.function_extractor")
+
+_TS_AVAILABLE = False
+try:
+    import tree_sitter as _ts
+    _TS_AVAILABLE = True
+except ImportError:
+    _TS_AVAILABLE = False
+
+_LANG_CACHE: dict[str, Any] = {}
+_PARSER_CACHE: dict[str, Any] = {}
 
 
-def _language(path: Path) -> Any:
-    from tree_sitter import Language
-    if path.suffix.lower() in _CPP_EXTS:
-        import tree_sitter_cpp
-        return Language(tree_sitter_cpp.language())
-    import tree_sitter_c
-    return Language(tree_sitter_c.language())
-
-
-def _parser_for(path: Path) -> Any:
-    from tree_sitter import Parser
-    parser = Parser()
-    try:
-        parser.language = _language(path)            # tree-sitter >= 0.21 API
-    except Exception:
-        parser.set_language(_language(path))         # 旧 API
-    return parser
+def _parser_for(path: Path):
+    ext = path.suffix.lower()
+    if ext not in _LANG_CACHE:
+        if ext in (".c", ".h"):
+            try:
+                import tree_sitter_c as _c
+                lang = _ts.Language(_c.language())
+            except ImportError:
+                return None
+        elif ext in (".cpp", ".cc", ".cxx", ".hpp"):
+            try:
+                import tree_sitter_cpp as _cpp
+                lang = _ts.Language(_cpp.language())
+            except ImportError:
+                return None
+        else:
+            return None
+        _LANG_CACHE[ext] = lang
+    lang = _LANG_CACHE[ext]
+    if lang not in _PARSER_CACHE:
+        _PARSER_CACHE[lang] = _ts.Parser(lang)
+    return _PARSER_CACHE[lang]
 
 
 def _func_signature(node: Any, source: bytes) -> str:
-    """从 function_definition 节点取声明部分 (去除 body)。"""
-    # function_definition 子节点: (storage)*(type) declarator (params) compound
-    # 简单取第一行 (declaration) 直至 '{'
+    body = node.child_by_field_name("body")
+    end = body.start_byte if body is not None else node.end_byte
+    sig = source[node.start_byte:end].decode("utf-8", "replace").strip()
+    return sig[:500]
+
+
+def read_function_body(source_root: str, func: FunctionRecord, max_lines: int = 0) -> str:
+    """从原源文件按 start_line/end_line 读取函数体 (不依赖 body_path 文件)。"""
+    src_path = Path(source_root) / func.file
+    if not src_path.is_file():
+        return f"// 源文件不可读: {func.file}\n// 行 {func.start_line}-{func.end_line}"
     try:
-        start = node.start_byte
-        body = node.child_by_field_name("body")
-        end = body.start_byte if body is not None else node.end_byte
-        decl = source[start:end].decode("utf-8", "replace").strip()
-        return " ".join(decl.split())
-    except Exception:
-        return ""
+        lines = src_path.read_text(encoding="utf-8", errors="replace").splitlines()
+        start = max(0, func.start_line - 1)
+        end = min(len(lines), func.end_line)
+        body_lines = lines[start:end]
+        if max_lines > 0 and len(body_lines) > max_lines:
+            body_lines = body_lines[:max_lines]
+        return "\n".join(body_lines)
+    except OSError as e:
+        return f"// 读取失败: {e}\n// 行 {func.start_line}-{func.end_line}"
 
 
-def extract_file_functions(source_root: str | Path, rel_file: str,
-                           store: DataflowStore) -> list[FunctionRecord]:
-    """提取一个文件的全部函数入库 + 函数体落盘。返回新建/更新的 FunctionRecord 列表。
-
-    若文件已全部入库 (按 file + 各函数起止行命中) 则跳过落盘, 仍返回记录。
-    """
+def extract_file_functions(source_root: str, rel_file: str, store: DataflowStore) -> list[FunctionRecord]:
+    """解析单个源文件, 提取所有函数, 存入 functions.db (不写 body 文件)。"""
+    if not _TS_AVAILABLE:
+        return []
     src_path = Path(source_root) / rel_file
     if not src_path.is_file():
         return []
     source = src_path.read_bytes()
     try:
         parser = _parser_for(src_path)
+        if parser is None:
+            return []
         tree = parser.parse(source)
     except Exception:
         return []
 
-    funcs_dir = store.run_dir / "functions"
     records: list[FunctionRecord] = []
     root = tree.root_node
 
     def walk(node: Any) -> None:
         if node.type == "function_definition":
             name_node = node.child_by_field_name("declarator")
-            # 取函数名: C 直接 identifier; C++ 方法可能 scoped_identifier (Class::method)
             nm = ""
             cur = name_node
             while cur is not None:
@@ -89,65 +110,44 @@ def extract_file_functions(source_root: str | Path, rel_file: str,
             signature = _func_signature(node, source)
             body_bytes = source[node.start_byte:node.end_byte]
             func_hash = hashlib.sha1(body_bytes).hexdigest()[:16]
-            # 函数体落盘
-            safe_file = rel_file.replace("/", "__").replace("\\", "__")
-            body_name = f"{safe_file}__{nm or 'unk'}__{func_hash}.c"
-            body_path_obj = funcs_dir / body_name
-            try:
-                body_path_obj.write_bytes(body_bytes)
-            except OSError:
-                pass
             rec = FunctionRecord(
                 file=rel_file, name=nm or "_unknown_", signature=signature,
                 start_line=start_line, end_line=end_line,
-                body_path=str(body_path_obj), func_hash=func_hash,
+                body_path="", func_hash=func_hash,
             )
-            store.upsert_function(rec)
             records.append(rec)
-        for ch in node.children:
-            walk(ch)
+            store.upsert_function(rec)
+        for child in node.children:
+            walk(child)
 
     walk(root)
     return records
 
 
-def ensure_file_indexed(source_root: str | Path, rel_file: str,
-                        store: DataflowStore) -> list[FunctionRecord]:
-    """步骤 6(1): 若函数库里没有该文件的函数, 则 tree-sitter 提取存库 + 落盘。"""
+def ensure_file_indexed(source_root: str, rel_file: str, store: DataflowStore) -> None:
+    """确保某文件已索引 (如跟入函数所在文件尚未索引)。"""
     existing = [f for f in store.list_functions() if f.file == rel_file]
     if existing:
-        return existing
-    return extract_file_functions(source_root, rel_file, store)
+        return
+    extract_file_functions(source_root, rel_file, store)
 
 
-_SRC_EXTS = (".c", ".cc", ".cpp", ".cxx")
-
-
-def index_source_tree(source_root: str | Path, store: DataflowStore,
-                       on_progress: Any = None) -> int:
-    """冷启动全局函数索引: 遍历源码目录所有 .c/.cpp 文件, tree-sitter 提取全部函数入库。
-
-    一次性建全局函数库 (复用), 之后任何 callee 按名即可系统解析其所在文件,
-    不依赖 LLM 提供 target_file。跳过测试/build 产物目录。
-    """
-    root = Path(source_root)
-    n = 0
-    for path in root.rglob("*"):
-        if path.suffix.lower() not in _SRC_EXTS:
-            continue
-        parts = set(path.parts)
-        if parts & {"test", "tests", "fuzz", "build", "out", "cmake-build-debug",
-                   "cmake-build-release", ".git", "third_party", "vendor"}:
+def index_source_tree(source_root: str, store: DataflowStore) -> int:
+    """全量索引源码目录 (冷启动)。返回索引的文件数。"""
+    if not _TS_AVAILABLE:
+        logger.warning("tree-sitter 不可用, 跳过源码索引")
+        return 0
+    count = 0
+    src = Path(source_root)
+    exts = {".c", ".h", ".cpp", ".cc", ".cxx", ".hpp"}
+    for path in src.rglob("*"):
+        if path.suffix.lower() not in exts:
             continue
         try:
-            rel = path.relative_to(root).as_posix()
+            rel = str(path.relative_to(src)).replace("\\", "/")
         except ValueError:
             continue
-        try:
-            extract_file_functions(source_root, rel, store)
-            n += 1
-            if on_progress:
-                on_progress(n)
-        except Exception:
-            continue
-    return n
+        extract_file_functions(source_root, rel, store)
+        count += 1
+    logger.info("indexed %d source files, %d functions", count, len(store.list_functions()))
+    return count

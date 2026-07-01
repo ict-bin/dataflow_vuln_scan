@@ -273,12 +273,8 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
         )
 
     def _read_body(self, func: FunctionRecord) -> str:
-        if func.body_path and Path(func.body_path).is_file():
-            try:
-                return Path(func.body_path).read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                pass
-        return f"// body_path 不可读: {func.body_path}\n// 行 {func.start_line}-{func.end_line}"
+        from .function_extractor import read_function_body
+        return read_function_body(self.source_root, func, max_lines=500)
 
     # ── 函数指针间接调用跟踪 (复用 V1 function_pointer tracker) ──────────────
     def resolve_indirect_call(self, store: DataflowStore, func: FunctionRecord,
@@ -413,11 +409,16 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
     def _format_taint_context(self, func: FunctionRecord, tp: TaintParamInfo,
                               ctx: PathContext, taints: list[TaintRecord],
                               props: list[PropagationRecord]) -> str:
+        from .function_extractor import read_function_body
         pre_val = "\n".join(f"- {v.condition}: {v.content}" for v in ctx.pre_validations) or "(无)"
+        func_body = read_function_body(self.source_root, func, max_lines=500)
         lines = [f"## 函数: {func.file}::{func.name} (行 {func.start_line}-{func.end_line})",
                  f"功能: {func.description or '(待分析)'}",
                  f"入口污点: 位置 {tp.positions} 签名 {tp.signature} 名字 {tp.names}",
-                 f"前置校验链:\n{pre_val}", "", "## 污点变量:"]
+                 f"前置校验链:\n{pre_val}", "",
+                 "## 函数体源码:",
+                 f"```c\n{func_body}\n```", "",
+                 "## 污点变量:"]
         for t in taints:
             lines.append(f"- {t.name} ({t.signature}): {t.description}")
         lines.append("\n## 传播路径:")

@@ -6,7 +6,7 @@
   propagations.db    传播库
   orchestration.db   编排库
 
-函数体存放在 run/functions/ (body_path 索引指向这里)。
+函数体不单独存文件 (数据库有 start_line/end_line, 需要时 read_function_body 从原源文件按行读)。
 
 设计原则:
 - 四库物理隔离 (匹配 "几个数据库" 的模型), 各自独立连接; 编排库不 JOIN
@@ -115,7 +115,7 @@ class DataflowStore:
     def __init__(self, run_dir: str | Path) -> None:
         self.run_dir = Path(run_dir)
         self.run_dir.mkdir(parents=True, exist_ok=True)
-        (self.run_dir / "functions").mkdir(parents=True, exist_ok=True)
+        (self.run_dir).mkdir(parents=True, exist_ok=True)
         self._paths = {
             "functions": self.run_dir / "functions.db",
             "taints": self.run_dir / "taints.db",
