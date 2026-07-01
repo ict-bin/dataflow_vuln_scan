@@ -27,6 +27,7 @@ from ..parsers import _extract_json_object
 from ..runner import run_agent
 from ..vuln_intake_reporter import report_finding_to_intake
 from ..vuln_report_utils import (EMBEDDED_VULN_MINING_SKILL as _EMBEDDED_VULN_MINING_SKILL,
+                                  build_v2_system_prompt as _build_v2_system_prompt,
                                   format_vuln_report_md as _format_vuln_report_md,
                                   read_prompt as _read_prompt, safe_name as _safe_name)
 from ..vuln_store import VulnFindingRecord, VulnScanStore
@@ -87,11 +88,17 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
         if acfg is None:
             return AnalysisResult(description="no agent configured", self_contained=False)
 
-        # 4) run_agent
+        # 4) run_agent (注入 v2 DB 技能 + 定制技能, 设环境变量)
+        v2_system = _build_v2_system_prompt(custom="taint-analysis")
+        _taint_prompt = _read_prompt("prompts/v2/taint-analysis.md")
+        system_prompt = f"{v2_system}\n\n{_taint_prompt}" if v2_system else _taint_prompt
+        v2_env = {"DVS_V2_DB_DIR": str(self.vuln_root.parent / "dataflow-v2"),
+                  "DVS_SOURCE_ROOT": self.source_root}
         output = run_agent(
             prompt=prompt, model=acfg.model, tools=acfg.tools or self.cfg.workers.default_tools,
             cwd=str(self.run_dir), session_file=str(fork_session),
-            system_prompt=_TAINT_ANALYSIS_PROMPT, cancel_event=self.cancel_event,
+            system_prompt=system_prompt, cancel_event=self.cancel_event,
+            env=v2_env,
             run_timeout_seconds=self.cfg.agent_run_timeout_seconds,
             timeout_retry_enabled=self.cfg.agent_timeout_retry_enabled,
             timeout_max_retries=self.cfg.agent_timeout_max_retries,
@@ -320,13 +327,17 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
             f"```markdown\n{dataflow_text[:30000]}\n```\n\n"
             "结合链上 callee 的行为 (如返回借用指针/分配/不释放等), 判断本函数是否存在漏洞。输出 JSON: {\"findings\":[]}。"
         )
-        miner_system = ("# 内嵌技能：mine-dataflow-vulnerability\n"
-                        "禁止再读取 skills/mine-dataflow-vulnerability/SKILL.md。\n\n"
-                        f"{_EMBEDDED_VULN_MINING_SKILL}\n\n{self._vuln_miner_prompt}")
+        miner_system = (_build_v2_system_prompt(custom="vuln-mining")
+                         + "\n\n# 内嵌技能：mine-dataflow-vulnerability\n"
+                           "禁止再读取 skills/mine-dataflow-vulnerability/SKILL.md。\n\n"
+                         f"{_EMBEDDED_VULN_MINING_SKILL}\n\n{self._vuln_miner_prompt}")
+        v2_env = {"DVS_V2_DB_DIR": str(self.vuln_root.parent / "dataflow-v2"),
+                  "DVS_SOURCE_ROOT": self.source_root}
         output = run_agent(
             prompt=prompt, model=acfg.model, tools=acfg.tools or self.cfg.workers.default_tools,
             cwd=str(self.vuln_root.parent), session_file=str(fork_session),
             system_prompt=miner_system, cancel_event=self.cancel_event,
+            env=v2_env,
             run_timeout_seconds=self.cfg.agent_run_timeout_seconds,
             timeout_retry_enabled=self.cfg.agent_timeout_retry_enabled,
             timeout_max_retries=self.cfg.agent_timeout_max_retries,

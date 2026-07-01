@@ -122,3 +122,31 @@ def format_vuln_report_md(item: dict, finding_id: str, source_file: str,
 
 # 内嵌技能文本 (v1 vuln_workflow 与 v2 mine_vulns 共用)
 EMBEDDED_VULN_MINING_SKILL = read_prompt("skills/mine-dataflow-vulnerability/SKILL.md")
+
+# V2 数据库使用技能 (所有 v2 LLM 共用, 提前注入 system prompt 减少轮次)
+EMBEDDED_V2_DB_SKILL = read_prompt("skills/v2/v2-database/SKILL.md")
+
+# V2 定制技能 (per-LLM, 按需注入)
+_V2_CUSTOM_SKILLS = {
+    "taint-analysis": read_prompt("skills/v2/custom/taint-analysis.md"),
+    "vuln-mining": read_prompt("skills/v2/custom/vuln-mining.md"),
+    "tracker": read_prompt("skills/v2/custom/tracker.md"),
+}
+
+
+def build_v2_system_prompt(custom: str | None = None) -> str:
+    """构建 V2 LLM 的 system prompt: 通用 DB 技能 + 可选定制定技能。
+
+    Args:
+        custom: 定制技能名 (taint-analysis/vuln-mining/tracker), None=不加定制。
+    Returns:
+        拼接好的 system prompt 片段 (嵌入 DB 技能 + 定制技能)。
+    """
+    parts = []
+    if EMBEDDED_V2_DB_SKILL:
+        parts.append(f"# 内嵌技能：v2-database\n"
+                     f"以下技能已完整嵌入, 禁止再通过 read/bash 加载 SKILL.md。\n\n"
+                     f"{EMBEDDED_V2_DB_SKILL}")
+    if custom and custom in _V2_CUSTOM_SKILLS and _V2_CUSTOM_SKILLS[custom]:
+        parts.append(f"# 定制技能：{custom}\n\n{_V2_CUSTOM_SKILLS[custom]}")
+    return "\n\n".join(parts)

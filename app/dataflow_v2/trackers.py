@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..runner import run_agent
-from ..vuln_report_utils import safe_name
+from ..vuln_report_utils import safe_name, build_v2_system_prompt
 from ..parsers import _extract_json_object
 from .models import FunctionRecord, TaintParamInfo, PropagationRecord
 from .store import DataflowStore
@@ -73,13 +73,16 @@ def resolve_external(
 
     # 2. LLM fresh session, 一个函数一个 user
     fork_session = sessions_dir / f"d{depth:02d}-{safe_name(func.name)}-track-{safe_name(taint_name)}.jsonl"
-    system_prompt = (
+    v2_system = build_v2_system_prompt(custom="tracker")
+    system_prompt = (v2_system + "\n\n" if v2_system else "") + (
         "你是数据流污点分析中的非局部变量使用点追踪器。\n"
         "目标: 判断给定函数是否是外部变量的真实下游使用点。\n"
         "每个 user 消息提供一个候选函数的完整函数体和引用命中点。\n"
         "可以 read 验证 (如 g_1=g_2 链), 但候选已从数据库预筛。\n"
         '只输出 JSON: {"confirmed": true/false, "reason": "..."}\n'
     )
+    v2_env = {"DVS_V2_DB_DIR": str(sessions_dir.parent / "dataflow-v2"),
+              "DVS_SOURCE_ROOT": source_root}
     confirmed = []
     for cand in candidates:
         user_msg = (
@@ -97,6 +100,7 @@ def resolve_external(
             timeout_retry_enabled=cfg.agent_timeout_retry_enabled,
             timeout_max_retries=cfg.agent_timeout_max_retries,
             pi_max_retries=cfg.pi_max_retries, pi_retry_delay=cfg.pi_retry_delay,
+            env=v2_env,
             task_context={"task_id": "", "task_root": "", "task_run_root": "",
                           "task_pi_dir": "", "agent_role": "workers"},
         )
@@ -166,12 +170,15 @@ def resolve_indirect(
 
     # 2. LLM fresh session: 从候选中找注册处理函数
     fork_session = sessions_dir / f"d{depth:02d}-{safe_name(func.name)}-fptrack-{safe_name(fp_expr)}.jsonl"
-    system_prompt = (
+    v2_system = build_v2_system_prompt(custom="tracker")
+    system_prompt = (v2_system + "\n\n" if v2_system else "") + (
         "你是数据流污点分析中的函数指针/回调目标追踪器。\n"
         "目标: 从候选列表中找出函数指针的真实注册处理函数。\n"
         "可以 read 验证候选, 但候选已从数据库前后缀预筛, 优先在候选中判断。\n"
         '输出 JSON: {"handlers": [{"function": "...", "file": "...", "reason": "..."}]}\n'
     )
+    v2_env = {"DVS_V2_DB_DIR": str(sessions_dir.parent / "dataflow-v2"),
+              "DVS_SOURCE_ROOT": source_root}
     cand_info = [f"### {c['name']} ({c['file']})\n```c\n{c['body']}\n```" for c in candidates[:30]]
     prompt = (
         f"## 父函数: {func.file}::{func.name}\n"
@@ -188,6 +195,7 @@ def resolve_indirect(
         timeout_retry_enabled=cfg.agent_timeout_retry_enabled,
         timeout_max_retries=cfg.agent_timeout_max_retries,
         pi_max_retries=cfg.pi_max_retries, pi_retry_delay=cfg.pi_retry_delay,
+        env=v2_env,
         task_context={"task_id": "", "task_root": "", "task_run_root": "",
                       "task_pi_dir": "", "agent_role": "workers"},
     )
