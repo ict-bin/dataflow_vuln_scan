@@ -239,17 +239,8 @@ class DfsOrchestrator:
     def _run_path(self, steps: list[ChainStep], base_accumulated: list[Validation],
                   func: FunctionRecord, base_session: str, ctx: PathContext,
                   depth: int, errs: list[BaseException] | None) -> None:
-        """运行一条有序链: 链内严格顺序, 校验链累加 + 子回传。
-        并发时 fork 父链 session → 路径独立累积 (避免共享文件竞争); 路径完成后追加回父链。"""
+        """运行一条有序链: 链内严格顺序, 校验链累加 + 子回传。"""
         try:
-            # 并发: fork 父链 session 为路径独立 session; 顺序: 直接用父链 session (追加)
-            import shutil as _sh
-            if errs is not None and base_session and Path(base_session).exists():
-                path_session = str(Path(base_session).parent / f"{Path(base_session).stem}-path{depth}-{id(steps):x}.jsonl")
-                try: _sh.copy2(base_session, path_session)
-                except OSError: path_session = base_session
-            else:
-                path_session = base_session
             accumulated = list(base_accumulated)
             for step in steps:
                 incoming = list(accumulated) + list(step.validations)
@@ -262,18 +253,8 @@ class DfsOrchestrator:
                 sub_ctx = ctx.fork(_path_id(step.func.func_id, step.taint_params.signature, str(depth + 1)))
                 sub_ctx.pre_validations = list(incoming)
                 child_fb = self._process(step.func, step.taint_params, incoming,
-                                         path_session, sub_ctx, depth + 1)
-                accumulated.extend(child_fb)   # 校验链回传: 下一步 callee 可见
-            # 路径完成: 追加回父链 session (供父 mining 看到全部分支)
-            if errs is not None and path_session != base_session and path_session and Path(path_session).exists():
-                try:
-                    with open(path_session, encoding="utf-8", errors="replace") as src:
-                        cont = src.read()
-                    if base_session:
-                        with open(base_session, "a", encoding="utf-8") as dst:
-                            dst.write(cont)
-                except OSError:
-                    pass
+                                         base_session, sub_ctx, depth + 1)
+                accumulated.extend(child_fb)
         except BaseException as exc:
             if errs is not None:
                 errs.append(exc)

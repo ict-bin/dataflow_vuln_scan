@@ -74,15 +74,11 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
         body = self._read_body(func)
 
         # 2) fork session
-        # 链 session 累积: 追加写到 base_session (根→子→孙 同一文件, 链上下文增长);
-        # mining fork 自此即得全链。根 (base_session 空) 新建链 session。
-        if base_session and Path(base_session).exists():
-            session_file = base_session  # 追加 (链累积)
-        else:
-            session_file = str(self.sessions_dir / f"{_safe_name(func.name)}-chain.jsonl")
+        # fork session (非追加, 避免 session 膨胀; mining 用 _format_taint_context 摘要)
+        fork_session = self.sessions_dir / f"{_safe_name(func.name)}-taint.jsonl"
         try:
             if base_session and Path(base_session).exists():
-                pass  # 追加模式, 不复制
+                safe_copyfile(base_session, str(fork_session))
         except OSError:
             pass
 
@@ -95,7 +91,7 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
         # 4) run_agent
         output = run_agent(
             prompt=prompt, model=acfg.model, tools=acfg.tools or self.cfg.workers.default_tools,
-            cwd=str(self.run_dir), session_file=session_file,
+            cwd=str(self.run_dir), session_file=str(fork_session),
             system_prompt=_TAINT_ANALYSIS_PROMPT, cancel_event=self.cancel_event,
             run_timeout_seconds=self.cfg.agent_run_timeout_seconds,
             timeout_retry_enabled=self.cfg.agent_timeout_retry_enabled,
@@ -112,7 +108,7 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
 
         # 5) 解析 JSON
         parsed = _extract_json_object(output.output, "propagations") or {}
-        return self._build_result(store, func, taint_params, parsed, Path(session_file))
+        return self._build_result(store, func, taint_params, parsed, fork_session)
 
     # ── 结果构造 + clang 标注 ───────────────────────────────────────────────
     def _build_result(self, store: DataflowStore, func: FunctionRecord,
@@ -220,14 +216,42 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
         except Exception:
             return False
 
+    def _search_callee_file(self, callee_name: str) -> str:
+        """按需搜索: callee 不在已索引文件时, grep 源码树找其定义文件。"""
+        import subprocess
+        short = callee_name.rsplit("::", 1)[-1]
+        try:
+            r = subprocess.run(
+                ["grep", "-rl", "--include=*.c", "--include=*.cpp", "--include=*.cc",
+                 f"\\b{short}\\s*\\(", self.source_root],
+                capture_output=True, text=True, timeout=30)
+            files = [f for f in r.stdout.strip().split("\n") if f]
+            if not files:
+                return ""
+            # 取第一个匹配, 转相对路径
+            for f in files:
+                try:
+                    return str(Path(f).relative_to(self.source_root).as_posix())
+                except ValueError:
+                    continue
+            return ""
+        except Exception:
+            return ""
+
     def _resolve_target_func_id(self, store: DataflowStore, prop: PropagationRecord) -> str:
-        """从全局函数库按 callee 名解析其 func_id (系统解析, 不依赖 LLM target_file)。
-        仅跟入源码目录内的文件。"""
+        """按 callee 名解析 func_id (系统解析, 不依赖 LLM target_file)。
+        先查已索引库, 找不到则 grep 源码树按需索引其文件。"""
         if not prop.target_function:
             return ""
         rec = store.find_function(prop.target_function)
         if rec is None:
-            return ""  # 全局库中找不到该 callee (外部库/系统 API), 不递归
+            # 按需: grep 源码树找 callee 定义文件 → 索引 → 重试
+            fpath = self._search_callee_file(prop.target_function)
+            if fpath and self._within_source_root(fpath):
+                ensure_file_indexed(self.source_root, fpath, store)
+                rec = store.find_function(prop.target_function)
+        if rec is None:
+            return ""  # 全局库+源码树均找不到 (外部库/系统 API), 不递归
         if rec.file and not self._within_source_root(rec.file):
             self._emit("v2_out_of_scope_skipped", function=prop.target_function,
                        file=rec.file, reason="outside_source_root")
@@ -376,30 +400,20 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
     def mine_vulns(self, store: DataflowStore, func: FunctionRecord,
                    taint_params: TaintParamInfo, ctx: PathContext,
                    base_session: str = "") -> int:
-        """fork 漏洞挖掘会话: 继承整条链 taint 分析 session (base_session 含从根到本函数的全链上下文),
-        再提示分析本函数内的漏洞。存 finding + 上报 intake。"""
+        """fork 漏洞挖掘会话: 基于 _format_taint_context 摘要 (含 callee 行为描述) 判断本函数漏洞。
+        不继承全链 session (避免上下文过大溢出); callee 行为由 propagation description 携带。"""
         acfg = self.cfg.workers.agents[0] if self.cfg.workers.agents else None
         if acfg is None:
             return 0
         fork_session = self.sessions_dir / f"{_safe_name(func.name)}-vuln.jsonl"
-        # 继承整条链 session (根→...→本函数 taint 分析全在 base_session 里)
-        try:
-            if base_session and Path(base_session).exists():
-                safe_copyfile(base_session, str(fork_session))
-        except OSError:
-            pass
-        # 构造本函数污点分析上下文文本 (taints + propagations + 前置校验链)
         taints = store.list_taints_in_function(func.func_id)
         props = store.list_propagations_from(func.func_id)
         dataflow_text = self._format_taint_context(func, taint_params, ctx, taints, props)
         prompt = (
-            f"# 阶段：漏洞挖掘 Fork\n\n以上是整条调用链的污点分析历史 (从根函数到本函数)。\n"
-            f"现在请基于全链上下文, 判断**本函数** `{func.file}::{func.name}` 内是否存在漏洞。\n"
-            f"目标函数: `{func.file}::{func.name}` (行 {func.start_line}-{func.end_line})\n"
+            f"# 阶段：漏洞挖掘 Fork\n\n目标函数: `{func.file}::{func.name}` (行 {func.start_line}-{func.end_line})\n"
             f"污点: 位置 {taint_params.positions} 签名 {taint_params.signature} 名字 {taint_params.names}\n\n"
-            "## 本函数污点分析摘要\n"
-            f"```markdown\n{dataflow_text[:30000]}\n```\n\n"
-            "结合链上 callee 的行为 (如返回借用指针/分配/不释放等), 判断本函数是否存在漏洞。输出 JSON: {\"findings\":[]}。"
+            "基于下面的污点分析摘要 (含 callee 行为描述), 判断本函数是否存在漏洞。输出 JSON: {\"findings\":[]}。\n\n"
+            f"```markdown\n{dataflow_text[:30000]}\n```"
         )
         miner_system = ("# 内嵌技能：mine-dataflow-vulnerability\n"
                         "禁止再读取 skills/mine-dataflow-vulnerability/SKILL.md。\n\n"

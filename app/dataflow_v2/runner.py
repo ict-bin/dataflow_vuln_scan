@@ -88,11 +88,7 @@ class DataflowV2Runner:
 
         try:
             store = DataflowStore(v2_run_dir)
-            # 冷启动全局函数索引 (全量提取源码目录所有函数, 复用); callee 按名系统解析, 不依赖 LLM target_file
-            self._emit("v2_indexing_source_tree")
-            n_files = index_source_tree(source_root, store)
-            self._emit("v2_indexed", files=n_files, functions=len(store.list_functions()))
-            # 1) 索引根函数所在文件 (确保根函数在库)
+            # 按需索引 (非全量): 只索引根函数文件, 后续 callee 按需 (短名匹配已解决 C++ 方法解析)
             if not cfg.source_file:
                 return TaskResult(task_id=tid, status=TaskStatus.INVALID_INPUT,
                                   task=cfg.task, error="v2: source_file 未指定")
