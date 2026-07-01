@@ -181,12 +181,25 @@ class DataflowV2Runner:
                 shutil.copytree(v2_run_dir, dst)
             except OSError as e:
                 logger.warning("v2 archive dataflow-v2 db: %s", e)
+        # output/sessions/ (归档全部 sessions: taint/vuln/track/fptrack, 写 local 后同步 NFS)
+        sessions_src = shared_run_dir / "sessions"
+        if not sessions_src.exists():
+            sessions_src = root_out_dir / "sessions"
+        if sessions_src.exists():
+            try:
+                dst = root_output_path / "sessions"
+                if dst.exists():
+                    shutil.rmtree(dst)
+                shutil.copytree(sessions_src, dst)
+            except OSError as e:
+                logger.warning("v2 archive sessions: %s", e)
         # output/artifact-manifest.json (v2 件清单)
         manifest = [
             {"stage": "dataflow_v2", "kind": "markdown", "role": "final_report", "path": str(root_output_path / "final_report.md")},
             {"stage": "dataflow_v2", "kind": "sqlite", "role": "vuln_graph", "path": str(root_output_path / "vuln-scan.sqlite")},
             {"stage": "dataflow_v2", "kind": "directory", "role": "vulnerabilities", "path": str(root_output_path / "vulnerabilities")},
             {"stage": "dataflow_v2", "kind": "directory", "role": "dataflow_v2_db", "path": str(root_output_path / "dataflow-v2")},
+            {"stage": "dataflow_v2", "kind": "directory", "role": "sessions", "path": str(root_output_path / "sessions")},
         ]
         try:
             (root_output_path / "artifact-manifest.json").write_text(

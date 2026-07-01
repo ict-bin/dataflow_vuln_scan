@@ -73,11 +73,13 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
         ensure_file_indexed(self.source_root, func.file, store)
         body = self._read_body(func)
 
-        # 2) fork session
-        # fresh session (不 fork 父 session, 避免深度越深 session 膨胀 → LLM 输入巨大)
-        # mining 用 _format_taint_context 摘要 (callee 行为由 propagation description 携带)
+        # 2) fork session (v1 模型: copy base_session → 累积链上下文 A→A+B→A+B+C)
         fork_session = self.sessions_dir / f"{_safe_name(func.name)}-taint.jsonl"
-        # 不复制 base_session: 每函数独立分析, 快且不膨胀
+        try:
+            if base_session and Path(base_session).exists():
+                safe_copyfile(base_session, str(fork_session))
+        except OSError:
+            pass
 
         # 3) 构造 prompt
         prompt = self._build_prompt(func, body, taint_params, pre_validations)
@@ -397,20 +399,28 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
     def mine_vulns(self, store: DataflowStore, func: FunctionRecord,
                    taint_params: TaintParamInfo, ctx: PathContext,
                    base_session: str = "") -> int:
-        """fork 漏洞挖掘会话: 基于 _format_taint_context 摘要 (含 callee 行为描述) 判断本函数漏洞。
-        不继承全链 session (避免上下文过大溢出); callee 行为由 propagation description 携带。"""
+        """fork 漏洞挖掘会话: 继承链 session (base_session, v1 模型 fork-from-parent),
+        再提示分析本函数内的漏洞。存 finding + 上报 intake。"""
         acfg = self.cfg.workers.agents[0] if self.cfg.workers.agents else None
         if acfg is None:
             return 0
         fork_session = self.sessions_dir / f"{_safe_name(func.name)}-vuln.jsonl"
+        try:
+            if base_session and Path(base_session).exists():
+                safe_copyfile(base_session, str(fork_session))
+        except OSError:
+            pass
         taints = store.list_taints_in_function(func.func_id)
         props = store.list_propagations_from(func.func_id)
         dataflow_text = self._format_taint_context(func, taint_params, ctx, taints, props)
         prompt = (
-            f"# 阶段：漏洞挖掘 Fork\n\n目标函数: `{func.file}::{func.name}` (行 {func.start_line}-{func.end_line})\n"
+            f"# 阶段：漏洞挖掘 Fork\n\n以上是整条调用链的污点分析历史 (从根函数到本函数)。\n"
+            f"现在请基于全链上下文, 判断**本函数** `{func.file}::{func.name}` 内是否存在漏洞。\n"
+            f"目标函数: `{func.file}::{func.name}` (行 {func.start_line}-{func.end_line})\n"
             f"污点: 位置 {taint_params.positions} 签名 {taint_params.signature} 名字 {taint_params.names}\n\n"
-            "基于下面的污点分析摘要 (含 callee 行为描述), 判断本函数是否存在漏洞。输出 JSON: {\"findings\":[]}。\n\n"
-            f"```markdown\n{dataflow_text[:30000]}\n```"
+            "## 本函数污点分析摘要\n"
+            f"```markdown\n{dataflow_text[:30000]}\n```\n\n"
+            "结合链上 callee 的行为 (如返回借用指针/分配/不释放等), 判断本函数是否存在漏洞。输出 JSON: {\"findings\":[]}。"
         )
         miner_system = ("# 内嵌技能：mine-dataflow-vulnerability\n"
                         "禁止再读取 skills/mine-dataflow-vulnerability/SKILL.md。\n\n"
