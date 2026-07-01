@@ -150,6 +150,35 @@ class DfsOrchestrator:
         self.concurrent = concurrent
         self.max_depth = max_depth
         self._llm_sem = threading.Semaphore(max_concurrent_llm) if concurrent else None
+        # mining 后台线程 (不阻塞子函数 taint 分析)
+        self._mine_threads: list[threading.Thread] = []
+        self._mine_errs: list[BaseException] = []
+        self._mine_lock = threading.Lock()
+
+    def _submit_mine(self, func: FunctionRecord, taint_params: TaintParamInfo,
+                     ctx: PathContext, chain_session: str) -> None:
+        """提交 mining 到后台线程 (不阻塞, 用 LLM 信号量限流)。"""
+        def _do_mine():
+            try:
+                self._run_llm(self.cbs.mine_vulns, self.store, func, taint_params, ctx, chain_session)
+            except BaseException as e:
+                with self._mine_lock:
+                    self._mine_errs.append(e)
+        t = threading.Thread(target=_do_mine, daemon=True, name=f"dvs2-mine-{func.name}")
+        with self._mine_lock:
+            self._mine_threads.append(t)
+        t.start()
+
+    def _await_mines(self) -> None:
+        """等待所有后台 mining 完成。"""
+        with self._mine_lock:
+            threads = list(self._mine_threads)
+        for t in threads:
+            t.join()
+        with self._mine_lock:
+            self._mine_threads.clear()
+            if self._mine_errs:
+                raise self._mine_errs[0]
 
     def _run_llm(self, fn: Callable, *args: Any, **kw: Any) -> Any:
         """LLM 调用限流: 信号量 cap 并发 analyze/mine/track 调用, 避免打爆配额。
@@ -167,6 +196,7 @@ class DfsOrchestrator:
         """从根函数出发 DFS。"""
         ctx = PathContext(path_id=_path_id(root_func.func_id, root_taint.signature, "0"))
         self._process(root_func, root_taint, ctx.pre_validations, base_session, ctx, 0)
+        self._await_mines()  # 等所有后台 mining 完成
 
     # ── 核心: 处理一个函数 (返回本函数发现的校验, 供父链回传) ────────────────
     def _process(self, func: FunctionRecord, taint_params: TaintParamInfo,
@@ -211,9 +241,8 @@ class DfsOrchestrator:
         my_discovered = _dedup_validations(
             [v for p in result.propagations for v in p.validations])
 
-        # 4) self_contained=True → 立即挖 (设计点 #2); 继承链 session
-        if self_contained:
-            self._run_llm(self.cbs.mine_vulns, self.store, func, taint_params, ctx, chain_session)
+        # 4) mining 后台化 (不阻塞子函数 taint; mining 是叶子操作, 只产 findings)
+        self._submit_mine(func, taint_params, ctx, chain_session)
 
         # 5) 构造有序路径 (互斥分叉 + 外部变量分叉); 达深度上限则当叶子 (不递归)
         if depth < self.max_depth:
@@ -239,10 +268,7 @@ class DfsOrchestrator:
             for path_steps in paths:
                 self._run_path(path_steps, base_accumulated, func, chain_session, ctx, depth, None)
 
-        # 7) self_contained=False → 全部子链完成后挖 (后序); 继承链 session
-        if not self_contained:
-            self._run_llm(self.cbs.mine_vulns, self.store, func, taint_params, ctx, chain_session)
-
+        # 7) mining 已后台化, 不再阻塞 return
         return my_discovered
 
     def _run_path(self, steps: list[ChainStep], base_accumulated: list[Validation],

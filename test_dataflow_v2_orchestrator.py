@@ -147,9 +147,10 @@ class TestConcurrentDfs(unittest.TestCase):
         self.assertEqual(set(self.cbs.analyzed), {"A","C","D","E","F"})
     def test_leaves_mined_immediately_root_postorder(self):
         self._run(True)
-        # 叶子 (C/D/E/F) self_contained=True → 立即挖; A=False → 后序 (最后挖)
-        self.assertIn("A", self.cbs.mined)
-        self.assertEqual(self.cbs.mined[-1], "A", "A 应后序最后挖, 实际: %s" % self.cbs.mined)
+        # mining 后台化: 所有函数都被 mine, 顺序非确定 (后台线程并发完成)
+        expected = {"A", "C", "D", "E", "F"}
+        actual = set(self.cbs.mined)
+        self.assertEqual(actual, expected, f"mined={self.cbs.mined}")
     def test_concurrent_faster_than_sequential(self):
         import time as _t
         t0 = _t.time(); self._run(False); seq = _t.time()-t0
