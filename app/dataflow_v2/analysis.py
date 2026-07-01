@@ -465,16 +465,28 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                 exploitability=expl_str,
                 confidence=float(item.get("confidence") or 0),
                 output_dir=str(fdir))
-            # 确保 FK 满足: analysis_run + taint_node 必须先存在
+            # 确保 FK 满足 + 插入 finding (同一 connection, 避免 FK 跨连接不可见)
             try:
+                data = {'finding_id':finding_id,'run_id':self.run_id,'node_id':node,
+                        'source_file':fsrc,'function_name':ffn,'line':fline,
+                        'vuln_type':str(item.get('vuln_type') or 'unknown'),
+                        'severity':str(item.get('severity') or 'unknown'),
+                        'title':str(item.get('title') or finding_id),
+                        'summary':str(item.get('summary') or ''),
+                        'evidence':str(item.get('evidence') or ''),
+                        'exploitability':expl_str,
+                        'confidence':float(item.get('confidence') or 0),
+                        'output_dir':str(fdir)}
+                cols = list(data)
                 with self.graph_store.connect() as conn:
                     conn.execute("INSERT OR IGNORE INTO analysis_runs (run_id,task_id,root_file,root_function,source_root,status) VALUES (?,?,?,?,?,?)",
                                  (self.run_id, self.task_id, func.file, func.name, self.source_root, "completed"))
-                    conn.execute("INSERT OR IGNORE INTO taint_nodes (node_id,source_file,function_name,taint_kind,symbol,line,call_expr,description,parent_node_id,depth,context_session) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                                 (node, func.file, func.name, "vuln_site", ffline, str(fline), "", func.description or "", "", 0, ""))
+                    conn.execute("INSERT OR IGNORE INTO taint_nodes (node_id,source_file,function_name,taint_kind,symbol,line,call_expr,description,parent_node_id,depth,context_session,run_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                                 (node, func.file, func.name, "vuln_site", ffline, str(fline), "", func.description or "", "", 0, "", self.run_id))
+                    conn.execute(f"INSERT OR REPLACE INTO vulnerability_findings ({','.join(cols)}) VALUES ({','.join('?' for _ in cols)})",
+                                 [data[c] for c in cols])
             except Exception as _fe:
-                logger.debug("v2 ensure FK run/node: %s", _fe)
-            self.graph_store.add_finding(rec)
+                logger.warning("v2 add_finding FK+insert failed: %s", _fe, exc_info=True)
             n += 1
             # 上报 vuln-platform intake
             try:
