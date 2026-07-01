@@ -283,117 +283,19 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
     # ── 函数指针间接调用跟踪 (复用 V1 function_pointer tracker) ──────────────
     def resolve_indirect_call(self, store: DataflowStore, func: FunctionRecord,
                               prop: PropagationRecord, ctx: PathContext) -> list[tuple[FunctionRecord, TaintParamInfo]]:
-        """函数指针/回调/dispatch 间接调用 → fork function_pointer tracker 搜注册点 → 处理函数。
-
-        与 external (nonlocal, 数据变量读取) 区分: 函数指针真实 callee 由注册点决定
-        (sax->cb = handler / register_handler / init table), 不是"读取者"。
-        """
-        from ..tracker import run_tracker, TrackerResult  # 共享基建 (V1 删除后保留)
-        acfg = self.cfg.workers.agents[0] if self.cfg.workers.agents else None
-        if acfg is None:
-            return []
-        fork_session = self.sessions_dir / f"{_safe_name(func.name)}-fptrack-{_safe_name(prop.target_function or prop.target_taint_name)}.jsonl"
-        tracker_ctx = {
-            "caller_file": func.file, "caller_func": func.name,
-            "dispatch_kind": prop.dispatch_kind or "function_pointer",
-            "callee_function": prop.target_function or prop.target_taint_name,
-            "callee_file": func.file, "callee_line": f"L{prop.call_line}",
-            "tainted_params": prop.target_taint_name or prop.source_taint_name,
-            "description": prop.description,
-        }
-        tr = run_tracker(
-            "function_pointer", tracker_ctx,
-            workspace=Path(self.source_root), model=acfg.model,
-            tools=acfg.tools or self.cfg.workers.default_tools,
-            session_file=str(fork_session), cancel_event=self.cancel_event,
-            run_timeout_seconds=min(self.cfg.agent_run_timeout_seconds, 1800),
-            pi_max_retries=self.cfg.pi_max_retries, pi_retry_delay=self.cfg.pi_retry_delay,
-            task_context={"task_id": self.task_id, "task_root": str(self.run_dir.parent),
-                          "task_run_root": str(self.run_dir), "task_pi_dir": self.cfg.role_pi_dir("workers"),
-                          "agent_role": "workers"},
-        )
-        if self.on_event:
-            emit_agent_runtime_events(self.on_event, result=type("R",(),{"output":tr.raw_output,"error":tr.error,"runtime_dir":"","context_window":0,"compaction_requested":False,"compaction_completed":False,"context_budget_exceeded_preflight":False,"fatal_retry_event_due":False,"context_overflow_retrying":False,"context_overflow_retry_event_due":False,"retry_delay_seconds":0,"consecutive_fatal_retry_count":0,"fatal_retry_reason":"","proxy_reserved_tokens":0})(),
-            stage="indirect_call_tracking_v2", role="workers", model=acfg.model,
-            extra={"function": func.name, "dispatch": prop.target_function or prop.target_taint_name})
-        out: list[tuple[FunctionRecord, TaintParamInfo]] = []
-        for item in tr.functions:
-            fn = str(item.get("function") or "").strip()
-            if not fn:
-                continue
-            fpath = str(item.get("file") or "")
-            if fpath and not self._within_source_root(fpath):
-                self._emit("v2_out_of_scope_skipped", function=fn, file=fpath, reason="outside_source_root")
-                continue
-            rec = store.find_function(fn) or store.find_function(fn, fpath)
-            if rec is None and fpath:
-                ensure_file_indexed(self.source_root, fpath, store)
-                rec = store.find_function(fn) or store.find_function(fn, fpath)
-            if rec is None:
-                continue
-            tp_names = [str(x) for x in (item.get("tainted_params") or []) if str(x).strip()] or [prop.target_taint_name]
-            tp = TaintParamInfo(positions=[], signature=prop.target_taint_signature,
-                                names=tp_names)
-            out.append((rec, tp))
-        return out
+        """函数指针注册点追踪: 前后缀匹配缩小候选 + LLM 判断 (fresh session)"""
+        from .trackers import resolve_indirect
+        return resolve_indirect(self.cfg, self.source_root, self.sessions_dir, store,
+                               func, prop, self.cancel_event, self.on_event)
 
     # ── 外部变量跟踪 (item 1) ────────────────────────────────────────────────
     def resolve_external_propagation(self, store: DataflowStore, func: FunctionRecord,
                                      taint: TaintRecord, ctx: PathContext) -> list[tuple[FunctionRecord, TaintParamInfo]]:
-        """污点写入外部变量 → fork 跟踪 LLM 在源码树搜读取该变量的跟入函数, 分叉路径。"""
-        fork_session = self.sessions_dir / f"{_safe_name(func.name)}-track-{_safe_name(taint.name)}.jsonl"
-        prompt = (
-            f"# 阶段：外部变量污点跟踪\n\n"
-            f"写入函数: `{func.file}::{func.name}`\n"
-            f"外部变量: `{taint.name}` (签名 {taint.signature})\n"
-            f"说明: {taint.description or '(无)'}\n\n"
-            f"在源码树 (cwd={self.source_root}) 搜索读取 `{taint.name}` 的函数, "
-            f"按系统提示词输出 JSON {{\"follow_ins\":[...]}}。"
-        )
-        acfg = self.cfg.workers.agents[0] if self.cfg.workers.agents else None
-        if acfg is None:
-            return []
-        output = run_agent(
-            prompt=prompt, model=acfg.model, tools=acfg.tools or self.cfg.workers.default_tools,
-            cwd=self.source_root, session_file=str(fork_session),
-            system_prompt=self._tracking_prompt, cancel_event=self.cancel_event,
-            run_timeout_seconds=min(self.cfg.agent_run_timeout_seconds, 1800),
-            timeout_retry_enabled=self.cfg.agent_timeout_retry_enabled,
-            timeout_max_retries=self.cfg.agent_timeout_max_retries,
-            pi_max_retries=self.cfg.pi_max_retries, pi_retry_delay=self.cfg.pi_retry_delay,
-            task_context={"task_id": self.task_id, "task_root": str(self.run_dir.parent),
-                          "task_run_root": str(self.run_dir), "task_pi_dir": self.cfg.role_pi_dir("workers"),
-                          "agent_role": "workers"},
-        )
-        if self.on_event:
-            emit_agent_runtime_events(self.on_event, result=output, stage="external_tracking_v2",
-                                      role="workers", model=acfg.model,
-                                      extra={"function": func.name, "var": taint.name})
-        parsed = _extract_json_object(output.output, "follow_ins") or {}
-        out: list[tuple[FunctionRecord, TaintParamInfo]] = []
-        for item in parsed.get("follow_ins") or []:
-            if not isinstance(item, dict):
-                continue
-            fn = str(item.get("function") or "").strip()
-            if not fn:
-                continue
-            fpath = str(item.get("file") or "")
-            # 仅跟入源码目录内的文件 (目录外不分析, 不按文件名过滤)
-            if fpath and not self._within_source_root(fpath):
-                self._emit("v2_out_of_scope_skipped", function=fn, file=fpath,
-                           reason="outside_source_root")
-                continue
-            # 索引跟入函数所在文件, 拿 FunctionRecord
-            rec = store.find_function(fn) or store.find_function(fn, fpath)
-            if rec is None and fpath:
-                ensure_file_indexed(self.source_root, fpath, store)
-                rec = store.find_function(fn) or store.find_function(fn, fpath)
-            if rec is None:
-                continue
-            tp = TaintParamInfo(positions=[], signature=taint.signature,
-                                names=[str(item.get("param_name") or taint.name)])
-            out.append((rec, tp))
-        return out
+        """外部变量下游追踪: 脚本 grep + LLM 语义判断 (fresh session, 一个函数一个 user)"""
+        from .trackers import resolve_external
+        return resolve_external(self.cfg, self.source_root, self.sessions_dir, store,
+                               func, taint.name, taint.description or "",
+                               self.cancel_event, self.on_event)
 
     # ── 漏洞挖掘 (item 2) ────────────────────────────────────────────────────
     def mine_vulns(self, store: DataflowStore, func: FunctionRecord,
