@@ -177,6 +177,10 @@ class DfsOrchestrator:
         if self.store.find_processed_taint(func.func_id, taint_params.signature, pre_val_sig):
             return []  # 已分析过, 跳过 (无新增校验回传)
 
+        # 发 trace_start 事件 (前端 buildDfaTree 消费, 与 v1 对齐)
+        self.cbs.on_event("trace_start", function=func.name, source_file=func.file,
+                          depth=depth, max_depth=self.max_depth)
+
         # 2) LLM 污点分析 (fork 会话)
         ctx.depth = depth
         result = self._run_llm(
@@ -188,6 +192,11 @@ class DfsOrchestrator:
         if result.description:
             func.description = result.description
             self.store.upsert_function(func)
+
+        # 发 trace_callees 事件 (前端 buildDfaTree 消费, 与 v1 对齐)
+        callee_names = [p.target_function for p in result.propagations if p.target_function]
+        self.cbs.on_event("trace_callees", function=func.name, callees=callee_names, depth=depth)
+
         self_contained = result.self_contained
         # 父函数 taint session (整条链累积于此) → 子函数/mining 继承
         chain_session = result.session_path

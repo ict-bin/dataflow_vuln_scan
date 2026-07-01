@@ -252,7 +252,7 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
         if rec is None:
             return ""  # 全局库+源码树均找不到 (外部库/系统 API), 不递归
         if rec.file and not self._within_source_root(rec.file):
-            self._emit("v2_out_of_scope_skipped", function=prop.target_function,
+            self.on_event("v2_out_of_scope_skipped", function=prop.target_function,
                        file=rec.file, reason="outside_source_root")
             return ""
         return rec.func_id
