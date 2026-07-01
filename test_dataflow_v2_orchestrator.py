@@ -104,6 +104,7 @@ class _MockCbs(AnalysisCallbacks):
         self.analyzed: list[str] = []
         self.mined: list[str] = []
         self._lock = __import__("threading").Lock()
+        self.on_event = lambda *a, **k: None
     def _fid(self, name):
         return self.store.find_function(name).func_id
     def analyze_function(self, store, func, tp, pre_vals, base_session, ctx):
