@@ -274,6 +274,7 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
             is_ext = bool(p.get("is_external", False))
             target_taint = str(p.get("target_taint") or "")
             # 脚本校验 is_external
+            llm_said_external = is_ext
             if is_ext:
                 is_ext, override_reason = _validate_is_external(
                     target_taint, target_fn, local_scope, params_set, locals_set)
@@ -285,6 +286,15 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                                   reason=override_reason)
             # 系统检测间接调用: target_function 是函数指针表达式 (含 -> / (* / [)
             is_indirect = bool(target_fn) and ("->" in target_fn or target_fn.startswith("*") or "[" in target_fn)
+            # LLM 标了 external + 有 target_function + 脚本覆盖了 external + target 不是真实函数
+            # → LLM 尝试报告函数指针调用但没写完整表达式, 自动走 indirect tracker
+            if not is_indirect and llm_said_external and target_fn and not is_ext:
+                if not store.find_function(target_fn):
+                    is_indirect = True
+                    self.on_event("v2_auto_indirect_detected",
+                                  function=func.name,
+                                  target_function=target_fn,
+                                  reason="LLM marked external + target not a real function → indirect call")
             dispatch_kind = "function_pointer_field" if is_indirect else ""
             if target_fn and not is_ext and not is_indirect:
                 callee_names.append(target_fn)  # 直接调用: clang 按名定位 CallExpr
