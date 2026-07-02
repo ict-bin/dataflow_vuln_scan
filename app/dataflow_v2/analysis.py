@@ -175,26 +175,67 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
         system_prompt = f"{v2_system}\n\n{_taint_prompt}" if v2_system else _taint_prompt
         v2_env = {"DVS_V2_DB_DIR": str(self.vuln_root.parent / "dataflow-v2"),
                   "DVS_SOURCE_ROOT": self.source_root}
-        output = run_agent(
-            prompt=prompt, model=acfg.model, tools=acfg.tools or self.cfg.workers.default_tools,
-            cwd=str(self.run_dir), session_file=str(fork_session),
-            system_prompt=system_prompt, cancel_event=self.cancel_event,
-            env=v2_env,
-            run_timeout_seconds=self.cfg.agent_run_timeout_seconds,
-            timeout_retry_enabled=self.cfg.agent_timeout_retry_enabled,
-            timeout_max_retries=self.cfg.agent_timeout_max_retries,
-            pi_max_retries=self.cfg.pi_max_retries, pi_retry_delay=self.cfg.pi_retry_delay,
-            task_context={"task_id": getattr(ctx, "path_id", ""), "task_root": str(self.run_dir.parent),
-                          "task_run_root": str(self.run_dir), "task_pi_dir": self.cfg.role_pi_dir("workers"),
-                          "agent_role": "workers"},
-        )
+
+        def _run_taint_agent(agent_prompt: str) -> Any:
+            return run_agent(
+                prompt=agent_prompt, model=acfg.model,
+                tools=acfg.tools or self.cfg.workers.default_tools,
+                cwd=str(self.run_dir), session_file=str(fork_session),
+                system_prompt=system_prompt, cancel_event=self.cancel_event,
+                env=v2_env,
+                run_timeout_seconds=self.cfg.agent_run_timeout_seconds,
+                timeout_retry_enabled=self.cfg.agent_timeout_retry_enabled,
+                timeout_max_retries=self.cfg.agent_timeout_max_retries,
+                pi_max_retries=self.cfg.pi_max_retries, pi_retry_delay=self.cfg.pi_retry_delay,
+                task_context={"task_id": getattr(ctx, "path_id", ""), "task_root": str(self.run_dir.parent),
+                              "task_run_root": str(self.run_dir), "task_pi_dir": self.cfg.role_pi_dir("workers"),
+                              "agent_role": "workers"},
+            )
+
+        output = _run_taint_agent(prompt)
         if self.on_event:
             emit_agent_runtime_events(self.on_event, result=output, stage="taint_analysis_v2",
                                       role="workers", model=acfg.model,
                                       extra={"function": func.name, "fork_purpose": "taint_analysis"})
 
-        # 5) 解析 JSON
-        parsed = _extract_json_object(output.output, "propagations") or {}
+        # 5) 解析 JSON + 校验 + 重试 (最多 3 次; 全失败发具体原因事件)
+        def _parse_and_check(text: str):
+            p = _extract_json_object(text, "propagations")
+            if not p:
+                return None, "missing taint-analysis JSON (no object containing 'propagations')"
+            if not isinstance(p.get("propagations"), list):
+                return p, "propagations must be a list"
+            return p, ""
+
+        parsed, parse_warn = _parse_and_check(output.output)
+        retry_used = 0
+        _V2_RETRY_MAX = 3
+        while parse_warn and retry_used < _V2_RETRY_MAX:
+            if self.cancel_event is not None and self.cancel_event.is_set():
+                break
+            retry_used += 1
+            self.on_event("v2_taint_retry_json", function=func.name, attempt=retry_used,
+                          reason=parse_warn)
+            _retry_prompt = (
+                "[系统反馈] 上一轮 taint-analysis JSON 校验未通过，原因: "
+                + parse_warn
+                + "。请重新输出完整的 JSON 对象，推理过程中不要在代码块里写 JSON 片段，"
+                "最终只输出一个 ```json 块，必需顶层 key: "
+                "description/self_contained/taints/propagations；本函数无任何污点传播时 "
+                "propagations 设为 []。"
+            )
+            output = _run_taint_agent(_retry_prompt)
+            if self.on_event:
+                emit_agent_runtime_events(self.on_event, result=output, stage="taint_analysis_v2_retry",
+                                          role="workers", model=acfg.model,
+                                          extra={"function": func.name, "attempt": retry_used})
+            parsed, parse_warn = _parse_and_check(output.output)
+
+        if parse_warn:
+            self.on_event("v2_taint_analysis_failed", function=func.name,
+                          retry_used=retry_used, reason=parse_warn)
+            parsed = parsed or {}
+
         return self._build_result(store, func, taint_params, parsed, fork_session, body)
 
     # ── 结果构造 + clang 标注 ───────────────────────────────────────────────

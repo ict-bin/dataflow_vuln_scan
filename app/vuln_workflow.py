@@ -280,6 +280,7 @@ def _extract_json_from_text(text: str, key: str | None = None) -> Any:
     for m in re.finditer(r"```(?:json)?\s*\n(.*?)\n\s*```", text, re.S):
         candidates.append(m.group(1))
     candidates.append(text)
+    parsed: list[Any] = []
     for raw in candidates:
         raw = raw.strip()
         for start_char, end_char in [("{", "}"), ("[", "]")]:
@@ -289,10 +290,19 @@ def _extract_json_from_text(text: str, key: str | None = None) -> Any:
                 try:
                     obj = json.loads(raw[start:end+1])
                     if key is None or (isinstance(obj, dict) and key in obj):
-                        return obj
+                        parsed.append(obj)
+                        break  # move to next candidate
                 except Exception as _e:
                     logger.warning("unexpected error in vuln_workflow.py: %s", _e, exc_info=True)
-    return None
+    if not parsed:
+        return None
+    if key is None:
+        # Prefer a complete taint-graph object (has function+edges) over partial
+        # JSON fragments the model may emit while reasoning inside code fences.
+        for obj in parsed:
+            if isinstance(obj, dict) and "function" in obj and "edges" in obj:
+                return obj
+    return parsed[0]
 
 
 def _read_prompt(path: str) -> str:
@@ -548,24 +558,33 @@ class DataflowVulnWorkflow:
         self._emit("worker_done", worker_id="worker-0", output=res.output[:300], tokens_in=res.token_usage.input, tokens_out=res.token_usage.output)
         total_tokens = TokenUsage(); total_tokens += res.token_usage
 
-        # ── 输出校验 + 重试：LLM 未输出 JSON 时，一句话 prompt 让 LLM 补充 ──
-        graph = _extract_json_from_text(res.output)
-        graph_warnings: list[str] = []
+        # ── 输出校验 + 重试：提取失败 或 字段校验未过 都重试，最多 3 次 ──
+        def _extract_and_validate(text: str):
+            g = _extract_json_from_text(text)
+            if isinstance(g, dict):
+                g = normalize_taint_graph(g)
+                return g, validate_taint_graph(g)
+            return None, ["missing taint graph JSON in final response"]
+
+        graph, graph_warnings = _extract_and_validate(res.output)
         retry_used = 0
         _JSON_RETRY_MAX = 3
-        _JSON_RETRY_PROMPT = (
-            "[系统反馈] 上一轮回复缺少符合格式的 taint-graph JSON 对象。"
-            "请直接输出完整的 JSON，不要 Markdown 包裹，不要额外文字: "
-            '{"function":"...","source_file":"...","taints":[...],"edges":[...],"followups":[...],"termination":{...}}'
-        )
-        while not isinstance(graph, dict) and retry_used < _JSON_RETRY_MAX:
+        while graph_warnings and retry_used < _JSON_RETRY_MAX:
             if self._cancelled():
                 break
             retry_used += 1
+            reason_brief = "; ".join(graph_warnings[:3])
             self._emit("worker_retry_json", worker_id="worker-0", attempt=retry_used,
-                       function=self.func_name, reason="missing taint graph JSON")
+                       function=self.func_name, reason=reason_brief)
+            _retry_prompt = (
+                "[系统反馈] 上一轮 taint-graph 校验未通过，原因: "
+                + reason_brief
+                + "。请重新输出完整的 taint-graph JSON 对象，不要 Markdown 包裹，不要额外文字，"
+                "推理过程中不要在代码块里写 JSON 片段，最终只输出一个 JSON 对象，必需顶层 key: "
+                "function/source_file/taints/edges/followups/termination。"
+            )
             res = run_agent(
-                prompt=_JSON_RETRY_PROMPT, model=acfg.model,
+                prompt=_retry_prompt, model=acfg.model,
                 tools=acfg.tools or self.cfg.workers.default_tools,
                 cwd=str(self.ws), session_file=session_file, system_prompt=system_prompt,
                 cancel_event=self.cancel_event,
@@ -594,13 +613,9 @@ class DataflowVulnWorkflow:
                 extra={"function": self.func_name, "attempt": retry_used},
             )
             total_tokens += res.token_usage
-            graph = _extract_json_from_text(res.output)
+            graph, graph_warnings = _extract_and_validate(res.output)
 
-        if isinstance(graph, dict):
-            graph = normalize_taint_graph(graph)
-            graph_warnings = validate_taint_graph(graph)
-        else:
-            graph = None
+        if graph is None and not graph_warnings:
             graph_warnings = [f"missing taint graph JSON in final response (retried {retry_used}x)"]
         dataflow_file = None
         df_content = res.output
@@ -608,14 +623,18 @@ class DataflowVulnWorkflow:
             (self.out_dir / "taint-graph.validation.json").write_text(json.dumps({"warnings": graph_warnings}, ensure_ascii=False, indent=2), encoding="utf-8")
         passed = not graph_warnings
         final_output = res.output
+        if passed:
+            completion_reason = "script_validated"
+        else:
+            completion_reason = "script_validation_failed: " + "; ".join(graph_warnings)
         rr = RoundResult(
             round=1, function_name=self.func_name, source_path=self.src_file, stage="worker", stage_round=1,
             duration_ms=max(0.0, (time.time() - started) * 1000.0), status="passed" if passed else "failed",
             worker_results=[WorkerResult(worker_id="worker-0", model=acfg.model, output=final_output, dataflow_file=str(dataflow_file or ""), session_file=session_file, token_usage=res.token_usage, df_issues=graph_warnings)],
             judge_results=[], pass_count=1 if passed else 0, total_judges=0, passed=passed, best_worker_id="worker-0",
-            module_completed=passed, completion_reason="script_validated" if passed else "script_validation_failed",
+            module_completed=passed, completion_reason=completion_reason,
         )
-        result = self._make_result(final_output, res, passed, "script_validated" if passed else "script_validation_failed", rounds=[rr], total_tokens=total_tokens)
+        result = self._make_result(final_output, res, passed, completion_reason, rounds=[rr], total_tokens=total_tokens)
         if isinstance(graph, dict):
             result.upstream_entry_metadata["taint_graph"] = graph
         return result, str(session_file), df_content or res.output
