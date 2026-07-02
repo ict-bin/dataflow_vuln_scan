@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from app.config import OUTPUT_DIR
-from app.db import _SessionLocal
+import app.db as _dbmod
 from app.db.models import AppDvsFailureDebug, AppDvsTask, AppDvsTaskEvent
 
 logger = logging.getLogger("dvs.failure_debug")
@@ -92,9 +92,9 @@ class FailureDebugService:
 
     def _reset_stale_running_on_startup(self) -> None:
         try:
-            if _SessionLocal is None:
+            if _dbmod._SessionLocal is None:
                 return
-            db = _SessionLocal()
+            db = _dbmod._SessionLocal()
             try:
                 n = db.query(AppDvsFailureDebug).filter(
                     AppDvsFailureDebug.status == "running"
@@ -114,9 +114,9 @@ class FailureDebugService:
     def _enqueue_pending_rows(self) -> None:
         """启动扫描：把已下发(pending)/重试(error)的行入队处理。"""
         try:
-            if _SessionLocal is None:
+            if _dbmod._SessionLocal is None:
                 return
-            db = _SessionLocal()
+            db = _dbmod._SessionLocal()
             try:
                 rows = db.query(AppDvsFailureDebug).filter(
                     AppDvsFailureDebug.status.in_(("pending", "error"))
@@ -150,10 +150,10 @@ class FailureDebugService:
 
     def _debug_one_by_id(self, task_id: str) -> None:
         """从 DB 加载任务并调试。"""
-        if _SessionLocal is None:
+        if _dbmod._SessionLocal is None:
             logger.warning("DB not ready, skip debug for %s", task_id)
             return
-        db = _SessionLocal()
+        db = _dbmod._SessionLocal()
         try:
             task = db.query(AppDvsTask).filter(AppDvsTask.task_id == task_id).first()
             if task is None:
@@ -496,9 +496,9 @@ class FailureDebugService:
         """调试模型优先级：DB 配置 > 环境变量 DVS_FAILURE_DEBUG_MODEL > models.json 第一个。"""
         # 1. DB 配置
         try:
-            if _SessionLocal is not None:
+            if _dbmod._SessionLocal is not None:
                 from app.service.config_service import get_config_service
-                db = _SessionLocal()
+                db = _dbmod._SessionLocal()
                 try:
                     cfg = get_config_service().get_failure_debug_config(db)
                     m = (cfg or {}).get("model")
