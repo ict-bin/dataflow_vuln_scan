@@ -21,6 +21,7 @@ from app.runtime_context import (
     REGISTRY_ENABLED,
     ROLE,
     WORKER_SLOT_REGISTRY_ENABLED,
+    is_debugger_role,
 )
 from app.service.task_service import get_task_service
 from app.logging_utils import log_event
@@ -36,6 +37,7 @@ class RuntimeBootstrapStatus:
     management_api_ready: bool = False
     registry_ready: bool = False
     dispatcher_ready: bool = False
+    failure_debug_started: bool = False
     ready: bool = False
     phase: str = "booting"
     error: str | None = None
@@ -85,6 +87,12 @@ class RuntimeBootstrap:
         self._worker_slot_stop.set()
         self._worker_slot_thread = None
         try:
+            from app.service.failure_debug import get_failure_debug_service
+
+            get_failure_debug_service().stop()
+        except Exception as _e:
+            logger.warning("unexpected error stopping failure_debug: %s", _e, exc_info=True)
+        try:
             from app.service.registry_service import get_registry_service
 
             get_registry_service().stop()
@@ -124,7 +132,7 @@ class RuntimeBootstrap:
                 made_progress = self._init_db(svc_yaml)
 
             if self._status.db_ready:
-                if PUBLIC_API_ENABLED and not self._router_installed:
+                if (PUBLIC_API_ENABLED or is_debugger_role()) and not self._router_installed:
                     made_progress = self._attempt_component_start(
                         "router_init",
                         lambda: self._install_management_router(app),
@@ -145,6 +153,13 @@ class RuntimeBootstrap:
                     made_progress = self._attempt_component_start(
                         "worker_slot_start",
                         self._start_worker_slot_registry,
+                    ) or made_progress
+
+                # debugger 角色：DB 就绪后启动失败调试循环
+                if is_debugger_role() and self._status.db_ready and not self._status.failure_debug_started:
+                    made_progress = self._attempt_component_start(
+                        "failure_debug_start",
+                        self._start_failure_debug,
                     ) or made_progress
 
                 if self._all_required_components_ready():
@@ -318,6 +333,12 @@ class RuntimeBootstrap:
         )
         self._running_task_reconcile_thread.start()
 
+    def _start_failure_debug(self) -> None:
+        from app.service.failure_debug import get_failure_debug_service
+
+        get_failure_debug_service().start()
+        self._status.failure_debug_started = True
+
     def _start_worker_slot_registry(self) -> None:
         self._worker_slot_stop = threading.Event()
 
@@ -384,13 +405,15 @@ class RuntimeBootstrap:
     def _all_required_components_ready(self) -> bool:
         if not self._status.db_ready:
             return False
-        if PUBLIC_API_ENABLED and not self._status.management_api_ready:
+        if (PUBLIC_API_ENABLED or is_debugger_role()) and not self._status.management_api_ready:
             return False
         if REGISTRY_ENABLED and not self._status.registry_ready:
             return False
         if DISPATCHER_ENABLED and not self._status.dispatcher_ready:
             return False
         if WORKER_SLOT_REGISTRY_ENABLED and self._worker_slot_thread is None:
+            return False
+        if is_debugger_role() and not self._status.failure_debug_started:
             return False
         return True
 

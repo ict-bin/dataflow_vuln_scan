@@ -13,7 +13,7 @@ from typing import Any, Dict
 from sqlalchemy.orm import Session
 
 from app.config import load_service_config
-from app.db.models import AppDvsProjectConfig
+from app.db.models import AppDvsDebugConfig, AppDvsProjectConfig
 from app.models import normalize_max_rounds_exceeded_review_strategy
 
 logger = logging.getLogger("dvs.config_service")
@@ -113,6 +113,41 @@ class ConfigService:
 
         result = _normalize_config(_deep_merge(base, blob))
         result["project_id"] = _GLOBAL_PROJECT_ID
+        result["updated_at"] = row.updated_at.isoformat() if row.updated_at else None
+        return result
+
+
+    # ── 失败调试模型配置 ──────────────────────────────────────────────────
+    _FAILURE_DEBUG_KEY = "failure_debug"
+
+    def get_failure_debug_config(self, db: Session) -> dict:
+        try:
+            row = db.query(AppDvsDebugConfig).filter_by(config_key=self._FAILURE_DEBUG_KEY).first()
+        except Exception:
+            return {"model": None, "updated_at": None}
+        if row and row.config_json:
+            data = dict(row.config_json)
+        else:
+            data = {"model": None}
+        data["updated_at"] = row.updated_at.isoformat() if (row and row.updated_at) else None
+        return data
+
+    def save_failure_debug_config(self, db: Session, model: str) -> dict:
+        blob = {"model": (model or "").strip()}
+        try:
+            row = db.query(AppDvsDebugConfig).filter_by(config_key=self._FAILURE_DEBUG_KEY).first()
+            if row:
+                row.config_json = blob
+            else:
+                row = AppDvsDebugConfig(config_key=self._FAILURE_DEBUG_KEY, config_json=blob)
+                db.add(row)
+            db.commit()
+            db.refresh(row)
+        except Exception as exc:
+            logger.error("Failed to save failure_debug config: %s", exc)
+            db.rollback()
+            raise
+        result = dict(blob)
         result["updated_at"] = row.updated_at.isoformat() if row.updated_at else None
         return result
 

@@ -34,3 +34,9 @@ DISPATCHER_ENABLED = _env_bool("DVS_ENABLE_DISPATCHER", ROLE in {"all", "worker"
 EXECUTOR_ENABLED = _env_bool("DVS_ENABLE_EXECUTOR", ROLE in {"all", "worker"})
 REGISTRY_ENABLED = _env_bool("DVS_ENABLE_REGISTRY", ROLE in {"all", "api"})
 WORKER_SLOT_REGISTRY_ENABLED = _env_bool("DVS_ENABLE_WORKER_SLOT_REGISTRY", ROLE in {"all", "worker"})
+DEBUGGER_ENABLED = _env_bool("DVS_ENABLE_DEBUGGER", ROLE in {"all", "debugger"})
+
+
+def is_debugger_role() -> bool:
+    """debugger 角色：独立 Pod，任务失败时 LLM 自动调试生成故障定位报告。"""
+    return ROLE in {"debugger", "all"}

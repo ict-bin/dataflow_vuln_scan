@@ -1356,6 +1356,35 @@ class TaskService:
             logger.warning("worker runtime cleanup failed [%s]: %s", label, exc, exc_info=True)
             return 0
 
+    # ── 失败调试下发 ──────────────────────────────────────────────────────
+    _DEBUGGER_HOST = os.environ.get("DVS_DEBUGGER_HOST", "secflow-app-dataflow-vuln-scan-debugger")
+    _DEBUGGER_PORT = int(os.environ.get("DVS_DEBUGGER_PORT", "8080"))
+
+    def _dispatch_failure_debug(self, task_id: str) -> None:
+        """任务终态后通知 debugger 角色调试（fire-and-forget）。
+
+        worker 在任务 failed/error/completed_limited 终态提交后调用。
+        debugger 是独立 Pod，不主动轮询任务表，靠此下发触发。
+        """
+        import urllib.request
+        import urllib.error
+        url = f"http://{self._DEBUGGER_HOST}:{self._DEBUGGER_PORT}/api/app/dataflow-vuln-scan/internal/failure-debug"
+        payload = json.dumps({"task_id": task_id}).encode()
+        for attempt in range(1, 4):
+            try:
+                req = urllib.request.Request(
+                    url, data=payload, method="POST",
+                    headers={"Content-Type": "application/json"},
+                )
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    if 200 <= resp.status < 300:
+                        logger.info("dispatched failure-debug for task %s (attempt %d)", task_id, attempt)
+                        return
+            except Exception as exc:
+                logger.warning("failure-debug dispatch attempt %d for %s failed: %s", attempt, task_id, exc)
+            _time.sleep(5)
+        logger.error("failure-debug dispatch exhausted for task %s (debugger unreachable)", task_id)
+
     def _worker_idle_for_pi_reaping(self) -> bool:
         if self.local_effective_running_task_count() != 0:
             self._idle_pi_reaper_idle_streak = 0
@@ -2875,6 +2904,14 @@ class TaskService:
             log_event(logger, logging.INFO, "terminal state committed", event="task_terminal_committed",
                       task_id=task_id, owner_id=WORKER_ID, epoch=epoch, control_version=control_version,
                       status=terminal_status)
+            # 失败/有限完成 → 通知 debugger 角色调试 (fire-and-forget)
+            if terminal_status in {"failed", "error", "completed_limited"}:
+                threading.Thread(
+                    target=self._dispatch_failure_debug,
+                    args=(task_id,),
+                    name=f"dvs_debug_dispatch_{task_id}",
+                    daemon=True,
+                ).start()
             terminal_cleaned_groups = self._cleanup_worker_runtime(label=f"task_terminal:{task_id}", task_id=task_id, reason="task_terminal_committed")
             def _record_terminal_cleanup(_db: Session, _attempt: int):
                 refreshed = _db.query(AppDvsTask).filter_by(task_id=task_id).first()

@@ -162,3 +162,33 @@ class AppDvsWorkerSlot(Base):
     max_concurrent_tasks: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     last_seen_status: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     last_heartbeat_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=now_local, index=True)
+
+
+class AppDvsFailureDebug(Base):
+    """任务失败时 LLM 自动调试生成的故障定位报告（debugger 角色）。"""
+    __tablename__ = "secflow_app_dvs_failure_debug"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    task_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    project_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    task_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    # status: pending | running | done | error | skipped
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending", index=True)
+    error_kind: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    failing_stage: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    summary: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    report_path: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)
+    report_json: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
+    debug_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=now_local, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=now_local, onupdate=now_local)
+
+
+class AppDvsDebugConfig(Base):
+    """Singleton config blob for the debugger role (e.g. debug model selection)."""
+    __tablename__ = "secflow_app_dvs_debug_config"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    config_key: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True, default="global")
+    config_json: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=now_local, onupdate=now_local)
