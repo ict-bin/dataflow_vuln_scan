@@ -35,8 +35,23 @@ logger = logging.getLogger("dvs.failure_debug")
 
 POLL_INTERVAL = float(os.environ.get("DVS_FAILURE_DEBUG_POLL_INTERVAL", "30"))
 MAX_EVENT_CONTEXT = int(os.environ.get("DVS_FAILURE_DEBUG_MAX_EVENTS", "60"))
-RUN_TIMEOUT = float(os.environ.get("DVS_FAILURE_DEBUG_TIMEOUT", "600"))
-SEGMENT_TIMEOUT = float(os.environ.get("DVS_FAILURE_DEBUG_SEGMENT_TIMEOUT", "240"))
+
+
+def _timeout_env(name: str) -> float | None:
+    """超时 env: 未设/<=0 → None (不限制 LLM 时间)。"""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return None
+    try:
+        v = float(raw)
+        return v if v > 0 else None
+    except ValueError:
+        return None
+
+
+# debugger 的 LLM 调试默认不限制时间 (run_agent 传 None = 无超时)
+RUN_TIMEOUT = _timeout_env("DVS_FAILURE_DEBUG_TIMEOUT")
+SEGMENT_TIMEOUT = _timeout_env("DVS_FAILURE_DEBUG_SEGMENT_TIMEOUT")
 DEBUG_MODEL = os.environ.get("DVS_FAILURE_DEBUG_MODEL", "").strip()
 SOURCE_ROOT = os.environ.get("DVS_FAILURE_DEBUG_SOURCE_ROOT", "/app")
 PI_DIR = os.environ.get("PI_CODING_AGENT_DIR", "/root/.pi/agent")
