@@ -137,6 +137,7 @@ class PropagationRecord:
     actual_args: list[str] = field(default_factory=list)  # clang 调用点实参表达式 (推参数位置)
     validations: list[Validation] = field(default_factory=list)   # 传播过程校验列表
     description: str = ""               # 传播污点内容说明 (如 "struct.field only")
+    _llm_said_external: bool = False   # LLM 原始 is_external (脚本覆盖前, 用于 clang 幽灵→indirect 判定)
 
     def __post_init__(self) -> None:
         if not self.prop_id:

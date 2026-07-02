@@ -286,15 +286,6 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                                   reason=override_reason)
             # 系统检测间接调用: target_function 是函数指针表达式 (含 -> / (* / [)
             is_indirect = bool(target_fn) and ("->" in target_fn or target_fn.startswith("*") or "[" in target_fn)
-            # LLM 标了 external + 有 target_function + 脚本覆盖了 external + target 不是真实函数
-            # → LLM 尝试报告函数指针调用但没写完整表达式, 自动走 indirect tracker
-            if not is_indirect and llm_said_external and target_fn and not is_ext:
-                if not store.find_function(target_fn):
-                    is_indirect = True
-                    self.on_event("v2_auto_indirect_detected",
-                                  function=func.name,
-                                  target_function=target_fn,
-                                  reason="LLM marked external + target not a real function → indirect call")
             dispatch_kind = "function_pointer_field" if is_indirect else ""
             if target_fn and not is_ext and not is_indirect:
                 callee_names.append(target_fn)  # 直接调用: clang 按名定位 CallExpr
@@ -311,6 +302,7 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                 is_external=is_ext,
                 is_indirect_call=is_indirect,
                 dispatch_kind=dispatch_kind,
+                _llm_said_external=llm_said_external,
                 validations=[Validation(str(v.get("condition") or ""), str(v.get("content") or ""))
                              for v in (p.get("validations") or []) if isinstance(v, dict)],
                 description=str(p.get("description") or ""),
@@ -339,7 +331,19 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                 continue
             ci = callsites.get(prop.target_function)
             if ci is None:
-                # 幽灵 callee: caller 函数体根本没调用它 → 丢弃 (修 v1 Gap-1)
+                # 幽灵 callee: caller 函数体没直接调用它
+                # 但如果 LLM 原来标了 is_external=true, 说明 LLM 认为这是间接调用
+                # (如 writecallback 是函数指针字段, LLM 没写完整表达式)
+                # → 不丢弃, 重新标为 indirect call 走 tracker
+                if getattr(prop, '_llm_said_external', False):
+                    prop.is_indirect_call = True
+                    prop.dispatch_kind = "function_pointer_field"
+                    self.on_event("v2_phantom_to_indirect",
+                                  function=prop.target_function,
+                                  caller=func.name,
+                                  reason="LLM marked external + clang phantom → indirect call")
+                    validated_props.append(prop)
+                    continue
                 logger.info("drop phantom callee %s in %s (not in body)", prop.target_function, func.name)
                 self.on_event("v2_phantom_callee_dropped", function=prop.target_function,
                            caller=func.name, claimed_line=prop.call_line)
