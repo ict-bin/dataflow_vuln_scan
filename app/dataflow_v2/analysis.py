@@ -195,12 +195,12 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
 
         # 5) 解析 JSON
         parsed = _extract_json_object(output.output, "propagations") or {}
-        return self._build_result(store, func, taint_params, parsed, fork_session)
+        return self._build_result(store, func, taint_params, parsed, fork_session, body)
 
     # ── 结果构造 + clang 标注 ───────────────────────────────────────────────
     def _build_result(self, store: DataflowStore, func: FunctionRecord,
                       taint_params: TaintParamInfo, parsed: dict,
-                      fork_session: Path) -> AnalysisResult:
+                      fork_session: Path, body: str = "") -> AnalysisResult:
         description = str(parsed.get("description") or "")
         self_contained = bool(parsed.get("self_contained", False))
 
