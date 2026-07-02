@@ -42,6 +42,77 @@ logger = logging.getLogger("dvs.dataflow_v2")
 
 _TAINT_ANALYSIS_PROMPT = _read_prompt("prompts/v2/taint-analysis.md")
 
+import re as _re
+
+
+def _extract_local_scope(func: FunctionRecord, body: str) -> set[str]:
+    """从函数签名+函数体提取局部作用域变量名集合 (参数+局部变量)。
+
+    用于校验 is_external: 如果 target_taint 的 base 指针是局部变量, 则不是外部写入。
+    """
+    scope: set[str] = set()
+    # 1) 从签名提取参数名: int foo(xmlDoc *doc, void *user_data, ...) -> {doc, user_data}
+    sig = func.signature or ""
+    paren = sig.find("(")
+    if paren >= 0:
+        end = sig.rfind(")") if ")" in sig else len(sig)
+        params_str = sig[paren+1:end]
+        for param in params_str.split(","):
+            param = param.strip()
+            if not param or param == "void":
+                continue
+            # 取最后一个标识符作为参数名: xmlDoc *doc -> doc, void* user_data -> user_data
+            ids = _re.findall(r'\b\w+\b', param)
+            if ids:
+                scope.add(ids[-1])
+    # 2) 从函数体提取局部变量声明 (启发式, 不需 clang)
+    for line in body.splitlines():
+        stripped = line.strip()
+        # 跳过空行/注释/控制语句
+        if not stripped or stripped.startswith("//") or stripped.startswith("/*"):
+            continue
+        if stripped.startswith(("if", "for", "while", "switch", "return", "else", "case", "break", "continue", "goto")):
+            continue
+        # 简单声明模式: type name; 或 type *name; 或 type name = ...
+        m = _re.match(r'(?:^\s*)(?:static\s+)?(?:const\s+)?[\w\s\*]+?\s+\*?(\w+)\s*[;=,]', stripped)
+        if m:
+            name = m.group(1)
+            if name not in ("int", "char", "void", "unsigned", "signed", "struct", "enum", "union", "static", "const", "size_t", "return"):
+                scope.add(name)
+    return scope
+
+
+def _validate_is_external(target_taint: str, target_function: str,
+                          local_scope: set[str]) -> tuple[bool, str]:
+    """脚本校验 is_external 是否合理, 返回 (修正后的值, 覆盖原因)。
+
+    规则:
+    1. target_function 非空 → is_external=false (有 callee, 是参数传播不是外部写入)
+    2. target_taint 含 "返回"/"return" → is_external=false (返回值不是外部变量)
+    3. target_taint 是 X->Y 或 X.Y → 提取 base X, 如果 X 在 local_scope → is_external=false
+    """
+    # 规则 1: 有 callee 就不是外部写入
+    if target_function:
+        return False, "target_function 非空, 是 callee 参数传播不是外部变量"
+    # 规则 2: 返回值不是外部变量
+    if target_taint and any(kw in target_taint.lower() for kw in ("返回", "return", "retval")):
+        return False, "target_taint 含返回值语义, 不是外部变量"
+    # 规则 3: struct 字段, 检查 base 指针是否局部
+    if target_taint:
+        base = None
+        if "->" in target_taint:
+            base = target_taint.split("->")[0].strip()
+        elif "." in target_taint:
+            base = target_taint.split(".")[0].strip()
+        if base and base in local_scope:
+            return False, f"base 指针 '{base}' 是本函数局部变量/参数, struct 字段不是外部变量"
+    # 规则 4: 简单名 (无 ->/./(/[) 且在局部作用域 → 是参数/局部变量, 不是外部
+    if target_taint and not any(c in target_taint for c in ("->", ".", "(", "[")):
+        if target_taint.strip() in local_scope:
+            return False, f"'{target_taint}' 是本函数参数/局部变量, 不是外部变量"
+    # 无法判定, 保留 LLM 的值
+    return True if target_taint else False, ""
+
 
 class TaintAnalysisCallbacks(AnalysisCallbacks):
     """注入编排器的具体 LLM + clang 实现。"""
@@ -135,6 +206,8 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
 
         # propagations: LLM 只输出语义字段; 结构字段 (call_line/condition/is_indirect/signature)
         # 由 clang/脚本提供。is_indirect_call 由 target_function 表达式模式检测 (脚本)。
+        # 脚本校验 is_external: 挡住 LLM 误标 (如 ctx->buf 不是外部变量)
+        local_scope = _extract_local_scope(func, body)
         raw_props: list[PropagationRecord] = []
         callee_names: list[str] = []
         for p in parsed.get("propagations") or []:
@@ -142,6 +215,17 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                 continue
             target_fn = str(p.get("target_function") or "").strip()
             is_ext = bool(p.get("is_external", False))
+            target_taint = str(p.get("target_taint") or "")
+            # 脚本校验 is_external
+            if is_ext:
+                is_ext, override_reason = _validate_is_external(
+                    target_taint, target_fn, local_scope)
+                if override_reason:
+                    self.on_event("v2_is_external_overridden",
+                                  function=func.name,
+                                  target_taint=target_taint,
+                                  target_function=target_fn,
+                                  reason=override_reason)
             # 系统检测间接调用: target_function 是函数指针表达式 (含 -> / (* / [)
             is_indirect = bool(target_fn) and ("->" in target_fn or target_fn.startswith("*") or "[" in target_fn)
             dispatch_kind = "function_pointer_field" if is_indirect else ""
