@@ -293,11 +293,12 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
 
     # ── 外部变量跟踪 (item 1) ────────────────────────────────────────────────
     def resolve_external_propagation(self, store: DataflowStore, func: FunctionRecord,
-                                     taint: TaintRecord, ctx: PathContext) -> list[tuple[FunctionRecord, TaintParamInfo]]:
-        """外部变量下游追踪: 脚本 grep + LLM 语义判断 (fresh session, 一个函数一个 user)"""
+                                     prop: PropagationRecord, ctx: PathContext) -> list[tuple[FunctionRecord, TaintParamInfo]]:
+        """外部变量下游追踪: 脚本查 DB + LLM 语义判断 (fresh session)"""
         from .trackers import resolve_external
         return resolve_external(self.cfg, self.source_root, self.sessions_dir, store,
-                               func, taint.name, taint.description or "",
+                               func, prop.target_taint_name or prop.source_taint_name,
+                               prop.description or "",
                                self.cancel_event, self.on_event, ctx.depth)
 
     # ── 漏洞挖掘 (item 2) ────────────────────────────────────────────────────

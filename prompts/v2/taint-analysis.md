@@ -55,7 +55,15 @@ target_file —— 这些由服务端 clang/脚本从 AST 精确获取 (行号/�
   包括上游传入的前置校验中**在本函数内仍然生效**的部分, 以及本函数新增加的校验。
 - `description`：传播语义 + callee 行为事实 (如"C 返回 PyBytes_AsString 借用指针, 非 xmlMalloc"),
   供下游漏洞挖掘识别跨函数漏洞 (如 double-free)。
-- `is_external`：仅当污点传播到**外部/全局数据变量**（如 `g_msg = msg`、`ctx->user_data = msg` 这类**数据赋值**）时为 true。此时编排器会触发 nonlocal 跟踪。
+- `is_external`：仅当污点被写入**非本函数入参、且非本函数内定义的变量**时为 true——即污点流到了**函数作用域之外**的变量。
+  **是 external 的**：全局变量（`g_msg = msg`）、静态变量（`static cache = data`）、文件作用域变量。
+  **不是 external 的**：
+  - 本函数入参（如 `buf`）—— 这是函数的输入, 不是外部写入;
+  - 本函数内定义的局部变量（如 `xmlC14NCtxPtr ctx`）—— 是本函数的临时存储;
+  - 通过本函数局部变量/入参指针访问的 struct 字段（如 `ctx->buf = buf`）—— `ctx` 是本函数的局部变量, struct 内容通过 `ctx` 指针传给 callee 是正常参数传播, 不是外部写入;
+  - 函数返回值（如 `return ret`）—— 返回值不是变量赋值。
+  
+  **关键区分**：如果污点作为**参数传给 callee**（如 `C(msg)`）, 这永远是 `is_external=false`（正常 callee 传播）—— callee 内部如何处理该参数（存入 struct、写入全局）是 callee 自己的污点分析, 不在本函数的传播报告中。**不要替 callee 报告它内部的数据赋值**。
 - **函数指针/回调间接调用**：若污点经由函数指针调用传出（如 `ctxt->sax->processingInstruction(...)`、`(*fp)(msg)`、`ptr->handler(msg)`），`target_function` 填被调用的**函数指针表达式**（如 `ctxt->sax->processingInstruction`），`is_external=false`。服务端 clang 会自动判定为间接调用 (is_indirect_call) 并触发 function_pointer tracker 搜注册点解析真实处理函数。**不要把函数指针调用标为 is_external**。
 
 ## self_contained 判定准则（设计核心）
@@ -70,13 +78,13 @@ target_file —— 这些由服务端 clang/脚本从 AST 精确获取 (行号/�
   - 本函数就是漏洞触发点，不依赖 callee 内部行为。
 - **false（后序挖）**：本函数对污点只是中转/校验/转发，无自身 sink。例如：
   - 污点透传给 callee（`C(msg)`），本函数无危险操作；
-  - 污点写到外部变量（`g_msg=msg`），需等跟入函数 H/I 的处理；
+  - 污点写到全局/静态变量（`g_msg=msg`），需等跟入函数 H/I 的处理；
   - 本函数仅做校验后转发，漏洞与否取决于下游。
 - **不确定时取 false**（保守后序，避免误判）。
 
 ## 禁止事项
 
-- ❌ 不要跨函数递归分析 callee 内部行为（callee 函数体不在你的上下文）；
+- ❌ 不要跨函数递归分析 callee 内部行为（callee 函数体不在你的上下文）——例如本函数调 `C(buf)`, 不要报告 "C 把 buf 存入 ctx->buf" 这是 C 的内部行为, 本函数只报 `buf -> C(buf)` 正常参数传播；
 - ❌ 不要凭函数名臆断 callee 行为（`xxx_append` 不一定 realloc，`xxx_check` 不一定全校验）；
 - ❌ 不要编造 `call_line`，必须是本函数体真实行号；
 - ❌ 不要把未经本函数调用的 callee 写进 `target_function`；

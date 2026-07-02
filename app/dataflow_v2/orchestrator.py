@@ -85,10 +85,10 @@ class AnalysisCallbacks:
         return AnalysisResult()
 
     def resolve_external_propagation(self, store: DataflowStore, func: FunctionRecord,
-                                     taint: TaintRecord, ctx: PathContext) -> list[tuple[FunctionRecord, TaintParamInfo]]:
-        """taint 传播到外部变量 (如 g_msg=msg) 时, 跟踪 LLM 查找跟入函数。
+                                     prop: PropagationRecord, ctx: PathContext) -> list[tuple[FunctionRecord, TaintParamInfo]]:
+        """taint 传播到外部变量 (如 ctx->buf) 时, 跟踪查找读取该变量的跟入函数。
 
-        返回 [(目标函数, 该路径上的污点参数信息)] 用于分叉路径。TODO: 接入。
+        返回 [(目标函数, 该路径上的污点参数信息)] 用于分叉路径。
         """
         return []
 
@@ -329,7 +329,7 @@ class DfsOrchestrator:
             elif p.is_external:
                 # 外部变量传播 → 跟踪 LLM 找跟入函数, 每个跟入 fork 一条子链
                 targets = self._run_llm(
-                    self.cbs.resolve_external_propagation, self.store, func, _prop_source_taint(self.store, p), ctx)
+                    self.cbs.resolve_external_propagation, self.store, func, p, ctx)
                 if not targets:
                     continue  # TODO stub 未接: 不 fork
                 new_paths = []

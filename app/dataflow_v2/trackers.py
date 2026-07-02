@@ -2,6 +2,11 @@
 
 不 grep NFS: 查 functions.db 获取候选函数 + read_function_body 从原源文件按行读函数体。
 LLM 只做语义判断 (fresh session, 父函数信息放 prompt, 可有限探索)。
+
+设计约束:
+  - 候选上限 20 个 (避免几百个候选逐个 LLM 调用)
+  - 批量一次 LLM 调用 (所有候选放一个 prompt, 不是逐个调)
+  - 用完整变量名匹配 (如 ctx->buf, 不只取 buf)
 """
 from __future__ import annotations
 
@@ -19,39 +24,76 @@ from .function_extractor import ensure_file_indexed, read_function_body
 
 logger = logging.getLogger("dvs.dataflow_v2.trackers")
 
+BATCH_SIZE = 10
+
+
+def _match_patterns(var_name: str) -> list[str]:
+    """根据变量名生成匹配模式列表 (考虑作用域)。
+
+    全局变量 g_msg -> ["g_msg"]
+    struct 字段 ctx->buf -> ["ctx->buf", "->buf"] (同指针名或同字段访问)
+    类成员 this->member -> ["this->member", "->member"]
+    简单变量 msg -> ["msg"] (至少 3 字符)
+    """
+    patterns = []
+    clean = var_name.strip("() ")
+    if len(clean) >= 3:
+        patterns.append(clean)
+    # struct/指针字段: ctx->buf -> 也匹配 ->buf (不同指针名访问同字段)
+    if "->" in clean:
+        field = clean.rsplit("->", 1)[-1]
+        if len(field) >= 3:
+            patterns.append("->" + field)
+    # 类成员: this->member 或 obj.member -> 也匹配 .member
+    if "." in clean and "->" not in clean:
+        field = clean.rsplit(".", 1)[-1]
+        if len(field) >= 3:
+            patterns.append("." + field)
+    # 去重, 保留顺序
+    return list(dict.fromkeys(patterns))
+
 
 def _find_refs_in_db(source_root: str, var_name: str, store: DataflowStore,
                      exclude_func_id: str = "") -> list[dict]:
-    """查数据库所有函数, 读函数体, 找引用 var_name 的候选 (不 grep NFS)。"""
-    short = var_name.rsplit("->", 1)[-1].split(".")[-1].strip("() ")
-    if len(short) < 2:
+    """查数据库所有函数, 读函数体, 找引用 var_name 的候选 (不 grep NFS)。
+
+    用完整变量路径匹配 (考虑作用域):
+    - 全局变量 g_msg -> 匹配 g_msg
+    - struct 字段 ctx->buf -> 匹配 ctx->buf 或 ->buf
+    不限制候选数量, 由 resolve_external 分批处理。
+    """
+    patterns = _match_patterns(var_name)
+    if not patterns:
         return []
     candidates = []
     seen = set()
     for f in store.list_functions():
         if f.func_id == exclude_func_id:
             continue
-        # 短名匹配 (C++ 限定名也查短名部分)
-        nm = f.name.rsplit("::", 1)[-1]
-        if short.lower() not in nm.lower():
-            # 读函数体检查是否引用该变量
-            body = read_function_body(source_root, f, max_lines=500)
-            if short not in body:
-                continue
-        else:
-            body = read_function_body(source_root, f, max_lines=500)
+        body = read_function_body(source_root, f, max_lines=300)
+        if not body:
+            continue
+        # 用完整路径匹配, 任一 pattern 命中即可
+        matched_pattern = None
+        for p in patterns:
+            if p in body:
+                matched_pattern = p
+                break
+        if not matched_pattern:
+            continue
         if f.func_id in seen:
             continue
         seen.add(f.func_id)
-        # 找到引用行
+        # 找引用行
         ref_line = ""
         for i, line in enumerate(body.splitlines(), f.start_line):
-            if short in line:
+            if matched_pattern in line:
                 ref_line = f"L{i}: {line.strip()}"
                 break
         candidates.append({
             "function": f.name, "file": f.file, "func_id": f.func_id,
-            "line": ref_line, "body": body[:8000],
+            "line": ref_line, "body": body[:3000],
+            "matched": matched_pattern,
         })
     return candidates
 
@@ -61,40 +103,49 @@ def resolve_external(
     func: FunctionRecord, taint_name: str, taint_description: str,
     cancel_event: Any = None, on_event: Callable = None, depth: int = 0,
 ) -> list[tuple[FunctionRecord, TaintParamInfo]]:
-    """外部变量下游追踪: 查数据库 + 读函数体找引用 → LLM 判断 (fresh session)。"""
+    """外部变量下游追踪: 查数据库 + 分批 LLM 判断 (fresh session, 每批最多 10 个函数)。"""
     acfg = cfg.workers.agents[0] if cfg.workers.agents else None
     if acfg is None:
         return []
 
-    # 1. 查数据库找候选 (不 grep NFS)
+    # 1. 查数据库找候选 (不 grep NFS, 不限制数量)
     candidates = _find_refs_in_db(source_root, taint_name, store, exclude_func_id=func.func_id)
     if not candidates:
         return []
 
-    # 2. LLM fresh session, 一个函数一个 user
+    # 2. LLM fresh session, 分批调用 (每批最多 BATCH_SIZE 个候选函数)
     fork_session = sessions_dir / f"d{depth:02d}-{safe_name(func.name)}-track-{safe_name(taint_name)}.jsonl"
     v2_system = build_v2_system_prompt(custom="tracker")
     system_prompt = (v2_system + "\n\n" if v2_system else "") + (
         "你是数据流污点分析中的非局部变量使用点追踪器。\n"
-        "目标: 判断给定函数是否是外部变量的真实下游使用点。\n"
-        "每个 user 消息提供一个候选函数的完整函数体和引用命中点。\n"
+        "目标: 从候选函数列表中判断哪些是外部变量的真实下游使用点。\n"
         "可以 read 验证 (如 g_1=g_2 链), 但候选已从数据库预筛。\n"
-        '只输出 JSON: {"confirmed": true/false, "reason": "..."}\n'
+        '输出 JSON: {"confirmed": [{"function": "...", "reason": "..."}, ...]}\n'
     )
     v2_env = {"DVS_V2_DB_DIR": str(sessions_dir.parent / "dataflow-v2"),
               "DVS_SOURCE_ROOT": source_root}
-    confirmed = []
-    for cand in candidates:
-        user_msg = (
+
+    confirmed_names = set()
+    total_batches = (len(candidates) + BATCH_SIZE - 1) // BATCH_SIZE
+    for batch_idx in range(total_batches):
+        batch_start = batch_idx * BATCH_SIZE
+        batch = candidates[batch_start:batch_start + BATCH_SIZE]
+        cand_info = []
+        for i, c in enumerate(batch):
+            cand_info.append(
+                f"### 候选 {batch_start+i+1}/{len(candidates)}: {c['function']} ({c['file']})\n"
+                f"引用命中: `{c['line']}`\n"
+                f"```c\n{c['body'][:2000]}\n```"
+            )
+        prompt = (
             f"## 父函数: {func.file}::{func.name}\n"
             f"外部变量: `{taint_name}` ({taint_description})\n\n"
-            f"## 候选函数: {cand['function']} ({cand['file']})\n"
-            f"引用命中: `{cand['line']}`\n\n"
-            f"## 函数体:\n```c\n{cand['body']}\n```\n\n"
-            f"这个函数是否是 `{taint_name}` 的真实下游污点使用点?"
+            f"## 候选函数 (本批 {len(batch)} 个, 共 {len(candidates)} 个, 第 {batch_idx+1}/{total_batches} 批):\n\n"
+            + "\n\n".join(cand_info) + "\n\n"
+            f"从候选中找出 `{taint_name}` 的真实下游污点使用点。"
         )
         output = run_agent(
-            prompt=user_msg, model=acfg.model, tools=acfg.tools or cfg.workers.default_tools,
+            prompt=prompt, model=acfg.model, tools=acfg.tools or cfg.workers.default_tools,
             cwd=source_root, session_file=str(fork_session), system_prompt=system_prompt,
             cancel_event=cancel_event, run_timeout_seconds=min(cfg.agent_run_timeout_seconds, 600),
             timeout_retry_enabled=cfg.agent_timeout_retry_enabled,
@@ -105,10 +156,18 @@ def resolve_external(
                           "task_pi_dir": "", "agent_role": "workers"},
         )
         parsed = _extract_json_object(output.output, "confirmed") or {}
-        if parsed.get("confirmed") is True:
-            rec = store.find_function(cand["function"])
-            if rec:
-                confirmed.append((rec, TaintParamInfo(positions=[], signature="", names=[taint_name])))
+        for item in parsed.get("confirmed") or []:
+            if isinstance(item, dict):
+                fn = str(item.get("function") or "").strip()
+                if fn:
+                    confirmed_names.add(fn)
+
+    confirmed = []
+    for name in confirmed_names:
+        rec = store.find_function(name)
+        if rec:
+            confirmed.append((rec, TaintParamInfo(positions=[], signature="", names=[taint_name])))
+
     if on_event:
         on_event("v2_external_tracked", function=func.name, var=taint_name,
                  candidates=len(candidates), confirmed=len(confirmed))
@@ -179,7 +238,7 @@ def resolve_indirect(
     )
     v2_env = {"DVS_V2_DB_DIR": str(sessions_dir.parent / "dataflow-v2"),
               "DVS_SOURCE_ROOT": source_root}
-    cand_info = [f"### {c['name']} ({c['file']})\n```c\n{c['body']}\n```" for c in candidates[:30]]
+    cand_info = [f"### {c['name']} ({c['file']})\n```c\n{c['body']}\n```" for c in candidates]
     prompt = (
         f"## 父函数: {func.file}::{func.name}\n"
         f"函数指针: `{fp_expr}`\n"
