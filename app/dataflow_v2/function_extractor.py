@@ -1,12 +1,15 @@
-"""tree-sitter 函数提取: 全量索引源码目录所有函数到 functions.db。
+"""tree-sitter 函数提取 + 作用域索引: 函数/include/class 继承图。
 
-不单独存函数体文件 (避免拷贝整份源码)。数据库存 file + start_line + end_line,
-需要函数体时用 read_function_body() 从原源文件按行读取。
+冷启动全量索引源码目录:
+  - 函数: 提取所有函数到 functions.db (不存函数体文件, 按行读源文件)
+  - include 索引: 提取 #include 指令, 建传递闭包 (C 作用域)
+  - class 继承图: 提取 class/struct 定义, 基类, 成员变量 (C++ 作用域)
 """
 from __future__ import annotations
 
 import hashlib
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -132,11 +135,190 @@ def ensure_file_indexed(source_root: str, rel_file: str, store: DataflowStore) -
     extract_file_functions(source_root, rel_file, store)
 
 
+# ── include 索引 (C 作用域) ──────────────────────────────────────────────
+
+_INCLUDE_RE = re.compile(r'^\s*#\s*include\s+[<"]([^>"]+)[>"]', re.MULTILINE)
+
+
+def _extract_includes(source_root: str, rel_file: str) -> list[str]:
+    """提取文件的 #include 指令 (直接 include, 非传递)。"""
+    src_path = Path(source_root) / rel_file
+    if not src_path.is_file():
+        return []
+    try:
+        text = src_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    return _INCLUDE_RE.findall(text)
+
+
+def _resolve_header_path(source_root: str, header: str) -> str | None:
+    """尝试在源码树中找到 header 的相对路径。"""
+    # header 可能是 "path/to/header.h" 或 <header.h>
+    candidates = [
+        header,
+        header.lstrip("/"),
+    ]
+    for c in candidates:
+        p = Path(source_root) / c
+        if p.is_file():
+            return c
+    # 搜同名文件
+    name = Path(header).name
+    for p in Path(source_root).rglob(name):
+        return str(p.relative_to(source_root)).replace("\\", "/")
+    return None
+
+
+def _build_include_index(source_root: str, store: DataflowStore) -> int:
+    """建 include 传递闭包索引: (header, file) 对。
+
+    对于每个 .c/.cpp 文件, 计算它传递性 include 的所有 header, 存入 include_index。
+    """
+    src = Path(source_root)
+    exts = {".c", ".cpp", ".cc", ".cxx"}
+    # 1) 收集所有文件的直接 include
+    file_includes: dict[str, list[str]] = {}  # rel_file -> [headers]
+    for path in src.rglob("*"):
+        if path.suffix.lower() not in exts and path.suffix.lower() not in {".h", ".hpp"}:
+            continue
+        try:
+            rel = str(path.relative_to(src)).replace("\\", "/")
+        except ValueError:
+            continue
+        incs = _extract_includes(source_root, rel)
+        if incs:
+            file_includes[rel] = incs
+
+    # 2) 对每个 .c/.cpp 文件, 计算传递闭包
+    count = 0
+    for rel_file, direct_incs in file_includes.items():
+        if not any(rel_file.endswith(ext) for ext in exts):
+            continue  # 只对 .c/.cpp 文件建索引
+        # BFS 传递闭包
+        visited: set[str] = set()
+        queue = list(direct_incs)
+        while queue:
+            header = queue.pop(0)
+            if header in visited:
+                continue
+            visited.add(header)
+            # 解析 header 在源码树中的路径, 获取它的 includes
+            resolved = _resolve_header_path(source_root, header)
+            if resolved and resolved in file_includes:
+                for sub_inc in file_includes[resolved]:
+                    if sub_inc not in visited:
+                        queue.append(sub_inc)
+        # 存入 include_index
+        for header in visited:
+            store.add_include(header, rel_file)
+        count += 1
+
+    logger.info("include index: %d files, %d entries", count,
+                len(store._q("functions", "SELECT COUNT(*) as c FROM include_index")))
+    return count
+
+
+# ── class 继承图 (C++ 作用域) ────────────────────────────────────────────
+
+def _extract_class_info(source: bytes, tree: Any, rel_file: str) -> list[dict]:
+    """从 AST 提取 class/struct 定义: 类名, 基类, 成员变量。"""
+    classes: list[dict] = []
+
+    def walk(node: Any) -> None:
+        # C++ class_definition 或 struct_specifier (C struct with body)
+        if node.type in ("class_definition", "struct_specifier", "union_specifier"):
+            name = ""
+            # 类名: child_by_field_name("name")
+            name_node = node.child_by_field_name("name")
+            if name_node is not None:
+                name = name_node.text.decode("utf-8", "replace")
+            if not name:
+                for child in node.children:
+                    if child.type in ("identifier", "type_identifier"):
+                        name = child.text.decode("utf-8", "replace")
+                        break
+            if not name:
+                for child in node.children:
+                    walk(child)
+                return
+            # 基类: base_class_clause
+            bases: list[str] = []
+            for child in node.children:
+                if child.type == "base_class_clause":
+                    # base_class_clause 的子节点是 base_class 节点
+                    for bc in child.children:
+                        if bc.type in ("base_class", "qualified_identifier", "identifier"):
+                            txt = bc.text.decode("utf-8", "replace").strip()
+                            if txt and txt not in ("public", "private", "protected", "virtual", ":"):
+                                bases.append(txt)
+            # 成员变量: field_declaration (不是 function)
+            members: list[tuple[str, str]] = []
+            body = node.child_by_field_name("body")
+            if body is not None:
+                for child in body.children:
+                    if child.type == "field_declaration" or child.type == "field_declaration_list":
+                        # 提取成员名: 最后一个 identifier
+                        field_name = ""
+                        field_type = ""
+                        for fc in child.children:
+                            if fc.type in ("identifier", "field_identifier", "type_identifier"):
+                                field_name = fc.text.decode("utf-8", "replace")
+                            elif fc.type in ("type_descriptor", "primitive_type", "sized_type_specifier"):
+                                field_type = fc.text.decode("utf-8", "replace")
+                        if field_name:
+                            members.append((field_name, field_type))
+            classes.append({
+                "name": name, "bases": bases, "members": members, "file": rel_file,
+            })
+        for child in node.children:
+            walk(child)
+
+    walk(tree.root_node)
+    return classes
+
+
+def _build_class_hierarchy(source_root: str, store: DataflowStore) -> int:
+    """建 class 继承图 + member 索引。"""
+    if not _TS_AVAILABLE:
+        return 0
+    src = Path(source_root)
+    exts = {".h", ".hpp", ".cpp", ".cc", ".cxx"}
+    count = 0
+    for path in src.rglob("*"):
+        if path.suffix.lower() not in exts:
+            continue
+        try:
+            rel = str(path.relative_to(src)).replace("\\", "/")
+        except ValueError:
+            continue
+        source = path.read_bytes()
+        try:
+            parser = _parser_for(path)
+            if parser is None:
+                continue
+            tree = parser.parse(source)
+        except Exception:
+            continue
+        classes = _extract_class_info(source, tree, rel)
+        for cls in classes:
+            store.add_class(cls["name"], cls["bases"], cls["file"])
+            for member_name, member_type in cls["members"]:
+                store.add_class_member(cls["name"], member_name, member_type, cls["file"])
+            count += 1
+
+    logger.info("class hierarchy: %d classes", count)
+    return count
+
+
+# ── 全量索引入口 ──────────────────────────────────────────────────────────
+
 def index_source_tree(source_root: str, store: DataflowStore) -> int:
-    """全量索引源码目录 (冷启动)。返回索引的文件数。"""
+    """全量索引源码目录 (冷启动): 函数 + include 索引 + class 继承图。"""
     if not _TS_AVAILABLE:
         logger.warning("tree-sitter 不可用, 跳过源码索引")
         return 0
+    # 1) 函数索引
     count = 0
     src = Path(source_root)
     exts = {".c", ".h", ".cpp", ".cc", ".cxx", ".hpp"}
@@ -150,4 +332,8 @@ def index_source_tree(source_root: str, store: DataflowStore) -> int:
         extract_file_functions(source_root, rel, store)
         count += 1
     logger.info("indexed %d source files, %d functions", count, len(store.list_functions()))
+    # 2) include 索引
+    _build_include_index(source_root, store)
+    # 3) class 继承图
+    _build_class_hierarchy(source_root, store)
     return count

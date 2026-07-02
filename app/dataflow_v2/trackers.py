@@ -1,12 +1,10 @@
-"""dataflow-v2 tracker: 数据库驱动 + LLM 语义判断 (fresh session)。
+"""dataflow-v2 tracker: 作用域预筛 + LLM 语义判断 (fresh session)。
 
-不 grep NFS: 查 functions.db 获取候选函数 + read_function_body 从原源文件按行读函数体。
-LLM 只做语义判断 (fresh session, 父函数信息放 prompt, 可有限探索)。
-
-设计约束:
-  - 候选上限 20 个 (避免几百个候选逐个 LLM 调用)
-  - 批量一次 LLM 调用 (所有候选放一个 prompt, 不是逐个调)
-  - 用完整变量名匹配 (如 ctx->buf, 不只取 buf)
+4 层防护:
+  Layer 1: 脚本校验 (analysis.py, 已实现) — 挡住非外部变量
+  Layer 2: 预筛选 (本文件) — include 索引/class 继承图缩小候选
+  Layer 3: LLM 上下文 — 传路径+命中行, 不传函数体 (LLM 用 v2_db 按需读)
+  Layer 4: LLM 语义判断 — 分批 10 个/次
 """
 from __future__ import annotations
 
@@ -28,52 +26,130 @@ BATCH_SIZE = 10
 
 
 def _match_patterns(var_name: str) -> list[str]:
-    """根据变量名生成匹配模式列表 (考虑作用域)。
-
-    全局变量 g_msg -> ["g_msg"]
-    struct 字段 ctx->buf -> ["ctx->buf", "->buf"] (同指针名或同字段访问)
-    类成员 this->member -> ["this->member", "->member"]
-    简单变量 msg -> ["msg"] (至少 3 字符)
-    """
+    """根据变量名生成匹配模式列表 (考虑作用域)。"""
     patterns = []
     clean = var_name.strip("() ")
     if len(clean) >= 3:
         patterns.append(clean)
-    # struct/指针字段: ctx->buf -> 也匹配 ->buf (不同指针名访问同字段)
     if "->" in clean:
         field = clean.rsplit("->", 1)[-1]
         if len(field) >= 3:
             patterns.append("->" + field)
-    # 类成员: this->member 或 obj.member -> 也匹配 .member
     if "." in clean and "->" not in clean:
         field = clean.rsplit(".", 1)[-1]
         if len(field) >= 3:
             patterns.append("." + field)
-    # 去重, 保留顺序
     return list(dict.fromkeys(patterns))
 
 
-def _find_refs_in_db(source_root: str, var_name: str, store: DataflowStore,
-                     exclude_func_id: str = "") -> list[dict]:
-    """查数据库所有函数, 读函数体, 找引用 var_name 的候选 (不 grep NFS)。
+# ── Layer 2: 预筛选 ──────────────────────────────────────────────────────
 
-    用完整变量路径匹配 (考虑作用域):
-    - 全局变量 g_msg -> 匹配 g_msg
-    - struct 字段 ctx->buf -> 匹配 ctx->buf 或 ->buf
-    不限制候选数量, 由 resolve_external 分批处理。
+def _prefilter_candidates(source_root: str, var_name: str, func: FunctionRecord,
+                          store: DataflowStore, all_funcs: list[FunctionRecord]) -> list[FunctionRecord] | None:
+    """按变量类型预筛选候选函数, 返回 None 表示无法预筛 (用全库 fallback)。
+
+    变量类型判定:
+    - X->Y, base X == "this" → C++ 类成员 → class 继承图预筛
+    - X->Y, base X 是参数 → C/C++ 参数 struct 字段 → 类型签名预筛
+    - 简单名 → 全局变量 → include 索引预筛 (找声明文件)
     """
+    clean = var_name.strip("() ")
+
+    # C++ 类成员: this->member
+    if clean.startswith("this->") or clean.startswith("this."):
+        member = clean.split("->", 1)[-1].split(".", 1)[-1] if "." in clean else clean.split("->", 1)[-1]
+        # 从函数名提取类名: Class::method → Class
+        class_name = func.name.split("::")[0] if "::" in func.name else ""
+        if class_name:
+            method_names = set(store.get_class_scope_methods(class_name, member))
+            if method_names:
+                return [f for f in all_funcs if f.name in method_names and f.func_id != func.func_id]
+        return None  # 无法预筛, fallback
+
+    # C++ 静态成员: ClassName::static_member
+    if "::" in clean and "->" not in clean:
+        class_name = clean.split("::")[0]
+        method_names = set(store.get_class_scope_methods(class_name))
+        if method_names:
+            return [f for f in all_funcs if f.name in method_names and f.func_id != func.func_id]
+        return None
+
+    # X->Y 或 X.Y: 提取 base, 从签名找类型
+    base = None
+    if "->" in clean:
+        base = clean.split("->")[0].strip()
+    elif "." in clean:
+        base = clean.split(".")[0].strip()
+
+    if base and base != "this":
+        # 从函数签名提取 base 的类型
+        sig = func.signature or ""
+        # 简单提取: 在签名中找 base 前面的类型词
+        # e.g., "xmlOutputBuffer *buf" → base="buf", type="xmlOutputBuffer"
+        type_match = re.search(rf'(\w[\w\s\*]*?)\s*\**\s*{re.escape(base)}\b', sig)
+        if type_match:
+            type_name = type_match.group(1).strip().split()[-1]  # 取最后一个词
+            # 去掉指针符号
+            type_name = type_name.rstrip("*")
+            if type_name and len(type_name) >= 3:
+                # 查 class 继承图: type_name 可能是 class
+                method_names = set(store.get_class_scope_methods(type_name))
+                if method_names:
+                    return [f for f in all_funcs if f.name in method_names and f.func_id != func.func_id]
+                # 查签名含同类型的函数
+                sig_funcs = set(store.get_functions_with_type_in_signature(type_name))
+                if sig_funcs:
+                    return [f for f in all_funcs if f.name in sig_funcs and f.func_id != func.func_id]
+        return None  # 无法确定类型, fallback
+
+    # 全局变量: 在父函数文件找声明
+    if not base:
+        # 尝试在父函数文件中找变量声明
+        from .function_extractor import _extract_includes
+        parent_file = func.file
+        # 简单 regex 在源文件中搜声明
+        src_path = Path(source_root) / parent_file
+        if src_path.is_file():
+            try:
+                text = src_path.read_text(encoding="utf-8", errors="replace")
+                # 搜全局声明: type g_msg = 或 extern type g_msg
+                decl_re = re.compile(rf'(?:extern\s+)?[\w\s\*]+\s+{re.escape(clean)}\s*[=;]', re.MULTILINE)
+                if decl_re.search(text):
+                    # 找到声明, 用 include 索引预筛
+                    files = set(store.get_files_including(parent_file))
+                    files.add(parent_file)  # 声明文件本身
+                    if files:
+                        return [f for f in all_funcs if f.file in files and f.func_id != func.func_id]
+            except OSError:
+                pass
+        return None  # 找不到声明, fallback
+
+    return None
+
+
+# ── Layer 3+4: LLM 判断 (传路径不传函数体) ──────────────────────────────
+
+def _find_refs_in_db(source_root: str, var_name: str, store: DataflowStore,
+                     exclude_func_id: str = "",
+                     prefiltered: list[FunctionRecord] | None = None) -> list[dict]:
+    """查数据库找候选, 优先用预筛结果。"""
     patterns = _match_patterns(var_name)
     if not patterns:
         return []
+
+    if prefiltered is not None:
+        search_funcs = prefiltered
+    else:
+        search_funcs = store.list_functions()
+
     candidates = []
     seen = set()
-    for f in store.list_functions():
+    for f in search_funcs:
         if f.func_id == exclude_func_id:
             continue
         body = read_function_body(source_root, f, max_lines=300)
         if not body:
             continue
-        # 用完整路径匹配, 任一 pattern 命中即可
         matched_pattern = None
         for p in patterns:
             if p in body:
@@ -84,7 +160,6 @@ def _find_refs_in_db(source_root: str, var_name: str, store: DataflowStore,
         if f.func_id in seen:
             continue
         seen.add(f.func_id)
-        # 找引用行
         ref_line = ""
         for i, line in enumerate(body.splitlines(), f.start_line):
             if matched_pattern in line:
@@ -92,8 +167,7 @@ def _find_refs_in_db(source_root: str, var_name: str, store: DataflowStore,
                 break
         candidates.append({
             "function": f.name, "file": f.file, "func_id": f.func_id,
-            "line": ref_line, "body": body[:3000],
-            "matched": matched_pattern,
+            "line": ref_line, "matched": matched_pattern,
         })
     return candidates
 
@@ -103,23 +177,33 @@ def resolve_external(
     func: FunctionRecord, taint_name: str, taint_description: str,
     cancel_event: Any = None, on_event: Callable = None, depth: int = 0,
 ) -> list[tuple[FunctionRecord, TaintParamInfo]]:
-    """外部变量下游追踪: 查数据库 + 分批 LLM 判断 (fresh session, 每批最多 10 个函数)。"""
+    """外部变量下游追踪: 预筛 + 分批 LLM 判断 (传路径不传函数体)。"""
     acfg = cfg.workers.agents[0] if cfg.workers.agents else None
     if acfg is None:
         return []
 
-    # 1. 查数据库找候选 (不 grep NFS, 不限制数量)
-    candidates = _find_refs_in_db(source_root, taint_name, store, exclude_func_id=func.func_id)
+    all_funcs = store.list_functions()
+
+    # Layer 2: 预筛
+    prefiltered = _prefilter_candidates(source_root, taint_name, func, store, all_funcs)
+    if prefiltered is not None:
+        logger.info("prefiltered %s: %d -> %d candidates", taint_name, len(all_funcs), len(prefiltered))
+
+    # 查候选 (用预筛结果或全库)
+    candidates = _find_refs_in_db(source_root, taint_name, store,
+                                  exclude_func_id=func.func_id,
+                                  prefiltered=prefiltered)
     if not candidates:
         return []
 
-    # 2. LLM fresh session, 分批调用 (每批最多 BATCH_SIZE 个候选函数)
+    # Layer 3+4: LLM 分批判断 (传路径+命中行, 不传函数体)
     fork_session = sessions_dir / f"d{depth:02d}-{safe_name(func.name)}-track-{safe_name(taint_name)}.jsonl"
     v2_system = build_v2_system_prompt(custom="tracker")
     system_prompt = (v2_system + "\n\n" if v2_system else "") + (
         "你是数据流污点分析中的非局部变量使用点追踪器。\n"
         "目标: 从候选函数列表中判断哪些是外部变量的真实下游使用点。\n"
-        "可以 read 验证 (如 g_1=g_2 链), 但候选已从数据库预筛。\n"
+        "每个候选只提供函数名、文件路径和引用命中行。用 v2_db lookup <函数名> 按需读取函数体。\n"
+        "可以 read 验证 (如 g_1=g_2 链)。\n"
         '输出 JSON: {"confirmed": [{"function": "...", "reason": "..."}, ...]}\n'
     )
     v2_env = {"DVS_V2_DB_DIR": str(sessions_dir.parent / "dataflow-v2"),
@@ -130,12 +214,14 @@ def resolve_external(
     for batch_idx in range(total_batches):
         batch_start = batch_idx * BATCH_SIZE
         batch = candidates[batch_start:batch_start + BATCH_SIZE]
+        # 只传路径+命中行, 不传函数体
         cand_info = []
         for i, c in enumerate(batch):
             cand_info.append(
-                f"### 候选 {batch_start+i+1}/{len(candidates)}: {c['function']} ({c['file']})\n"
+                f"### 候选 {batch_start+i+1}/{len(candidates)}: {c['function']}\n"
+                f"文件: {c['file']}\n"
                 f"引用命中: `{c['line']}`\n"
-                f"```c\n{c['body'][:2000]}\n```"
+                f"(用 `v2_db lookup {c['function']}` 读取函数体)"
             )
         prompt = (
             f"## 父函数: {func.file}::{func.name}\n"
@@ -143,6 +229,7 @@ def resolve_external(
             f"## 候选函数 (本批 {len(batch)} 个, 共 {len(candidates)} 个, 第 {batch_idx+1}/{total_batches} 批):\n\n"
             + "\n\n".join(cand_info) + "\n\n"
             f"从候选中找出 `{taint_name}` 的真实下游污点使用点。"
+            f"用 v2_db lookup 读取需要的函数体后判断。"
         )
         output = run_agent(
             prompt=prompt, model=acfg.model, tools=acfg.tools or cfg.workers.default_tools,
@@ -170,9 +257,12 @@ def resolve_external(
 
     if on_event:
         on_event("v2_external_tracked", function=func.name, var=taint_name,
-                 candidates=len(candidates), confirmed=len(confirmed))
+                 candidates=len(candidates), confirmed=len(confirmed),
+                 prefilters=len(prefiltered) if prefiltered else 0)
     return confirmed
 
+
+# ── 间接调用 tracker (函数指针) ──────────────────────────────────────────
 
 def _extract_fp_key(fp_expr: str) -> list[str]:
     """从函数指针表达式提取关键部分用于前后缀匹配。"""
@@ -189,7 +279,7 @@ def _extract_fp_key(fp_expr: str) -> list[str]:
 
 def _prefix_suffix_candidates_from_db(source_root: str, keys: list[str],
                                        store: DataflowStore) -> list[dict]:
-    """查数据库按前后缀匹配缩小候选范围 (不 grep NFS)。"""
+    """查数据库按前后缀匹配缩小候选范围。"""
     candidates = []
     seen = set()
     for f in store.list_functions():
@@ -198,10 +288,7 @@ def _prefix_suffix_candidates_from_db(source_root: str, keys: list[str],
             if nm.lower().startswith(key.lower()) or nm.lower().endswith(key.lower()):
                 if f.func_id not in seen:
                     seen.add(f.func_id)
-                    body = read_function_body(source_root, f, max_lines=200)
-                    candidates.append({
-                        "name": f.name, "file": f.file, "func_id": f.func_id, "body": body[:4000],
-                    })
+                    candidates.append({"name": f.name, "file": f.file, "func_id": f.func_id})
                 break
     return candidates
 
@@ -222,23 +309,23 @@ def resolve_indirect(
     if not keys:
         return []
 
-    # 1. 查数据库前后缀匹配 (不 grep NFS)
     candidates = _prefix_suffix_candidates_from_db(source_root, keys, store)
     if not candidates:
-        candidates = [{"name": "", "file": "", "func_id": "", "body": ""}]
+        candidates = [{"name": "", "file": "", "func_id": ""}]
 
-    # 2. LLM fresh session: 从候选中找注册处理函数
     fork_session = sessions_dir / f"d{depth:02d}-{safe_name(func.name)}-fptrack-{safe_name(fp_expr)}.jsonl"
     v2_system = build_v2_system_prompt(custom="tracker")
     system_prompt = (v2_system + "\n\n" if v2_system else "") + (
         "你是数据流污点分析中的函数指针/回调目标追踪器。\n"
         "目标: 从候选列表中找出函数指针的真实注册处理函数。\n"
-        "可以 read 验证候选, 但候选已从数据库前后缀预筛, 优先在候选中判断。\n"
+        "用 v2_db lookup 读取需要的函数体后判断。\n"
         '输出 JSON: {"handlers": [{"function": "...", "file": "...", "reason": "..."}]}\n'
     )
     v2_env = {"DVS_V2_DB_DIR": str(sessions_dir.parent / "dataflow-v2"),
               "DVS_SOURCE_ROOT": source_root}
-    cand_info = [f"### {c['name']} ({c['file']})\n```c\n{c['body']}\n```" for c in candidates]
+    # 传路径不传函数体
+    cand_info = [f"### {c['name']} ({c['file']})\n(用 `v2_db lookup {c['name']}` 读取函数体)"
+                 for c in candidates]
     prompt = (
         f"## 父函数: {func.file}::{func.name}\n"
         f"函数指针: `{fp_expr}`\n"

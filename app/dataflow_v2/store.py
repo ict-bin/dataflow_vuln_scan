@@ -43,6 +43,27 @@ _DDL = {
         );
         CREATE INDEX IF NOT EXISTS idx_func_name ON functions(name);
         CREATE INDEX IF NOT EXISTS idx_func_file ON functions(file);
+        CREATE TABLE IF NOT EXISTS include_index (
+            header TEXT NOT NULL,
+            file   TEXT NOT NULL,
+            PRIMARY KEY (header, file)
+        );
+        CREATE INDEX IF NOT EXISTS idx_include_header ON include_index(header);
+        CREATE INDEX IF NOT EXISTS idx_include_file ON include_index(file);
+        CREATE TABLE IF NOT EXISTS class_hierarchy (
+            class_name  TEXT PRIMARY KEY,
+            bases       TEXT DEFAULT '[]',
+            file        TEXT DEFAULT ''
+        );
+        CREATE TABLE IF NOT EXISTS class_members (
+            class_name   TEXT NOT NULL,
+            member_name  TEXT NOT NULL,
+            member_type  TEXT DEFAULT '',
+            file         TEXT DEFAULT '',
+            PRIMARY KEY (class_name, member_name)
+        );
+        CREATE INDEX IF NOT EXISTS idx_member_class ON class_members(class_name);
+        CREATE INDEX IF NOT EXISTS idx_member_name ON class_members(member_name);
     """,
     "taints": """
         CREATE TABLE IF NOT EXISTS taints (
@@ -186,6 +207,109 @@ class DataflowStore:
 
     def list_functions(self) -> list[FunctionRecord]:
         return [_row_to_function(r) for r in self._q("functions", "SELECT * FROM functions")]
+
+    # ── include 索引 (C 作用域) ────────────────────────────────────────
+    def add_include(self, header: str, file: str) -> None:
+        self._exec("functions",
+                   "INSERT OR IGNORE INTO include_index (header, file) VALUES (?, ?)",
+                   (header, file))
+
+    def get_files_including(self, header: str) -> list[str]:
+        """查找所有传递性 include 了指定 header 的 .c/.cpp 文件。"""
+        rows = self._q("functions", "SELECT file FROM include_index WHERE header=?", (header,))
+        return [r["file"] for r in rows]
+
+    # ── class 继承图 (C++ 作用域) ──────────────────────────────────────
+    def add_class(self, class_name: str, bases: list[str], file: str = "") -> None:
+        import json
+        self._exec("functions",
+                   "INSERT OR REPLACE INTO class_hierarchy (class_name, bases, file) VALUES (?, ?, ?)",
+                   (class_name, json.dumps(bases), file))
+
+    def add_class_member(self, class_name: str, member_name: str,
+                         member_type: str = "", file: str = "") -> None:
+        self._exec("functions",
+                   "INSERT OR IGNORE INTO class_members (class_name, member_name, member_type, file) VALUES (?, ?, ?, ?)",
+                   (class_name, member_name, member_type, file))
+
+    def get_bases(self, class_name: str) -> list[str]:
+        import json
+        rows = self._q("functions", "SELECT bases FROM class_hierarchy WHERE class_name=?", (class_name,))
+        if not rows:
+            return []
+        return json.loads(rows[0]["bases"] or "[]")
+
+    def get_all_ancestors(self, class_name: str) -> list[str]:
+        """传递闭包: class → 所有祖先类 (含间接继承)。"""
+        visited = set()
+        queue = [class_name]
+        while queue:
+            cls = queue.pop(0)
+            if cls in visited:
+                continue
+            visited.add(cls)
+            for base in self.get_bases(cls):
+                if base not in visited:
+                    queue.append(base)
+        visited.discard(class_name)
+        return list(visited)
+
+    def get_all_descendants(self, class_name: str) -> list[str]:
+        """传递闭包: class → 所有派生类 (含间接继承)。"""
+        # 反向遍历: 找所有 bases 含 class_name 的类
+        import json
+        visited = {class_name}
+        rows = self._q("functions", "SELECT class_name, bases FROM class_hierarchy")
+        changed = True
+        while changed:
+            changed = False
+            for r in rows:
+                if r["class_name"] in visited:
+                    continue
+                bases = json.loads(r["bases"] or "[]")
+                if any(b in visited for b in bases):
+                    visited.add(r["class_name"])
+                    changed = True
+        visited.discard(class_name)
+        return list(visited)
+
+    def get_member_declaring_class(self, class_name: str, member_name: str) -> str | None:
+        """查找 member 声明在哪个类 (从 class_name 往祖先找)。"""
+        candidates = [class_name] + self.get_all_ancestors(class_name)
+        for cls in candidates:
+            rows = self._q("functions",
+                           "SELECT class_name FROM class_members WHERE class_name=? AND member_name=?",
+                           (cls, member_name))
+            if rows:
+                return cls
+        return None
+
+    def get_class_scope_methods(self, class_name: str, member_name: str = "") -> list[str]:
+        """获取能访问 member 的所有方法 (声明类 + 所有派生类的方法)。
+
+        返回函数名列表 (Class::method 格式)。
+        """
+        if member_name:
+            declaring_class = self.get_member_declaring_class(class_name, member_name)
+            if not declaring_class:
+                declaring_class = class_name
+        else:
+            declaring_class = class_name
+        # 声明类 + 所有派生类
+        classes = {declaring_class} | set(self.get_all_descendants(declaring_class))
+        # 查函数名以 ClassName:: 开头的
+        result = []
+        for cls in classes:
+            like_pattern = f"{cls}::%"
+            rows = self._q("functions", "SELECT name FROM functions WHERE name LIKE ?", (like_pattern,))
+            result.extend(r["name"] for r in rows)
+        return result
+
+    def get_functions_with_type_in_signature(self, type_name: str) -> list[str]:
+        """查找签名中包含指定类型的函数 (用于 C struct 字段作用域)。"""
+        like_pattern = f"%{type_name}%"
+        rows = self._q("functions", "SELECT name FROM functions WHERE signature LIKE ?", (like_pattern,))
+        return [r["name"] for r in rows]
 
     def add_processed_taint(self, func_id: str, pt: ProcessedTaint) -> None:
         f = self.get_function(func_id)
