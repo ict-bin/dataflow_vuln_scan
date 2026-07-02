@@ -325,7 +325,15 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                 validated_props.append(prop)
                 continue
             if not parse_ok:
-                # clang 解析失败 → 无法校验, 保留传播 (无分支标注, 下游按顺序链处理)
+                # clang 解析失败 → 无法校验, 保留传播
+                # 但如果 LLM 原标 external + target 不是真实函数 → 可能是函数指针, 标 indirect
+                if getattr(prop, '_llm_said_external', False) and prop.target_function:
+                    if not store.find_function(prop.target_function):
+                        prop.is_indirect_call = True
+                        prop.dispatch_kind = "function_pointer_field"
+                        self.on_event("v2_parse_fail_to_indirect",
+                                      function=prop.target_function, caller=func.name,
+                                      reason="clang parse failed + LLM external + not real function → indirect")
                 prop.target_func_id = self._resolve_target_func_id(store, prop)
                 validated_props.append(prop)
                 continue
