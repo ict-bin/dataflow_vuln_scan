@@ -526,6 +526,26 @@ def _record_runtime_invalidation(task_id: str, reason: str) -> None:
         _runtime_invalidations[task_id] = str(reason or "").strip() or "ownership_changed"
 
 
+def _revoke_celery_task(row: AppDvsTask) -> None:
+    """Celery cancel/restart: revoke (terminate SIGKILL) worker pod 上的 prefork 子进程。
+
+    任务跑在 worker pod 的独立子进程, API pod 本地的 request_cancel/cleanup 够不着。
+    revoke 经 Redis 发控制命令 → worker 收到 → killpg 杀 pi 全树 (task_revoked 信号)。
+    best-effort: Redis/worker 不可达时静默 (dispatcher stale 扫描兜底回收)。
+    """
+    cid = getattr(row, "celery_task_id", None)
+    if not cid:
+        return
+    try:
+        from app.celery_app import app as celery_app
+        celery_app.control.revoke(cid, terminate=True, signal="SIGKILL")
+        log_event(logger, logging.INFO, "celery revoke sent",
+                  event="task_celery_revoked", task_id=row.task_id, celery_task_id=cid)
+    except Exception as exc:
+        log_event(logger, logging.WARNING, "celery revoke failed (stale scan will recover)",
+                  event="task_celery_revoke_failed", task_id=row.task_id, celery_task_id=cid, error=str(exc))
+
+
 def _get_runtime_invalidation(task_id: str) -> str | None:
     with _RUNNING_TASK_LOCK:
         return _runtime_invalidations.get(task_id)
@@ -1965,6 +1985,8 @@ class TaskService:
     def restart_task(self, db: Session, task_id: str) -> dict:
         """在原任务ID上重置并重新执行（SA 模式：in-place restart）。"""
         row = self._get_or_404(db, task_id)
+        # Celery: 先 revoke 杀 worker pod 上的 prefork 子进程 + pi 全树
+        _revoke_celery_task(row)
         previous_status = str(row.status or "")
         previous_error = str(row.error or "").strip() or None
         previous_epoch = int(row.execution_epoch or 0)
@@ -2016,6 +2038,7 @@ class TaskService:
         row.execution_heartbeat_at = None
         row.control_version = int(row.control_version or 0) + 1
         row.dispatch_status = "pending"
+        row.celery_task_id = None  # dispatcher 泵会重新发布
         flag_modified(row, "task_config_json")
         flag_modified(row, "latest_abnormal_reason_json")
         db.commit(); db.refresh(row)
@@ -2054,6 +2077,8 @@ class TaskService:
 
     def cancel_task(self, db: Session, task_id: str) -> dict:
         row = self._get_or_404(db, task_id)
+        # Celery: 先 revoke 杀 worker pod 上的 prefork 子进程 + pi 全树 (task_revoked 信号 killpg)
+        _revoke_celery_task(row)
         cancel_cleanup_groups = self._cleanup_worker_runtime(label=f"task_cancel:{task_id}", task_id=task_id, reason="cancel_requested")
         if row.status in ("passed", "failed", "error", "cancelled"):
             return self._row_to_dict(row)
@@ -2099,6 +2124,7 @@ class TaskService:
         row.execution_lease_until = None
         row.execution_heartbeat_at = None
         row.dispatch_status = None
+        row.celery_task_id = None
         reason, changed = _sync_task_abnormal_reason(row)
         _record_abnormal_reason(row, reason, changed=changed)
         _record_abnormal_reason_timeline(db, row, reason, changed=changed)

@@ -239,6 +239,12 @@ _MIGRATIONS = [
         name="vuln_unreported_count",
         statement="ALTER TABLE secflow_app_dvs_tasks ADD COLUMN vuln_unreported_count INT NOT NULL DEFAULT -1",
     ),
+    Migration(
+        kind="column",
+        table_name="secflow_app_dvs_tasks",
+        name="celery_task_id",
+        statement="ALTER TABLE secflow_app_dvs_tasks ADD COLUMN celery_task_id VARCHAR(64) NULL",
+    ),
 ]
 
 

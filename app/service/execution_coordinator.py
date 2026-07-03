@@ -265,6 +265,69 @@ def claim_one_runnable_task(db: Session, owner_id: str) -> ClaimedTask | None:
     )
 
 
+def claim_specific_task(db: Session, owner_id: str, task_id: str) -> ClaimedTask | None:
+    """Celery worker 收到 LAUNCH 后按 task_id 认领 (非竞争性)。
+
+    与 claim_one_runnable_task 的区别: 不扫表竞争, 只认领指定 task_id。
+    用于 Celery 消费: dispatcher 已把该 task 路由到本 worker, 这里设 owner/epoch/lease。
+    只认领 pending (正常) 或 running 但租约过期 (acks_late 重投/孤儿);
+    running 且租约新鲜 → 返回 None (别的活 worker 在跑, 本消息作废 ack 掉)。
+    """
+    now = now_local()
+    candidate = (
+        db.query(AppDvsTask)
+        .filter(
+            AppDvsTask.task_id == task_id,
+            AppDvsTask.is_deleted.is_(False),
+        )
+        .first()
+    )
+    if candidate is None:
+        return None
+    status = str(candidate.status or "pending")
+    if status == "pending":
+        expected_status = "pending"
+    elif status == "running" and (
+        candidate.execution_lease_until is None or candidate.execution_lease_until < now
+    ):
+        # 租约过期/孤儿: clean restart 回 pending 再认领
+        expected_status = "running"
+    else:
+        # running 且租约新鲜 / 已终态 → 不认领 (别的 worker 在跑或已结束)
+        return None
+    new_epoch = int(candidate.execution_epoch or 0) + 1
+    update_fields = {
+        AppDvsTask.execution_owner_id: owner_id,
+        AppDvsTask.execution_lease_until: _lease_deadline(),
+        AppDvsTask.execution_heartbeat_at: now,
+        AppDvsTask.execution_epoch: new_epoch,
+        AppDvsTask.dispatch_status: "leased",
+    }
+    if expected_status == "running":
+        # 孤儿重抢: 回 pending, begin_execution_if_owner 会再设 running
+        update_fields[AppDvsTask.status] = "pending"
+    updated = (
+        db.query(AppDvsTask)
+        .filter(
+            AppDvsTask.id == candidate.id,
+            AppDvsTask.is_deleted.is_(False),
+            AppDvsTask.status == expected_status,
+            ((AppDvsTask.execution_lease_until.is_(None)) | (AppDvsTask.execution_lease_until < now))
+            if expected_status == "running" else AppDvsTask.status.is_not(None),
+        )
+        .update(update_fields, synchronize_session=False)
+    )
+    db.commit()
+    if not updated:
+        return None
+    return ClaimedTask(
+        task_id=str(candidate.task_id),
+        epoch=new_epoch,
+        control_version=int(candidate.control_version or 0),
+        dispatch_status="leased",
+    )
+
+
 def renew_lease(db: Session, task_id: str, owner_id: str, epoch: int) -> bool:
     now = now_local()
     updated = (

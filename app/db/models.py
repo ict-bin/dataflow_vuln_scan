@@ -69,6 +69,8 @@ class AppDvsTask(Base):
     vuln_reported_count: Mapped[int] = mapped_column(Integer, nullable=False, default=-1)
     vuln_unreported_count: Mapped[int] = mapped_column(Integer, nullable=False, default=-1)
 
+    celery_task_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+
     is_deleted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
 
