@@ -32,6 +32,7 @@ from .models import (
     TaintParamInfo, TaintRecord, Validation,
 )
 from .store import DataflowStore
+from ..vuln_report_utils import safe_name as _safe_name
 
 
 @dataclass
@@ -45,6 +46,7 @@ class AnalysisResult:
     self_contained: bool = False
     description: str = ""        # 函数功能说明 (回写函数库)
     session_path: str = ""      # 本函数 taint 分析 fork session 路径 (供子函数/mining 继承链)
+    return_taints: list[TaintRecord] = field(default_factory=list)  # 本函数 return 语句返回的污点
 
 
 class PathContext:
@@ -150,35 +152,6 @@ class DfsOrchestrator:
         self.concurrent = concurrent
         self.max_depth = max_depth
         self._llm_sem = threading.Semaphore(max_concurrent_llm) if concurrent else None
-        # mining 后台线程 (不阻塞子函数 taint 分析)
-        self._mine_threads: list[threading.Thread] = []
-        self._mine_errs: list[BaseException] = []
-        self._mine_lock = threading.Lock()
-
-    def _submit_mine(self, func: FunctionRecord, taint_params: TaintParamInfo,
-                     ctx: PathContext, chain_session: str) -> None:
-        """提交 mining 到后台线程 (不阻塞, 用 LLM 信号量限流)。"""
-        def _do_mine():
-            try:
-                self._run_llm(self.cbs.mine_vulns, self.store, func, taint_params, ctx, chain_session)
-            except BaseException as e:
-                with self._mine_lock:
-                    self._mine_errs.append(e)
-        t = threading.Thread(target=_do_mine, daemon=True, name=f"dvs2-mine-{func.name}")
-        with self._mine_lock:
-            self._mine_threads.append(t)
-        t.start()
-
-    def _await_mines(self) -> None:
-        """等待所有后台 mining 完成。"""
-        with self._mine_lock:
-            threads = list(self._mine_threads)
-        for t in threads:
-            t.join()
-        with self._mine_lock:
-            self._mine_threads.clear()
-            if self._mine_errs:
-                raise self._mine_errs[0]
 
     def _run_llm(self, fn: Callable, *args: Any, **kw: Any) -> Any:
         """LLM 调用限流: 信号量 cap 并发 analyze/mine/track 调用, 避免打爆配额。
@@ -196,18 +169,16 @@ class DfsOrchestrator:
         """从根函数出发 DFS。"""
         ctx = PathContext(path_id=_path_id(root_func.func_id, root_taint.signature, "0"))
         self._process(root_func, root_taint, ctx.pre_validations, base_session, ctx, 0)
-        self._await_mines()  # 等所有后台 mining 完成
 
-    # ── 核心: 处理一个函数 (返回本函数发现的校验, 供父链回传) ────────────────
+    # ── 核心: 处理一个函数 (返回 my_discovered + return_taints) ──────────────
     def _process(self, func: FunctionRecord, taint_params: TaintParamInfo,
                  pre_validations: list[Validation], base_session: str,
-                 ctx: PathContext, depth: int) -> list[Validation]:
+                 ctx: PathContext, depth: int) -> tuple[list[Validation], list[TaintRecord]]:
         # 1) 三重去重
         pre_val_sig = _validation_sig(pre_validations)
         if self.store.find_processed_taint(func.func_id, taint_params.signature, pre_val_sig):
-            return []  # 已分析过, 跳过 (无新增校验回传)
+            return [], []  # 已分析过, 跳过
 
-        # 发 trace_start 事件 (前端 buildDfaTree 消费, 与 v1 对齐)
         self.cbs.on_event("trace_start", function=func.name, source_file=func.file,
                           depth=depth, max_depth=self.max_depth)
 
@@ -223,12 +194,10 @@ class DfsOrchestrator:
             func.description = result.description
             self.store.upsert_function(func)
 
-        # 发 trace_callees 事件 (前端 buildDfaTree 消费, 与 v1 对齐)
         callee_names = [p.target_function for p in result.propagations if p.target_function]
         self.cbs.on_event("trace_callees", function=func.name, callees=callee_names, depth=depth)
 
         self_contained = result.self_contained
-        # 父函数 taint session (整条链累积于此) → 子函数/mining 继承
         chain_session = result.session_path
 
         # 3) 记录 processed_taint (去重锚点)
@@ -237,27 +206,35 @@ class DfsOrchestrator:
             pre_validations=[v.to_dict() for v in pre_validations],
             pre_validation_signature=pre_val_sig, sessions_path=base_session))
 
-        # 本函数发现的校验 (回传给父链)
         my_discovered = _dedup_validations(
             [v for p in result.propagations for v in p.validations])
 
-        # 4) mining 后台化 (不阻塞子函数 taint; mining 是叶子操作, 只产 findings)
-        self._submit_mine(func, taint_params, ctx, chain_session)
+        # 4) self_contained=true → 立即 mine (无 callee, 不用等)
+        if self_contained:
+            self._run_llm(self.cbs.mine_vulns, self.store, func, taint_params, ctx, chain_session)
 
-        # 5) 构造有序路径 (互斥分叉 + 外部变量分叉); 达深度上限则当叶子 (不递归)
+        # 5) 构造有序路径 + 跟入 callee
         if depth < self.max_depth:
             paths = self._build_paths(result.propagations, func, ctx, depth)
         else:
             paths = []
 
-        # 6) 逐条链 DFS: 链内顺序, 校验链累加 + 回传; fork 后多链可并发; 子继承父 session
         base_accumulated = list(pre_validations) + list(my_discovered)
+        all_callee_return_taints: list[TaintRecord] = []
         if self.concurrent and len(paths) > 1:
             threads: list[threading.Thread] = []
+            results_lock = threading.Lock()
             errs: list[BaseException] = []
             for path_steps in paths:
-                t = threading.Thread(target=self._run_path, daemon=True,
-                                     args=(path_steps, base_accumulated, func, chain_session, ctx, depth, errs),
+                def _run_one(ps=path_steps):
+                    try:
+                        fb, rts = self._run_path(ps, base_accumulated, func, chain_session, ctx, depth)
+                        with results_lock:
+                            all_callee_return_taints.extend(rts)
+                    except BaseException as exc:
+                        with results_lock:
+                            errs.append(exc)
+                t = threading.Thread(target=_run_one, daemon=True,
                                      name=f"dvs2-path-{func.name}-{len(threads)}")
                 threads.append(t); t.start()
             for t in threads:
@@ -266,35 +243,56 @@ class DfsOrchestrator:
                 raise errs[0]
         else:
             for path_steps in paths:
-                self._run_path(path_steps, base_accumulated, func, chain_session, ctx, depth, None)
+                _, rts = self._run_path(path_steps, base_accumulated, func, chain_session, ctx, depth)
+                all_callee_return_taints.extend(rts)
 
-        # 7) mining 已后台化, 不再阻塞 return
-        return my_discovered
+        # 6) self_contained=false → 后序 mine (callee 已完成, 含 callee 分析结果)
+        if not self_contained:
+            self._run_llm(self.cbs.mine_vulns, self.store, func, taint_params, ctx, chain_session)
+
+        # 7) return_taints 回传: 对每个 callee 返回的新污点, 在当前函数启动新分析分支
+        for rt in all_callee_return_taints:
+            rt_sig = rt.signature or rt.name
+            if depth < 0:
+                continue  # depth 不能为负, 超出分析范围不分析
+            if self.store.find_processed_taint(func.func_id, rt_sig, pre_val_sig):
+                continue  # 已分析过此污点, 跳过
+            # 新 fork session (从父链重新 fork, taint 不同)
+            from pathlib import Path as _P
+            new_session = str(_P(chain_session).parent / f"d{depth:02d}-{_safe_name(func.name)}-taint-{_safe_name(rt.name)}.jsonl") if chain_session else ""
+            if chain_session:
+                from ..copy_utils import safe_copyfile
+                try:
+                    safe_copyfile(chain_session, new_session)
+                except OSError:
+                    pass
+            new_tp = TaintParamInfo(positions=[], signature=rt_sig, names=[rt.name])
+            self._process(func, new_tp, list(pre_validations), new_session, ctx, depth)
+
+        # 8) 返回 (本函数校验, 本函数的 return_taints)
+        return my_discovered, result.return_taints
 
     def _run_path(self, steps: list[ChainStep], base_accumulated: list[Validation],
                   func: FunctionRecord, base_session: str, ctx: PathContext,
-                  depth: int, errs: list[BaseException] | None) -> None:
-        """运行一条有序链: 链内严格顺序, 校验链累加 + 子回传。"""
-        try:
-            accumulated = list(base_accumulated)
-            for step in steps:
-                incoming = list(accumulated) + list(step.validations)
-                self.store.upsert_edge(OrchestrationEdge(
-                    path_id=ctx.path_id, source_function=func.name,
-                    source_signature=func.signature, source_func_id=func.func_id,
-                    target_function=step.func.name, target_signature=step.func.signature,
-                    target_func_id=step.func.func_id, taint_params=step.taint_params,
-                    depth=depth + 1, edge_order=step.call_line, status="done"))
-                sub_ctx = ctx.fork(_path_id(step.func.func_id, step.taint_params.signature, str(depth + 1)))
-                sub_ctx.pre_validations = list(incoming)
-                child_fb = self._process(step.func, step.taint_params, incoming,
-                                         base_session, sub_ctx, depth + 1)
-                accumulated.extend(child_fb)
-        except BaseException as exc:
-            if errs is not None:
-                errs.append(exc)
-            else:
-                raise
+                  depth: int) -> tuple[list[Validation], list[TaintRecord]]:
+        """运行一条有序链: 链内严格顺序, 校验链累加 + 子回传 + 收集 return_taints。"""
+        accumulated = list(base_accumulated)
+        all_return_taints: list[TaintRecord] = []
+        for step in steps:
+            incoming = list(accumulated) + list(step.validations)
+            self.store.upsert_edge(OrchestrationEdge(
+                path_id=ctx.path_id, source_function=func.name,
+                source_signature=func.signature, source_func_id=func.func_id,
+                target_function=step.func.name, target_signature=step.func.signature,
+                target_func_id=step.func.func_id, taint_params=step.taint_params,
+                depth=depth + 1, edge_order=step.call_line, status="done"))
+            sub_ctx = ctx.fork(_path_id(step.func.func_id, step.taint_params.signature, str(depth + 1)))
+            sub_ctx.pre_validations = list(incoming)
+            child_fb, child_rts = self._process(step.func, step.taint_params, incoming,
+                                                 base_session, sub_ctx, depth + 1)
+            accumulated.extend(child_fb)
+            all_return_taints.extend(child_rts)
+        return accumulated, all_return_taints
 
     # ── 路径构造: 有序链 + 互斥分叉 + 外部分叉 ───────────────────────────────
     def _build_paths(self, props: list[PropagationRecord], func: FunctionRecord,

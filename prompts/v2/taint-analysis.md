@@ -36,7 +36,8 @@
       "description": "msg 透传给 C 的 pkt 参数",
       "is_external": false
     }
-  ]
+  ],
+  "return_taints": []
 }
 ```
 
@@ -87,6 +88,10 @@ target_file —— 这些由服务端 clang/脚本从 AST 精确获取 (行号/�
 - ❌ 不要编造 `call_line`，必须是本函数体真实行号；
 - ❌ 不要把未经本函数调用的 callee 写进 `target_function`；
 - **必须报出所有传递污点的函数调用**，包括 flush/cleanup/free 等辅助调用。漏报 callee 会导致下游分析链断裂。
+- `return_taints`：本函数 `return` 语句返回的变量，如果该变量是污点（直接或派生）。
+  - `return fd` → `"return_taints": [{"name": "fd", "description": "由 filename 经 open() 派生"}]`
+  - `return 0` → `"return_taints": []`
+  - **不要预测 callee 的返回值**——callee 内部返回什么由 callee 自己分析后确定，不在本函数的 `taints` 或 `return_taints` 中。
 
 ## taints 字段
 

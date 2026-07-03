@@ -367,9 +367,20 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
             prop.target_func_id = self._resolve_target_func_id(store, prop)
             validated_props.append(prop)
 
+        # parse return_taints
+        return_taints: list[TaintRecord] = []
+        for rt in parsed.get("return_taints") or []:
+            if not isinstance(rt, dict):
+                continue
+            return_taints.append(TaintRecord(
+                func_id=func.func_id, name=str(rt.get("name") or ""),
+                signature="", file=func.file, function=func.name,
+                description=str(rt.get("description") or "")))
+
         return AnalysisResult(taints=taints, propagations=validated_props,
                               self_contained=self_contained, description=description,
-                              session_path=str(fork_session))
+                              session_path=str(fork_session),
+                              return_taints=return_taints)
 
     def _within_source_root(self, file: str) -> bool:
         """文件是否在源码目录内 (目录内=合理可分析, 目录外=不分析; 不按文件名过滤,
@@ -481,7 +492,7 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
             pass
         taints = store.list_taints_in_function(func.func_id)
         props = store.list_propagations_from(func.func_id)
-        dataflow_text = self._format_taint_context(func, taint_params, ctx, taints, props)
+        dataflow_text = self._format_taint_context(func, taint_params, ctx, taints, props, store)
         prompt = (
             f"# 阶段：漏洞挖掘 Fork\n\n以上是整条调用链的污点分析历史 (从根函数到本函数)。\n"
             f"现在请基于全链上下文, 判断**本函数** `{func.file}::{func.name}` 内是否存在漏洞。\n"
@@ -584,7 +595,8 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
 
     def _format_taint_context(self, func: FunctionRecord, tp: TaintParamInfo,
                               ctx: PathContext, taints: list[TaintRecord],
-                              props: list[PropagationRecord]) -> str:
+                              props: list[PropagationRecord],
+                              store: DataflowStore | None = None) -> str:
         from .function_extractor import read_function_body
         pre_val = "\n".join(f"- {v.condition}: {v.content}" for v in ctx.pre_validations) or "(无)"
         func_body = read_function_body(self.source_root, func, max_lines=500)
@@ -602,4 +614,19 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
             tgt = p.target_function or "(外部变量)" if p.is_external else p.target_function
             lines.append(f"- {p.source_taint_name} → {tgt}({p.target_taint_name}) @L{p.call_line} "
                          f"[{p.condition}] {p.description}")
+        # callee 分析结果 (后序 mining 时, callee 已完成分析)
+        if store is not None:
+            for p in props:
+                if not p.target_function or not p.target_func_id:
+                    continue
+                callee_taints = store.list_taints_in_function(p.target_func_id)
+                callee_props = store.list_propagations_from(p.target_func_id)
+                if callee_taints or callee_props:
+                    lines.append(f"\n## callee {p.target_function} 的分析结果:")
+                    for ct in callee_taints:
+                        lines.append(f"  污点: {ct.name} - {ct.description}")
+                    for cp in callee_props:
+                        target = cp.target_function or "(sink/系统调用)"
+                        lines.append(f"  传播: {cp.source_taint_name} → {target}({cp.target_taint_name})")
+                        lines.append(f"    {cp.description}")
         return "\n".join(lines)
