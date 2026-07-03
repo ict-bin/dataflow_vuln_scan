@@ -363,11 +363,7 @@ class AgentObservabilityService:
         residual_process_count = len([item for item in processes if item.get("owner_kind") == "residual"])
         unknown_process_count = len([item for item in processes if item.get("owner_kind") == "unknown"])
         scanned_at = time.time()
-        idle_reaper_state: dict[str, Any] = {}
-        with contextlib.suppress(Exception):
-            from app.service.task_service import get_task_service
-
-            idle_reaper_state = dict(get_task_service().idle_pi_reaper_status() or {})
+        idle_reaper_state: dict[str, Any] = {}  # v1 idle pi reaper 已删除 (Celery 接管)
         total_pi_process_count = len(processes)
         residual_pi_detected = total_pi_process_count > tracked_process_count
         return {

@@ -185,10 +185,11 @@ def _render_request_metrics() -> list[str]:
 
 def _render_local_runtime_metrics() -> list[str]:
     task_service = get_task_service()
-    local_running = int(task_service.local_effective_running_task_count())
-    local_running_raw = int(task_service.local_running_task_count_raw())
-    local_stale_contexts = int(task_service.local_stale_context_count())
-    runtime_reconcile = dict(task_service.runtime_reconcile_status() or {})
+    # v1 dispatcher/supervisor/reconcile 已删除 (Celery 接管); 本 pod 不再跑任务, 计数为 0
+    local_running = 0
+    local_running_raw = 0
+    local_stale_contexts = 0
+    runtime_reconcile: dict = {}
     lines = [
         "# HELP secflow_dvs_local_role_info Static role info for this pod.",
         "# TYPE secflow_dvs_local_role_info gauge",

@@ -33,10 +33,7 @@ from app.dataflow_v2.runner import DataflowV2Runner as Orchestrator
 from app.runtime_context import HEARTBEAT_INTERVAL_SECONDS, WORKER_ID, MAX_LOCAL_RUNNING_TASKS
 from app.workspace_manager import WorkspaceManager
 from app.service.execution_coordinator import (
-    _auto_recovery_payload,
-    _clear_auto_recovery_flag,
     begin_execution_if_owner,
-    claim_one_runnable_task,
     commit_terminal_state_if_owner,
     is_parent_orchestrated_binary_security_task,
     load_execution_snapshot,
@@ -44,7 +41,6 @@ from app.service.execution_coordinator import (
     release_lease,
     renew_lease,
     still_owner,
-    _mark_row_clean_restart,
 )
 from app.agent_process import cleanup_orphan_pi_processes, cleanup_task_agent_processes, cleanup_worker_runtime_processes
 from app.time_utils import isoformat_local, now_local
@@ -654,10 +650,6 @@ def _start_task_lease_heartbeat(
     return thread
 
 
-def _run_execute_task_in_thread(service: "TaskService", task_id: str, epoch: int, control_version: int) -> None:
-    service._execute_task(task_id, epoch, control_version)
-
-
 def _recover_running_task_for_cleanup(
     db: Session,
     *,
@@ -911,13 +903,6 @@ class TaskService:
         self._idle_pi_reaper_failures_total = 0
         self._idle_pi_reaper_idle_streak = 0
 
-    def local_running_task_count(self) -> int:
-        return self.local_effective_running_task_count()
-
-    def local_running_task_count_raw(self) -> int:
-        with _RUNNING_TASK_LOCK:
-            return len(_running_tasks)
-
     def _has_recent_runtime_signal(self, ctx: _RunningTaskContext, *, now_ts: float | None = None) -> bool:
         ts = float(now_ts if now_ts is not None else _time.time())
         recent_cutoff = ts - RUNNING_TASK_RECENT_PROGRESS_WINDOW_SECONDS
@@ -955,18 +940,6 @@ class TaskService:
         except Exception:
             logger.debug("failed to inspect agent observability for task %s", task_id, exc_info=True)
         return False
-
-    def local_effective_running_task_count(self) -> int:
-        with _RUNNING_TASK_LOCK:
-            contexts = list(_running_tasks.items())
-        now_ts = _time.time()
-        return sum(1 for task_id, ctx in contexts if self._has_strong_runtime_evidence(task_id, ctx, now_ts=now_ts))
-
-    def local_stale_context_count(self) -> int:
-        with _RUNNING_TASK_LOCK:
-            contexts = list(_running_tasks.items())
-        now_ts = _time.time()
-        return sum(1 for task_id, ctx in contexts if not self._has_strong_runtime_evidence(task_id, ctx, now_ts=now_ts))
 
     def running_task_snapshot(self) -> list[dict[str, object]]:
         from app.db import get_db
@@ -1032,15 +1005,6 @@ class TaskService:
         if ctx.orch is not None:
             ctx.orch.abort()
         return True
-
-    def runtime_reconcile_status(self) -> dict[str, object]:
-        return {
-            "last_run_at": self._last_runtime_reconcile_run_at or None,
-            "last_error": self._last_runtime_reconcile_error,
-            "db_repairs_total": self._runtime_reconcile_db_repairs_total,
-            "local_drops_total": self._runtime_reconcile_local_drops_total,
-            "db_recoveries_total": self._runtime_reconcile_db_recoveries_total,
-        }
 
     def _invalidate_local_running_context(self, task_id: str, *, reason: str, unregister: bool = True) -> bool:
         ctx = _get_running_task_context(task_id)
@@ -1127,234 +1091,6 @@ class TaskService:
             ctx.last_reconcile_decision = "db_recovered_to_pending"
         return recovered
 
-    def reconcile_running_task_contexts(self, db: Session) -> dict[str, int]:
-        with _RUNNING_TASK_LOCK:
-            contexts = list(_running_task_contexts.items())
-        now_ts = _time.time()
-        decisions = {"db_repairs": 0, "local_drops": 0, "db_recoveries": 0}
-        self._last_runtime_reconcile_run_at = now_ts
-        try:
-            for task_id, ctx in contexts:
-                row = db.query(AppDvsTask).filter_by(task_id=task_id).first()
-                invalidation_reason = _get_runtime_invalidation(task_id)
-                has_evidence = self._has_strong_runtime_evidence(task_id, ctx, now_ts=now_ts)
-                if invalidation_reason:
-                    ctx.last_reconcile_decision = f"drop_invalidated:{invalidation_reason}"
-                    self._invalidate_local_running_context(task_id, reason=invalidation_reason, unregister=True)
-                    _pop_runtime_invalidation(task_id)
-                    decisions["local_drops"] += 1
-                    continue
-                if row is None:
-                    if not has_evidence:
-                        ctx.last_reconcile_decision = "drop_missing_db_row"
-                        self._invalidate_local_running_context(task_id, reason="missing_db_row", unregister=True)
-                        decisions["local_drops"] += 1
-                    continue
-                db_status = str(row.status or "")
-                db_owner_id = str(row.execution_owner_id or "")
-                owner_matches = db_owner_id == WORKER_ID
-                epoch_matches = int(row.execution_epoch or 0) == int(ctx.epoch or 0)
-                control_matches = int(row.control_version or 0) == int(ctx.control_version or 0)
-                if db_status in {"passed", "failed", "error", "cancelled", "completed_limited"}:
-                    ctx.last_reconcile_decision = "drop_terminal_db_state"
-                    self._invalidate_local_running_context(task_id, reason="terminal_db_state", unregister=True)
-                    decisions["local_drops"] += 1
-                    continue
-                if has_evidence and owner_matches and epoch_matches and control_matches:
-                    if db_status != "running" or str(row.dispatch_status or "") != "running" or row.execution_lease_until is None:
-                        if self._repair_db_binding_for_running_context(db, row=row, ctx=ctx):
-                            decisions["db_repairs"] += 1
-                    else:
-                        ctx.last_reconcile_decision = "keep_running"
-                    continue
-                if has_evidence and not owner_matches:
-                    if not db_owner_id and not control_matches:
-                        ctx.last_reconcile_decision = "drop_new_control_version"
-                        self._invalidate_local_running_context(task_id, reason="ownership_changed", unregister=True)
-                        decisions["local_drops"] += 1
-                        continue
-                    if not db_owner_id and db_status in {"pending", "running"} and control_matches:
-                        if self._repair_db_binding_for_running_context(db, row=row, ctx=ctx):
-                            decisions["db_repairs"] += 1
-                        continue
-                    ctx.last_reconcile_decision = "drop_due_to_new_owner"
-                    self._invalidate_local_running_context(task_id, reason="ownership_changed", unregister=True)
-                    decisions["local_drops"] += 1
-                    continue
-                if not has_evidence and owner_matches and epoch_matches and control_matches and db_status == "running":
-                    if self._recover_db_binding_to_pending(db, row=row, ctx=ctx, reason="missing_runtime_evidence"):
-                        decisions["db_recoveries"] += 1
-                    self._invalidate_local_running_context(task_id, reason="missing_runtime_evidence", unregister=True)
-                    decisions["local_drops"] += 1
-                    continue
-                if not has_evidence and not owner_matches:
-                    ctx.last_reconcile_decision = "drop_stale_local_context"
-                    self._invalidate_local_running_context(task_id, reason="stale_local_context", unregister=True)
-                    decisions["local_drops"] += 1
-                    continue
-        except Exception as exc:
-            self._last_runtime_reconcile_error = str(exc)
-            raise
-        self._last_runtime_reconcile_error = None
-        return decisions
-
-    def reconcile_stale_local_contexts_before_claim(self) -> dict[str, int]:
-        from app.db import get_db
-
-        db_gen = get_db()
-        db: Session = next(db_gen)
-        try:
-            return self.reconcile_running_task_contexts(db)
-        finally:
-            try:
-                next(db_gen)
-            except StopIteration:
-                pass
-
-    def supervisor_status(self) -> dict[str, object]:
-        return {
-            "thread_alive": bool(self._supervisor_thread and self._supervisor_thread.is_alive()),
-            "last_run_at": self._last_supervisor_run_at,
-            "last_error": self._last_supervisor_error,
-        }
-
-    def idle_pi_reaper_status(self) -> dict[str, object]:
-        return {
-            "thread_alive": bool(self._idle_pi_reaper_thread and self._idle_pi_reaper_thread.is_alive()),
-            "last_idle_pi_reaper_at": self._last_idle_pi_reaper_at or None,
-            "last_idle_pi_reaper_killed_count": self._last_idle_pi_reaper_killed_count,
-            "idle_pi_reaper_runs_total": self._idle_pi_reaper_runs_total,
-            "idle_pi_reaper_killed_groups_total": self._idle_pi_reaper_killed_groups_total,
-            "idle_pi_reaper_failures_total": self._idle_pi_reaper_failures_total,
-            "idle_pi_reaper_idle_streak": self._idle_pi_reaper_idle_streak,
-        }
-
-    def start_supervisor(self) -> None:
-        if self._supervisor_thread and self._supervisor_thread.is_alive():
-            return
-        self._supervisor_stop = threading.Event()
-        self._idle_pi_reaper_stop = threading.Event()
-
-        def _worker() -> None:
-            from app.db import get_db
-            while not self._supervisor_stop.wait(EXECUTION_SUPERVISOR_INTERVAL_SECONDS):
-                self._last_supervisor_run_at = _time.time()
-                try:
-                    with _RUNNING_TASK_LOCK:
-                        contexts = list(_running_task_contexts.items())
-                    for task_id, ctx in contexts:
-                        if self._has_strong_runtime_evidence(task_id, ctx):
-                            db_gen = get_db()
-                            db: Session = next(db_gen)
-                            try:
-                                snapshot = load_execution_snapshot(db, task_id)
-                                if (
-                                    snapshot is None
-                                    or snapshot.status == "cancelled"
-                                    or snapshot.execution_owner_id != WORKER_ID
-                                    or int(snapshot.execution_epoch or 0) != int(ctx.epoch or 0)
-                                    or int(snapshot.control_version or 0) != int(ctx.control_version or 0)
-                                ):
-                                    self._invalidate_local_running_context(
-                                        task_id,
-                                        reason="control_plane_state_changed",
-                                        unregister=False,
-                                    )
-                                    continue
-                            finally:
-                                try:
-                                    next(db_gen)
-                                except StopIteration:
-                                    pass
-                            if ctx.cancel_requested.is_set() and ctx.orch is not None:
-                                ctx.orch.abort()
-                            if EXECUTION_NO_PROGRESS_SECONDS > 0 and (_time.time() - max(ctx.last_progress_at, ctx.started_at)) > EXECUTION_NO_PROGRESS_SECONDS:
-                                self._invalidate_local_running_context(
-                                    task_id,
-                                    reason="no_progress",
-                                    unregister=False,
-                                )
-                            continue
-                        db_gen = get_db()
-                        db: Session = next(db_gen)
-                        try:
-                            snapshot = load_execution_snapshot(db, task_id)
-                            if (
-                                snapshot is not None
-                                and snapshot.status == "running"
-                                and snapshot.execution_owner_id == WORKER_ID
-                                and int(snapshot.execution_epoch or 0) == int(ctx.epoch or 0)
-                                and int(snapshot.control_version or 0) == int(ctx.control_version or 0)
-                            ):
-                                _recover_running_task_for_cleanup(
-                                    db,
-                                    task_id=task_id,
-                                    owner_id=WORKER_ID,
-                                    epoch=int(ctx.epoch or 0),
-                                    control_version=int(ctx.control_version or 0),
-                                    reason=ctx.termination_reason or "executor_thread_dead",
-                                )
-                        finally:
-                            try:
-                                next(db_gen)
-                            except StopIteration:
-                                pass
-                        _unregister_running_task_context(task_id)
-                    self._last_supervisor_error = None
-                except Exception as exc:
-                    self._last_supervisor_error = str(exc)
-                    logger.warning("execution supervisor loop failed: %s", exc, exc_info=True)
-
-        self._supervisor_thread = threading.Thread(target=_worker, name="dvs_execution_supervisor", daemon=True)
-        self._supervisor_thread.start()
-        if IDLE_PI_REAPER_ENABLED and (self._idle_pi_reaper_thread is None or not self._idle_pi_reaper_thread.is_alive()):
-            self._idle_pi_reaper_thread = threading.Thread(target=self._idle_pi_reaper_loop, name="dvs_idle_pi_reaper", daemon=True)
-            self._idle_pi_reaper_thread.start()
-
-    def stop_supervisor(self) -> None:
-        self._supervisor_stop.set()
-        self._idle_pi_reaper_stop.set()
-
-    def reconcile_orphaned_running_tasks(self, db: Session, *, limit: int = 100) -> int:
-        from app.service.execution_coordinator import reclaim_orphaned_running_tasks
-
-        recovered = reclaim_orphaned_running_tasks(db, limit=limit)
-        for item in recovered:
-            row = db.query(AppDvsTask).filter_by(task_id=item.task_id).first()
-            if row is None:
-                continue
-            _mark_row_clean_restart(row, reason=item.reason, previous_owner_id=item.previous_owner_id)
-            db.add(row)
-            payload = {
-                "previous_owner_id": item.previous_owner_id,
-                "previous_dispatch_status": item.previous_dispatch_status,
-                "previous_lease_until": isoformat_local(item.previous_lease_until),
-                "recovery_reason": item.reason,
-            }
-            _record_task_event(
-                db,
-                row=row,
-                event_type="task_running_recovered",
-                message="后台巡检发现孤儿 running 任务，已回退为 pending",
-                level="warning",
-                status=row.status,
-                dispatch_status=row.dispatch_status,
-                payload=payload,
-            )
-            _record_task_event(
-                db,
-                row=row,
-                event_type="task_requeued_after_orphaned_running",
-                message="孤儿 running 任务已重新排入调度队列",
-                level="warning",
-                status=row.status,
-                dispatch_status=row.dispatch_status,
-                payload=payload,
-            )
-        if recovered:
-            db.commit()
-        return len(recovered)
-
     def _cleanup_worker_runtime(self, *, label: str, task_id: str | None = None, reason: str = "") -> int:
         """Best-effort full runtime cleanup for one-slot worker pods."""
         try:
@@ -1403,214 +1139,6 @@ class TaskService:
                 logger.warning("failure-debug dispatch attempt %d for %s failed: %s", attempt, task_id, exc)
             _time.sleep(5)
         logger.error("failure-debug dispatch exhausted for task %s (debugger unreachable)", task_id)
-
-    def _worker_idle_for_pi_reaping(self) -> bool:
-        if self.local_effective_running_task_count() != 0:
-            self._idle_pi_reaper_idle_streak = 0
-            return False
-        from app.db import get_db
-
-        db_gen = get_db()
-        db: Session = next(db_gen)
-        try:
-            active_owned = (
-                db.query(AppDvsTask)
-                .filter(
-                    AppDvsTask.is_deleted.is_(False),
-                    AppDvsTask.execution_owner_id == WORKER_ID,
-                    AppDvsTask.status.in_(("pending", "running")),
-                    AppDvsTask.dispatch_status.in_(("leased", "running", "dispatching")),
-                )
-                .count()
-            )
-        finally:
-            try:
-                next(db_gen)
-            except StopIteration:
-                pass
-        if int(active_owned or 0) != 0:
-            self._idle_pi_reaper_idle_streak = 0
-            return False
-        self._idle_pi_reaper_idle_streak += 1
-        return self._idle_pi_reaper_idle_streak >= IDLE_PI_REAPER_CONFIRM_ROUNDS
-
-    def _worker_has_residual_pi_for_reaping(self) -> bool:
-        from app.db import get_db
-        from app.service.agent_observability import AgentObservabilityService
-
-        db_gen = get_db()
-        db: Session = next(db_gen)
-        try:
-            snapshot = AgentObservabilityService().build_snapshot(db, project_id=None)
-            summary = dict(snapshot.get("summary") or {})
-            residual_count = int(
-                summary.get("residual_pi_process_count")
-                or summary.get("residual_processes")
-                or 0
-            )
-            unknown_count = int(
-                summary.get("unknown_pi_process_count")
-                or summary.get("unknown_processes")
-                or 0
-            )
-            return (residual_count + unknown_count) > 0
-        finally:
-            try:
-                next(db_gen)
-            except StopIteration:
-                pass
-
-    def _idle_pi_reaper_loop(self) -> None:
-        while not self._idle_pi_reaper_stop.wait(IDLE_PI_REAPER_INTERVAL_SECONDS):
-            self._idle_pi_reaper_runs_total += 1
-            if not self._worker_idle_for_pi_reaping():
-                continue
-            if not self._worker_has_residual_pi_for_reaping():
-                self._idle_pi_reaper_idle_streak = 0
-                continue
-            logger.info("idle_pi_reaper_scan_started: worker_id=%s", WORKER_ID)
-            try:
-                cleaned = self._cleanup_worker_runtime(
-                    label="idle_pi_reaper",
-                    reason="idle_worker_reaper",
-                )
-                self._last_idle_pi_reaper_at = _time.time()
-                self._last_idle_pi_reaper_killed_count = int(cleaned or 0)
-                self._idle_pi_reaper_killed_groups_total += int(cleaned or 0)
-                self._idle_pi_reaper_idle_streak = 0
-                logger.info(
-                    "idle_pi_reaper_cleanup_finished: worker_id=%s cleaned_groups=%s",
-                    WORKER_ID,
-                    cleaned,
-                )
-            except Exception as exc:
-                self._idle_pi_reaper_failures_total += 1
-                logger.warning("idle_pi_reaper_cleanup_failed: worker_id=%s error=%s", WORKER_ID, exc)
-
-    def dispatch_once(self) -> str | None:
-        self.reconcile_stale_local_contexts_before_claim()
-        if self.local_effective_running_task_count() >= MAX_LOCAL_RUNNING_TASKS:
-            from app.metrics import observe_local_event
-
-            observe_local_event("dispatch_capacity_blocked", "skip")
-            return None
-        pre_dispatch_cleaned = self._cleanup_worker_runtime(label="pre_dispatch", reason="before_claim")
-        from app.db import get_db
-        db_gen = get_db()
-        db: Session = next(db_gen)
-        try:
-            claimed = claim_one_runnable_task(db, WORKER_ID)
-            if claimed is None:
-                from app.metrics import observe_local_event
-
-                observe_local_event("dispatch_claim", "empty")
-                return None
-            if _active_local_task(claimed.task_id) is not None:
-                release_lease(db, claimed.task_id, WORKER_ID, claimed.epoch)
-                from app.metrics import observe_local_event
-
-                observe_local_event("dispatch_claim", "duplicate_local")
-                log_event(
-                    logger,
-                    logging.WARNING,
-                    "claimed task already running locally, released duplicate lease",
-                    event="task_lease_released_duplicate_local",
-                    task_id=claimed.task_id,
-                    owner_id=WORKER_ID,
-                    epoch=claimed.epoch,
-                    control_version=claimed.control_version,
-                )
-                return None
-            execution_thread = threading.Thread(
-                target=_run_execute_task_in_thread,
-                args=(self, claimed.task_id, claimed.epoch, claimed.control_version),
-                name=f"dvs_task_{claimed.task_id}",
-                daemon=True,
-            )
-            _register_running_task_context(
-                claimed.task_id,
-                execution_thread=execution_thread,
-                epoch=claimed.epoch,
-                control_version=claimed.control_version,
-            )
-            execution_thread.start()
-            from app.metrics import observe_local_event
-
-            observe_local_event("dispatch_claim", "success")
-            log_event(
-                logger,
-                logging.INFO,
-                "task leased by dispatcher",
-                event="task_leased",
-                task_id=claimed.task_id,
-                owner_id=WORKER_ID,
-                epoch=claimed.epoch,
-                control_version=claimed.control_version,
-            )
-            claimed_row = db.query(AppDvsTask).filter_by(task_id=claimed.task_id).first()
-            if claimed_row is not None:
-                auto_recovery = _auto_recovery_payload(claimed_row.task_config_json)
-                _record_task_event(
-                    db,
-                    row=claimed_row,
-                    event_type="task_leased",
-                    message="任务已被 worker 领取租约",
-                    status=claimed_row.status,
-                    execution_epoch=claimed.epoch,
-                    control_version=claimed.control_version,
-                    dispatch_status=claimed.dispatch_status,
-                    worker_id=WORKER_ID,
-                    execution_owner_id=WORKER_ID,
-                    payload={
-                        "owner_id": WORKER_ID,
-                        "epoch": claimed.epoch,
-                        "control_version": claimed.control_version,
-                        "dispatch_status": claimed.dispatch_status,
-                        "preflight_cleanup_scope": "pod_all_pi",
-                        "preflight_cleaned_groups": pre_dispatch_cleaned,
-                    },
-                )
-                if auto_recovery is not None:
-                    _record_task_event(
-                        db,
-                        row=claimed_row,
-                        event_type="task_auto_recovered",
-                        message="任务已由系统自动恢复并重新认领执行",
-                        level="warning",
-                        status=claimed_row.status,
-                        execution_epoch=claimed.epoch,
-                        control_version=claimed.control_version,
-                        dispatch_status=claimed.dispatch_status,
-                        worker_id=WORKER_ID,
-                        execution_owner_id=WORKER_ID,
-                        payload={
-                            "reason": auto_recovery.get("reason"),
-                            "previous_status": "running",
-                            "previous_error": claimed_row.error,
-                            "previous_owner_id": auto_recovery.get("previous_owner_id"),
-                            "lease_epoch_before": int(auto_recovery.get("previous_epoch") or 0),
-                            "lease_epoch_after": int(claimed.epoch or 0),
-                            "control_version": int(claimed.control_version or 0),
-                        },
-                    )
-                    claimed_row.task_config_json = _clear_auto_recovery_flag(claimed_row.task_config_json)
-                    db.add(claimed_row)
-                db.commit()
-            return claimed.task_id
-        finally:
-            try:
-                next(db_gen)
-            except StopIteration:
-                pass
-
-    def dispatch_until_full(self) -> int:
-        claimed = 0
-        while self.local_effective_running_task_count() < MAX_LOCAL_RUNNING_TASKS:
-            task_id = self.dispatch_once()
-            if not task_id:
-                break
-            claimed += 1
-        return claimed
 
     def list_task_sessions(self, db: Session, task_id: str) -> list[dict[str, object]]:
         row = self._get_or_404(db, task_id)

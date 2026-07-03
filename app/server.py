@@ -60,8 +60,6 @@ from .models import SwarmEvent, TaskResult, TaskStatus, make_id
 from .dataflow_v2.runner import DataflowV2Runner as Orchestrator
 from .probe_server import ThreadedProbeServer
 from .runtime_context import (
-    DISPATCHER_ENABLED,
-    EXECUTOR_ENABLED,
     INSTANCE_ID,
     PUBLIC_API_ENABLED,
     REGISTRY_ENABLED,
@@ -274,24 +272,9 @@ def health():
 
 def _probe_payload() -> dict[str, object]:
     bootstrap = get_runtime_bootstrap().status()
-    worker_slot = get_runtime_bootstrap().worker_slot_status()
-    running_task_reconcile = get_runtime_bootstrap().running_task_reconcile_status()
-    supervisor = get_task_service().supervisor_status()
-    runtime_reconcile = get_task_service().runtime_reconcile_status()
-    local_running_raw = get_task_service().local_running_task_count_raw()
-    local_running_effective = get_task_service().local_effective_running_task_count()
-    local_stale_contexts = get_task_service().local_stale_context_count()
     now_ts = time.time()
-    heartbeat_recent = bool(worker_slot["last_heartbeat_at"] and now_ts - float(worker_slot["last_heartbeat_at"]) <= 90)
-    worker_role_enabled = ROLE in {"worker", "all", "standalone"} or bool(DISPATCHER_ENABLED or EXECUTOR_ENABLED)
-    worker_ready = (not worker_role_enabled) or (
-        bool(worker_slot["thread_alive"])
-        and heartbeat_recent
-        and bool(supervisor["thread_alive"])
-    )
     ready_ok = bool(
         bootstrap["ready"]
-        and worker_ready
         and _loop_lag_seconds <= 5.0
         and not _probe_shutdown
     )
@@ -302,16 +285,10 @@ def _probe_payload() -> dict[str, object]:
         "instance_id": INSTANCE_ID,
         "role": ROLE,
         "public_api_enabled": PUBLIC_API_ENABLED,
-        "dispatcher_enabled": DISPATCHER_ENABLED,
-        "executor_enabled": EXECUTOR_ENABLED,
         "registry_enabled": REGISTRY_ENABLED,
+        "scheduler_mode": "celery",
         "active": sum(1 for t in _tasks.values() if t.result is None),
         "completed": sum(1 for t in _tasks.values() if t.result is not None),
-        "dispatcher_running": get_runtime_bootstrap().dispatcher_running(),
-        "leased_tasks": local_running_effective,
-        "local_running_task_count_raw": local_running_raw,
-        "local_effective_running_task_count": local_running_effective,
-        "local_stale_context_count": local_stale_contexts,
         "startup_phase": bootstrap["phase"],
         "startup_ready": bootstrap["ready"],
         "startup_error": bootstrap["error"],
@@ -322,41 +299,13 @@ def _probe_payload() -> dict[str, object]:
         "control_plane_last_tick_at": _control_plane_last_tick_at or None,
         "event_loop_lag_seconds": _loop_lag_seconds,
         "event_loop_lag_exceeded_total": _loop_lag_exceeded_total,
-        "worker_slot_heartbeat_thread_alive": worker_slot["thread_alive"],
-        "worker_slot_last_heartbeat_at": worker_slot["last_heartbeat_at"] or None,
-        "worker_slot_last_heartbeat_ok": worker_slot["last_heartbeat_ok"],
-        "worker_slot_last_error": worker_slot["last_error"],
-        "execution_supervisor_thread_alive": supervisor["thread_alive"],
-        "execution_supervisor_last_run_at": supervisor["last_run_at"] or None,
-        "execution_supervisor_last_error": supervisor["last_error"],
-        "running_task_reconcile_thread_alive": running_task_reconcile["thread_alive"],
-        "running_task_reconcile_last_run_at": running_task_reconcile["last_run_at"] or None,
-        "running_task_reconcile_last_error": running_task_reconcile["last_error"],
-        "runtime_reconcile_last_run_at": runtime_reconcile["last_run_at"] or None,
-        "runtime_reconcile_last_error": runtime_reconcile["last_error"],
-        "runtime_reconcile_db_repairs_total": runtime_reconcile["db_repairs_total"],
-        "runtime_reconcile_local_drops_total": runtime_reconcile["local_drops_total"],
-        "runtime_reconcile_db_recoveries_total": runtime_reconcile["db_recoveries_total"],
         "started_at": _probe_started_at or None,
         "updated_at": now_ts,
         "shutting_down": _probe_shutdown,
         "liveness_ok": (not _probe_shutdown) and bool((_control_plane_last_tick_at or 0) <= 0 or now_ts - float(_control_plane_last_tick_at or now_ts) <= 30.0),
         "readiness_ok": ready_ok,
         "last_error": bootstrap["error"],
-        "reason": None if ready_ok else (
-            "shutting_down"
-            if _probe_shutdown
-            else bootstrap["error"]
-            or (
-                "worker_slot_heartbeat_stale"
-                if worker_role_enabled and not heartbeat_recent
-                else (
-                    "execution_supervisor_unavailable"
-                    if worker_role_enabled and not bool(supervisor["thread_alive"])
-                    else "control_plane_lagged"
-                )
-            )
-        ),
+        "reason": None if ready_ok else ("shutting_down" if _probe_shutdown else (bootstrap["error"] or "control_plane_lagged")),
         "checks": {
             "bootstrap": {
                 "ready": bool(bootstrap["ready"]),
@@ -368,28 +317,6 @@ def _probe_payload() -> dict[str, object]:
                 "ok": _loop_lag_seconds <= 5.0,
                 "event_loop_lag_seconds": _loop_lag_seconds,
                 "last_tick_at": _control_plane_last_tick_at or None,
-            },
-            "heartbeat": {
-                "ok": (not worker_role_enabled) or (heartbeat_recent and bool(worker_slot["thread_alive"])),
-                "thread_alive": bool(worker_slot["thread_alive"]),
-                "last_heartbeat_at": worker_slot["last_heartbeat_at"] or None,
-                "last_heartbeat_ok": bool(worker_slot["last_heartbeat_ok"]),
-                "last_error": worker_slot["last_error"],
-                "required": worker_role_enabled,
-            },
-            "supervisor": {
-                "ok": (not worker_role_enabled) or bool(supervisor["thread_alive"]),
-                "thread_alive": bool(supervisor["thread_alive"]),
-                "last_run_at": supervisor["last_run_at"] or None,
-                "last_error": supervisor["last_error"],
-                "required": worker_role_enabled,
-            },
-            "running_task_reconcile": {
-                "ok": (not worker_role_enabled) or bool(running_task_reconcile["thread_alive"]),
-                "thread_alive": bool(running_task_reconcile["thread_alive"]),
-                "last_run_at": running_task_reconcile["last_run_at"] or None,
-                "last_error": running_task_reconcile["last_error"],
-                "required": worker_role_enabled,
             },
         },
     }

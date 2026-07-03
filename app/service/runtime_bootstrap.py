@@ -1,12 +1,15 @@
-"""Bootstrap DB-dependent runtime components with retry."""
+"""Bootstrap DB-dependent runtime components with retry.
+
+v1 的 dispatcher/worker_slot/reconcile 已删除 (Celery 接管调度)。
+本模块现在只负责: DB init + 管理 router (api/debugger) + registry (api) + failure_debug (debugger)。
+worker pod 跑 celery CLI, 不经本模块。
+"""
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 import threading
-import time
 from dataclasses import asdict, dataclass
 from typing import Optional
 
@@ -14,13 +17,10 @@ from fastapi import FastAPI
 
 from app.config import get_service_yaml
 from app.runtime_context import (
-    DISPATCHER_ENABLED,
-    DISPATCH_POLL_INTERVAL_SECONDS,
     INSTANCE_ID,
     PUBLIC_API_ENABLED,
     REGISTRY_ENABLED,
     ROLE,
-    WORKER_SLOT_REGISTRY_ENABLED,
     is_debugger_role,
 )
 from app.service.task_service import get_task_service
@@ -36,7 +36,6 @@ class RuntimeBootstrapStatus:
     db_ready: bool = False
     management_api_ready: bool = False
     registry_ready: bool = False
-    dispatcher_ready: bool = False
     failure_debug_started: bool = False
     ready: bool = False
     phase: str = "booting"
@@ -50,16 +49,6 @@ class RuntimeBootstrap:
         self._stop_event = threading.Event()
         self._status = RuntimeBootstrapStatus()
         self._router_installed = False
-        self._dispatcher_task: threading.Thread | None = None
-        self._running_task_reconcile_thread: threading.Thread | None = None
-        self._worker_slot_thread: threading.Thread | None = None
-        self._worker_slot_stop = threading.Event()
-        self._worker_slot_last_heartbeat_at = 0.0
-        self._worker_slot_last_heartbeat_ok = False
-        self._worker_slot_last_reconcile_at = 0.0
-        self._worker_slot_last_error: str | None = None
-        self._running_task_reconcile_last_run_at = 0.0
-        self._running_task_reconcile_last_error: str | None = None
 
     def start(self, app: FastAPI) -> None:
         if self._task and self._task.is_alive():
@@ -78,14 +67,6 @@ class RuntimeBootstrap:
         if self._task and self._task.is_alive():
             self._task.join(timeout=5.0)
         self._task = None
-        if self._dispatcher_task and self._dispatcher_task.is_alive():
-            self._dispatcher_task.join(timeout=5.0)
-        self._dispatcher_task = None
-        if self._running_task_reconcile_thread and self._running_task_reconcile_thread.is_alive():
-            self._running_task_reconcile_thread.join(timeout=5.0)
-        self._running_task_reconcile_thread = None
-        self._worker_slot_stop.set()
-        self._worker_slot_thread = None
         try:
             from app.service.failure_debug import get_failure_debug_service
 
@@ -98,29 +79,10 @@ class RuntimeBootstrap:
             get_registry_service().stop()
         except Exception as _e:
             logger.warning("unexpected error in runtime_bootstrap.py: %s", _e, exc_info=True)
-        log_event(logger, logging.INFO, "dispatcher stopped", event="dispatcher_stopped", owner_id=INSTANCE_ID)
+        log_event(logger, logging.INFO, "runtime bootstrap stopped", event="runtime_bootstrap_stopped", owner_id=INSTANCE_ID)
 
     def status(self) -> dict:
         return asdict(self._status)
-
-    def dispatcher_running(self) -> bool:
-        return bool(self._dispatcher_task and self._dispatcher_task.is_alive())
-
-    def running_task_reconcile_status(self) -> dict[str, object]:
-        return {
-            "thread_alive": bool(self._running_task_reconcile_thread and self._running_task_reconcile_thread.is_alive()),
-            "last_run_at": self._running_task_reconcile_last_run_at,
-            "last_error": self._running_task_reconcile_last_error,
-        }
-
-    def worker_slot_status(self) -> dict[str, object]:
-        return {
-            "thread_alive": bool(self._worker_slot_thread and self._worker_slot_thread.is_alive()),
-            "last_heartbeat_at": self._worker_slot_last_heartbeat_at,
-            "last_heartbeat_ok": self._worker_slot_last_heartbeat_ok,
-            "last_reconcile_at": self._worker_slot_last_reconcile_at,
-            "last_error": self._worker_slot_last_error,
-        }
 
     def _bootstrap_loop(self, app: FastAPI) -> None:
         svc_yaml = get_service_yaml()
@@ -144,17 +106,6 @@ class RuntimeBootstrap:
                         self._register_registry,
                     ) or made_progress
 
-                if DISPATCHER_ENABLED and not self._status.dispatcher_ready:
-                    made_progress = self._attempt_component_start(
-                        "dispatcher_start",
-                        self._start_dispatcher,
-                    ) or made_progress
-                if WORKER_SLOT_REGISTRY_ENABLED and self._worker_slot_thread is None:
-                    made_progress = self._attempt_component_start(
-                        "worker_slot_start",
-                        self._start_worker_slot_registry,
-                    ) or made_progress
-
                 # debugger 角色：DB 就绪后启动失败调试循环
                 if is_debugger_role() and self._status.db_ready and not self._status.failure_debug_started:
                     made_progress = self._attempt_component_start(
@@ -174,8 +125,6 @@ class RuntimeBootstrap:
                         owner_id=INSTANCE_ID,
                         role=ROLE,
                         public_api_enabled=PUBLIC_API_ENABLED,
-                        dispatcher_enabled=DISPATCHER_ENABLED,
-                        executor_enabled=False,
                         registry_enabled=REGISTRY_ENABLED,
                     )
                     return
@@ -213,14 +162,6 @@ class RuntimeBootstrap:
                 DB_INIT_RETRY_SECONDS,
                 exc,
             )
-            log_event(
-                logger,
-                logging.ERROR,
-                "startup bootstrap failed",
-                event="startup_bootstrap_failed",
-                phase=self._status.phase,
-                error=str(exc),
-            )
             return False
 
     def _attempt_component_start(self, phase: str, starter) -> bool:
@@ -236,16 +177,7 @@ class RuntimeBootstrap:
             return False
 
     def _attempt_async_component_start(self, phase: str, starter) -> bool:
-        self._status.phase = phase
-        log_event(logger, logging.INFO, "startup phase begin", event="startup_phase_begin", phase=phase)
-        try:
-            starter()
-            self._status.error = None
-            return True
-        except Exception as exc:
-            self._status.error = f"{phase}: {exc}"
-            logger.warning("%s failed on %s (retry in %ss): %s", phase, INSTANCE_ID, DB_INIT_RETRY_SECONDS, exc, exc_info=True)
-            return False
+        return self._attempt_component_start(phase, starter)
 
     def _install_management_router(self, app: FastAPI) -> None:
         from app.api import router as mgmt_router
@@ -270,137 +202,11 @@ class RuntimeBootstrap:
         registry.start()
         self._status.registry_ready = True
 
-    def _start_dispatcher(self) -> None:
-        def _dispatcher_loop() -> None:
-            svc = get_task_service()
-            start_supervisor = getattr(svc, "start_supervisor", None)
-            if callable(start_supervisor):
-                start_supervisor()
-            while not self._stop_event.is_set():
-                try:
-                    claimed = svc.dispatch_until_full()
-                    if claimed:
-                        log_event(
-                            logger,
-                            logging.INFO,
-                            "dispatcher claimed tasks",
-                            event="dispatcher_claim_batch",
-                            owner_id=INSTANCE_ID,
-                            claimed_count=claimed,
-                            current_running=svc.local_effective_running_task_count(),
-                        )
-                except Exception as exc:
-                    logger.warning("dispatcher loop failed on %s: %s", INSTANCE_ID, exc, exc_info=True)
-                time.sleep(DISPATCH_POLL_INTERVAL_SECONDS)
-
-        self._dispatcher_task = threading.Thread(target=_dispatcher_loop, name="dvs_dispatcher", daemon=True)
-        self._dispatcher_task.start()
-        self._start_running_task_reconcile_loop()
-        self._status.dispatcher_ready = True
-        log_event(logger, logging.INFO, "dispatcher started", event="dispatcher_started", owner_id=INSTANCE_ID)
-
-    def _start_running_task_reconcile_loop(self) -> None:
-        if self._running_task_reconcile_thread and self._running_task_reconcile_thread.is_alive():
-            return
-
-        def _loop() -> None:
-            from app.db import get_db
-
-            svc = get_task_service()
-            interval_seconds = max(1.0, float(os.environ.get("DVS_RUNNING_TASK_RECONCILE_INTERVAL_SECONDS", "10")))
-            while not self._stop_event.wait(interval_seconds):
-                db_gen = None
-                try:
-                    db_gen = get_db()
-                    db = next(db_gen)
-                    self._running_task_reconcile_last_run_at = time.time()
-                    svc.reconcile_running_task_contexts(db)
-                    self._running_task_reconcile_last_error = None
-                except Exception as exc:
-                    self._running_task_reconcile_last_error = str(exc)
-                    logger.warning("running task reconcile loop failed on %s: %s", INSTANCE_ID, exc, exc_info=True)
-                finally:
-                    if db_gen is not None:
-                        try:
-                            next(db_gen)
-                        except StopIteration:
-                            pass
-
-        self._running_task_reconcile_thread = threading.Thread(
-            target=_loop,
-            name="dvs_running_task_reconcile",
-            daemon=True,
-        )
-        self._running_task_reconcile_thread.start()
-
     def _start_failure_debug(self) -> None:
         from app.service.failure_debug import get_failure_debug_service
 
         get_failure_debug_service().start()
         self._status.failure_debug_started = True
-
-    def _start_worker_slot_registry(self) -> None:
-        self._worker_slot_stop = threading.Event()
-
-        def _worker_slot_loop() -> None:
-            from app.db import get_db
-            from app.runtime_context import MAX_LOCAL_RUNNING_TASKS, POD_IP, POD_NAME, WORKER_ID, WORKER_SLOT_HEARTBEAT_SECONDS
-            from app.service.worker_slot_service import get_worker_slot_service
-            running_reconcile_seconds = max(10, int(os.environ.get("DVS_ORPHAN_RUNNING_RECONCILE_SECONDS", str(max(10, WORKER_SLOT_HEARTBEAT_SECONDS)))))
-            heartbeat_interval_seconds = max(5, int(WORKER_SLOT_HEARTBEAT_SECONDS))
-            last_running_reconcile = [0.0]
-
-            def _run_once() -> None:
-                try:
-                    db_gen = get_db()
-                    db = next(db_gen)
-                except Exception as exc:
-                    self._worker_slot_last_heartbeat_ok = False
-                    self._worker_slot_last_error = str(exc)
-                    logger.warning("worker slot heartbeat skipped on %s before db ready: %s", INSTANCE_ID, exc)
-                    return
-                try:
-                    now_ts = time.time()
-                    get_worker_slot_service().upsert_heartbeat(
-                        db,
-                        worker_id=WORKER_ID,
-                        pod_name=POD_NAME,
-                        pod_ip=POD_IP or None,
-                        http_port=int(os.environ.get("PORT") or 8080),
-                        max_concurrent_tasks=MAX_LOCAL_RUNNING_TASKS,
-                        status="running",
-                    )
-                    self._worker_slot_last_heartbeat_at = now_ts
-                    self._worker_slot_last_heartbeat_ok = True
-                    if now_ts - last_running_reconcile[0] >= running_reconcile_seconds:
-                        recovered = get_task_service().reconcile_orphaned_running_tasks(db)
-                        last_running_reconcile[0] = now_ts
-                        self._worker_slot_last_reconcile_at = now_ts
-                        if recovered:
-                            log_event(
-                                logger,
-                                logging.WARNING,
-                                "recovered orphaned running tasks",
-                                event="task_running_reconcile_batch",
-                                owner_id=INSTANCE_ID,
-                                recovered_count=recovered,
-                            )
-                    self._worker_slot_last_error = None
-                except Exception as exc:
-                    self._worker_slot_last_heartbeat_ok = False
-                    self._worker_slot_last_error = str(exc)
-                    logger.warning("worker slot heartbeat failed on %s: %s", INSTANCE_ID, exc, exc_info=True)
-                finally:
-                    try:
-                        next(db_gen)
-                    except StopIteration:
-                        pass
-            _run_once()
-            while not self._worker_slot_stop.wait(heartbeat_interval_seconds):
-                _run_once()
-
-        self._worker_slot_thread = threading.Thread(target=_worker_slot_loop, name="dvs_worker_slot_registry", daemon=True)
-        self._worker_slot_thread.start()
 
     def _all_required_components_ready(self) -> bool:
         if not self._status.db_ready:
@@ -408,10 +214,6 @@ class RuntimeBootstrap:
         if (PUBLIC_API_ENABLED or is_debugger_role()) and not self._status.management_api_ready:
             return False
         if REGISTRY_ENABLED and not self._status.registry_ready:
-            return False
-        if DISPATCHER_ENABLED and not self._status.dispatcher_ready:
-            return False
-        if WORKER_SLOT_REGISTRY_ENABLED and self._worker_slot_thread is None:
             return False
         if is_debugger_role() and not self._status.failure_debug_started:
             return False
