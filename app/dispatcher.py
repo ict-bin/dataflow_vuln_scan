@@ -199,6 +199,9 @@ def main() -> None:
     import signal as _sig
     from app.logging_utils import configure_container_logging
     configure_container_logging("dvs-dispatcher")
+    # 确保 DB 初始化 (celery_app._ensure_db 幂等; 本进程无 runtime_bootstrap)
+    from app.celery_app import _ensure_db
+    _ensure_db()
     disp = get_dispatcher()
     disp.start()
     def _handle(signum, frame):
