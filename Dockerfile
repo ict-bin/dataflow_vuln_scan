@@ -4,6 +4,12 @@ FROM ${SECFLOW_PI_AGENT_RUNTIME_IMAGE}
 ARG SECFLOW_BUILD_VERSION=""
 ENV PYTHONUNBUFFERED=1
 
+# 覆盖升级 pi agent 到 @earendil-works/pi-coding-agent (新版, compaction_end.result 为 dict)
+# 基础镜像预装的是 @mariozechner/pi-coding-agent@0.73.1 (停更, compaction 格式不兼容)
+RUN npm uninstall -g @mariozechner/pi-coding-agent 2>/dev/null || true \
+    && npm install -g @earendil-works/pi-coding-agent@latest \
+    && command -v pi && pi --version 2>/dev/null || command -v pi
+
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         zip \
