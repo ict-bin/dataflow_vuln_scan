@@ -113,9 +113,11 @@ def _run_pi_compact(
         proc.stdin.write(compact_cmd.encode("utf-8"))
         proc.stdin.flush()
 
-        # 读 stdout 找 compaction_end
+        # 读 stdout 找 compaction_end (用 select 非阻塞读, 保证 deadline 生效)
+        import select
         compact_success = False
         deadline = time.monotonic() + compact_timeout
+        buf = b""
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -124,13 +126,22 @@ def _run_pi_compact(
             if cancel_event and cancel_event.is_set():
                 _log_warn("compact: cancelled")
                 break
-            line = proc.stdout.readline(1)
-            if not line:
-                # 检查进程是否已退出
+            # select 带超时, 避免 readline 永久阻塞 (pi compact 挂起时 deadline 才能生效)
+            rlist, _, _ = select.select([proc.stdout], [], [], min(remaining, 1.0))
+            if not rlist:
+                # 无数据: 检查进程是否已退出
                 if proc.poll() is not None:
                     break
-                time.sleep(0.1)
                 continue
+            chunk = proc.stdout.readline(1)
+            if not chunk:
+                if proc.poll() is not None:
+                    break
+                continue
+            buf += chunk
+            if b"\n" not in buf:
+                continue
+            line, buf = buf.split(b"\n", 1)
             decoded = line.decode("utf-8", errors="replace").strip()
             if not decoded:
                 continue
