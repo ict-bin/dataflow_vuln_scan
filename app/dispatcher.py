@@ -40,7 +40,7 @@ class Dispatcher:
     def stop(self) -> None:
         self._stop.set()
 
-    # ── 启动重置: Redis 丢队列 → 全 running 回 pending, 清 celery_task_id ──
+    # ── 启动重置: Redis 丢队列 → running 全回 pending + pending 的 stale celery_id 清掉 (重发) ──
     def _startup_reset(self) -> None:
         from app.db import get_db
         from app.db.models import AppDvsTask
@@ -48,7 +48,8 @@ class Dispatcher:
         db_gen = get_db()
         db = next(db_gen)
         try:
-            n = db.query(AppDvsTask).filter(
+            # running → pending (孤儿任务重排)
+            n_running = db.query(AppDvsTask).filter(
                 AppDvsTask.status == "running",
                 AppDvsTask.is_deleted.is_(False),
             ).update(
@@ -59,9 +60,22 @@ class Dispatcher:
                  AppDvsTask.dispatch_status: None},
                 synchronize_session=False,
             )
+            # pending 但已有 celery_id (Redis 丢消息) → 清掉让 pump 重发
+            n_pending = db.query(AppDvsTask).filter(
+                AppDvsTask.status == "pending",
+                AppDvsTask.is_deleted.is_(False),
+                AppDvsTask.celery_task_id.is_not(None),
+            ).update(
+                {AppDvsTask.celery_task_id: None,
+                 AppDvsTask.execution_owner_id: None,
+                 AppDvsTask.execution_lease_until: None,
+                 AppDvsTask.dispatch_status: None},
+                synchronize_session=False,
+            )
             db.commit()
-            if n:
-                logger.warning("startup_reset: %d running tasks → pending (redis queue rebuilt)", n)
+            if n_running or n_pending:
+                logger.warning("startup_reset: %d running→pending, %d pending stale celery_id cleared (redis queue rebuilt)",
+                               n_running, n_pending)
         finally:
             try:
                 next(db_gen)
