@@ -9,7 +9,7 @@ command -v pi &>/dev/null || { echo "❌ pi 未找到。npm install -g @mariozec
 python3 -c "import fastapi" 2>/dev/null || pip install -r requirements.txt
 
 case "${1:---server}" in
-  --cli)  shift; exec python3 cli.py "$@" ;;
+  --cli)  shift; exec python3 main.py "$@" ;;
   --dev)  DEV=1 exec python3 main.py ;;
   *)      exec python3 main.py ;;
 esac

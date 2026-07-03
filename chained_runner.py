@@ -233,7 +233,7 @@ def run_real() -> None:
         task_dir.mkdir(parents=True, exist_ok=True)
         setup_data_links(input_dir, config_dir, task_dir)
         cmd = [
-            "python3", "cli.py",
+            "python3", "main.py",
             f"对 {file_name} 的 {function_name} 函数完成数据流漏洞挖掘",
             "--config", "/data/config/config.json",
             "--cwd", "/data/target",

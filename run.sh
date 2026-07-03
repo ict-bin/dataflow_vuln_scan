@@ -99,7 +99,7 @@ nohup docker run --rm --network host \
   -v "${CONFIG_DIR}:/data/config:ro" \
   -v "${OUTPUT_DIR}:/data/output" \
   dataflow_vuln_scan \
-  python3 cli.py \
+  python3 main.py \
     --config /data/config/config.json \
     "${PROMPT}" \
   > "${SCRIPT_DIR}/run.log" 2>&1 &

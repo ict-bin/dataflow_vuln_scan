@@ -8,7 +8,7 @@ DIR="~/yyf/dataflow_vuln_scan"
 LOCAL="$(cd "$(dirname "$0")" && pwd)"
 
 echo "=== 同步代码 ==="
-scp $SSH_OPTS "$LOCAL/cli.py" "$LOCAL/main.py" "$LOCAL/config.example.json" "$LOCAL/Dockerfile" "$REMOTE:$DIR/"
+scp $SSH_OPTS "$LOCAL/main.py" "$LOCAL/config.example.json" "$LOCAL/Dockerfile" "$REMOTE:$DIR/"
 cd "$LOCAL" && tar cf - app prompts scripts | ssh $SSH_OPTS $REMOTE "cd $DIR && rm -rf app prompts scripts && tar xf -"
 
 echo "=== 构建镜像 ==="
