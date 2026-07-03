@@ -29,11 +29,7 @@ _QUERY_ENGINE_401_MAX_RETRIES = 3
 _DEFAULT_CONTEXT_WINDOW = 128_000
 _SINGLE_INPUT_CONTEXT_RATIO = 0.75
 _PROMPT_TOKEN_OVERHEAD = 128
-_COMPACTION_TRIGGER_PROMPT = (
-    "请立即触发一次当前会话的自动压缩（compaction），"
-    "仅保留后续继续执行任务所需的关键结论、约束和待办。"
-    "不要继续业务分析，只回复 COMPACTION_OK。"
-)
+# Compaction 不再发 user 消息, 用 RPC compact 命令 (见 runner.py _run_pi_compact)
 _CONTEXT_WINDOW_BY_MODEL = {
     "gpt-5.4": 128_000,
     "gpt-5.4-mini": 128_000,

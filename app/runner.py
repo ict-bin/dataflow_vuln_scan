@@ -62,11 +62,7 @@ _QUERY_ENGINE_401_MAX_RETRIES = 3
 _DEFAULT_CONTEXT_WINDOW = 128_000
 _SINGLE_INPUT_CONTEXT_RATIO = 0.75
 _PROMPT_TOKEN_OVERHEAD = 128
-_COMPACTION_TRIGGER_PROMPT = (
-    "请立即触发一次当前会话的自动压缩（compaction），"
-    "仅保留后续继续执行任务所需的关键结论、约束和待办。"
-    "不要继续业务分析，只回复 COMPACTION_OK。"
-)
+# Compaction 不再发 user 消息, 用 RPC compact 命令 (见 _run_pi_compact)
 
 _FATAL_PATTERNS: list[list[str]] = [
     ["model not found"],
@@ -81,6 +77,95 @@ _RATE_LIMIT_EXTRA_DELAY = 30.0
 def _should_emit_rate_limit_event(streak: int) -> bool:
     streak = max(0, int(streak or 0))
     return streak == 1 or (streak > 0 and streak % 10 == 0)
+
+
+# ─── Compaction via RPC compact command ─────────────────────────────────────
+
+def _run_pi_compact(
+    *,
+    args: list[str],
+    cwd: str,
+    env: dict[str, str] | None,
+    cancel_event: threading.Event | None = None,
+    timeout_seconds: float | None = None,
+) -> bool:
+    """用 pi RPC compact 命令压缩 session, 不发 user 消息。
+
+    发送 {"type": "compact"} RPC 命令, 等待 compaction_end 事件。
+    返回 True 表示压缩成功。
+    """
+    from .runner_helpers import _terminate_pi_process_tree
+    compact_timeout = min(timeout_seconds or 300, 300)  # 最多 5 分钟
+    try:
+        proc = subprocess.Popen(
+            args, cwd=cwd, env=env,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            stdin=subprocess.PIPE, start_new_session=True,
+        )
+    except OSError as e:
+        _log_warn(f"compact: failed to start pi process: {e}")
+        return False
+
+    try:
+        _log_info(f"started pi compact process pid={proc.pid}")
+        # 发 RPC compact 命令
+        compact_cmd = json.dumps({"type": "compact"}, ensure_ascii=False) + "\n"
+        proc.stdin.write(compact_cmd.encode("utf-8"))
+        proc.stdin.flush()
+
+        # 读 stdout 找 compaction_end
+        compact_success = False
+        deadline = time.monotonic() + compact_timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                _log_warn("compact: timeout waiting for compaction_end")
+                break
+            if cancel_event and cancel_event.is_set():
+                _log_warn("compact: cancelled")
+                break
+            line = proc.stdout.readline(1)
+            if not line:
+                # 检查进程是否已退出
+                if proc.poll() is not None:
+                    break
+                time.sleep(0.1)
+                continue
+            decoded = line.decode("utf-8", errors="replace").strip()
+            if not decoded:
+                continue
+            try:
+                evt = json.loads(decoded)
+            except json.JSONDecodeError:
+                continue
+            evt_type = evt.get("type", "")
+            if evt_type == "compaction_end":
+                aborted = evt.get("aborted", False)
+                result_data = evt.get("result")
+                compact_success = not aborted and result_data is not None
+                if compact_success:
+                    after = result_data.get("estimatedTokensAfter", "?")
+                    _log_info(f"compact: success, estimated tokens after: {after}")
+                else:
+                    err = evt.get("errorMessage", "unknown")
+                    _log_warn(f"compact: failed or aborted: {err}")
+                break
+            if evt_type == "agent_end":
+                break
+
+        # 关 stdin 让 pi 退出
+        if proc.stdin and not proc.stdin.closed:
+            try:
+                proc.stdin.close()
+            except Exception:
+                pass
+        proc.wait(timeout=10)
+        return compact_success
+    except Exception as e:
+        _log_warn(f"compact: exception: {e}")
+        return False
+    finally:
+        _terminate_pi_process_tree(proc, reason="compact_done")
 
 
 # ─── Context overflow recovery ────────────────────────────────────────────────
@@ -127,18 +212,11 @@ def _run_with_context_overflow_recovery(
                 )
                 return preflight_result
             compaction_args = _build_args(pi_cmd, model, tools, thinking_level, session_file)
-            _run_with_pi_retry(
+            _run_pi_compact(
                 args=compaction_args,
                 cwd=cwd,
                 env=env,
-                prompt=_COMPACTION_TRIGGER_PROMPT,
-                post_skill_prompt=None,
                 cancel_event=cancel_event,
-                on_stream=None,
-                max_retries=max_retries,
-                retry_delay=retry_delay,
-                pi_max_retries=pi_max_retries,
-                pi_retry_delay=pi_retry_delay,
                 timeout_seconds=timeout_seconds,
             )
             overflow_attempts += 1
@@ -185,18 +263,11 @@ def _run_with_context_overflow_recovery(
         if result.context_overflow_retry_event_due:
             _log_warn(f"overflow 无限压缩重试 [{overflow_attempts}], 继续重试: {(result.error or '')[:200]}")
         compaction_args = _build_args(pi_cmd, model, tools, thinking_level, session_file)
-        _run_with_pi_retry(
+        _run_pi_compact(
             args=compaction_args,
             cwd=cwd,
             env=env,
-            prompt=_COMPACTION_TRIGGER_PROMPT,
-            post_skill_prompt=None,
             cancel_event=cancel_event,
-            on_stream=None,
-            max_retries=max_retries,
-            retry_delay=retry_delay,
-            pi_max_retries=pi_max_retries,
-            pi_retry_delay=pi_retry_delay,
             timeout_seconds=timeout_seconds,
         )
         continue
