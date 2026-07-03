@@ -144,7 +144,7 @@ def _run_pi_compact(
                 result_data = evt.get("result")
                 compact_success = not aborted and result_data is not None
                 if compact_success:
-                    after = result_data.get("estimatedTokensAfter", "?")
+                    after = result_data.get("estimatedTokensAfter", "?") if isinstance(result_data, dict) else result_data
                     _log_info(f"compact: success, estimated tokens after: {after}")
                 else:
                     err = evt.get("errorMessage", "unknown")
@@ -196,7 +196,20 @@ def _run_with_context_overflow_recovery(
     context_window = _model_context_window(model)
     overflow_attempts = 0
     fatal_attempts = 0
+    _MAX_COMPACT_RETRIES = int(os.environ.get("DVS_MAX_COMPACT_RETRIES", "5"))
     while True:
+        if overflow_attempts >= _MAX_COMPACT_RETRIES:
+            _log_warn(f"compact 重试达上限 {_MAX_COMPACT_RETRIES}, 放弃 (避免死循环)")
+            fail_result = AgentResult()
+            fail_result.agent_role = agent_role
+            fail_result.runtime_dir = runtime_dir
+            fail_result.context_window = context_window
+            fail_result.context_overflow_failed_after_compaction = True
+            fail_result.compaction_requested = True
+            fail_result.error = _format_context_overflow_failure(
+                model, system_prompt, prompt, post_skill_prompt, "compact_retry_exhausted",
+            )
+            return fail_result
         preflight_limit = _preflight_context_token_limit(context_window, 0)
         single_input_tokens = _single_input_token_estimate(system_prompt, prompt, post_skill_prompt)
         if single_input_tokens > preflight_limit:
