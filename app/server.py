@@ -57,7 +57,7 @@ from .logging_utils import configure_container_logging
 from .metrics import normalize_http_route, observe_http_request as observe_metrics_request, observe_http_request_inflight, render_aggregate_metrics, render_local_metrics, render_summary_metrics
 from .metrics_summary import build_ai_summary, build_generic_observability_summary, build_rest_api_summary, parse_prometheus_metrics
 from .models import SwarmEvent, TaskResult, TaskStatus, make_id
-from .orchestrator import Orchestrator
+from .dataflow_v2.runner import DataflowV2Runner as Orchestrator
 from .probe_server import ThreadedProbeServer
 from .runtime_context import (
     DISPATCHER_ENABLED,
@@ -455,7 +455,7 @@ def submit_analyse(body: AnalyseRequest):
             except QueueFull:
                 pass
 
-    orch = Orchestrator(config=cfg, on_event=on_event)
+    orch = Orchestrator(config=cfg, on_event=on_event, task_id=task_id)
     entry = TaskEntry(orch, task_id, body.prompt)
     entry.callback_url = body.callback_url or None
     _tasks[task_id] = entry
