@@ -312,6 +312,7 @@ class VulnScanStore:
                 ("followups", "tracker_result_json", "ALTER TABLE followups ADD COLUMN tracker_result_json TEXT NOT NULL DEFAULT '{}'"),
                 ("analysis_contexts", "validations_json", "ALTER TABLE analysis_contexts ADD COLUMN validations_json TEXT NOT NULL DEFAULT '[]'"),
                 ("analysis_contexts", "func_hash", "ALTER TABLE analysis_contexts ADD COLUMN func_hash TEXT NOT NULL DEFAULT ''"),
+                ("taint_nodes", "run_id", "ALTER TABLE taint_nodes ADD COLUMN run_id TEXT NOT NULL DEFAULT ''"),
             ]:
                 try:
                     conn.execute(ddl)
