@@ -44,7 +44,7 @@ RUN /opt/venv/bin/pip install --no-cache-dir -r requirements.txt -q \
     && /opt/venv/bin/python3 -c "import tree_sitter, tree_sitter_c, tree_sitter_cpp; print('tree-sitter OK')" \
     && /opt/venv/bin/python3 -c "from pydantic import BaseModel; print('pydantic OK')"
 COPY app/               ./app/
-COPY cli.py main.py     ./
+COPY main.py     ./
 COPY prompts/           ./prompts/
 COPY scripts/           ./scripts/
 COPY tools/             ./tools/
@@ -119,5 +119,5 @@ COPY scripts/entrypoint.sh /entrypoint.sh
 RUN sed -i 's/\r$//' /entrypoint.sh && chmod +x /entrypoint.sh
 ENTRYPOINT ["/entrypoint.sh"]
 
-# 默认 REST API，覆盖: python3 cli.py /data/config/config.json
+# 默认 REST API，覆盖: python3 main.py /data/config/config.json
 CMD ["./scripts/start-with-probe.sh", "python3", "main.py"]
