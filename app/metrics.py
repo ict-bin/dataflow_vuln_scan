@@ -14,8 +14,6 @@ from .db.models import AppDvsTask
 from .runtime_context import (
     CLUSTER_EXPECTED_WORKER_CAPACITY,
     CLUSTER_EXPECTED_WORKERS,
-    DISPATCHER_ENABLED,
-    EXECUTOR_ENABLED,
     HEARTBEAT_INTERVAL_SECONDS,
     MAX_LOCAL_RUNNING_TASKS,
     PUBLIC_API_ENABLED,
@@ -199,10 +197,10 @@ def _render_local_runtime_metrics() -> list[str]:
         f"secflow_dvs_local_public_api_enabled {1 if PUBLIC_API_ENABLED else 0}",
         "# HELP secflow_dvs_local_dispatcher_enabled Dispatcher enabled flag for this pod.",
         "# TYPE secflow_dvs_local_dispatcher_enabled gauge",
-        f"secflow_dvs_local_dispatcher_enabled {1 if DISPATCHER_ENABLED else 0}",
+        f"secflow_dvs_local_dispatcher_enabled 0",
         "# HELP secflow_dvs_local_executor_enabled Executor enabled flag for this pod.",
         "# TYPE secflow_dvs_local_executor_enabled gauge",
-        f"secflow_dvs_local_executor_enabled {1 if EXECUTOR_ENABLED else 0}",
+        f"secflow_dvs_local_executor_enabled 0",
         "# HELP secflow_dvs_local_registry_enabled Registry enabled flag for this pod.",
         "# TYPE secflow_dvs_local_registry_enabled gauge",
         f"secflow_dvs_local_registry_enabled {1 if REGISTRY_ENABLED else 0}",
@@ -371,8 +369,8 @@ def _render_cluster_task_metrics() -> list[str]:
         if classification != "none":
             failure_category_counts[classification] += 1
 
-    dispatcher_running = 1 if DISPATCHER_ENABLED else 0
-    executor_running = 1 if EXECUTOR_ENABLED else 0
+    dispatcher_running = 0
+    executor_running = 0
     configured_workers = max(0, int(CLUSTER_EXPECTED_WORKERS))
     configured_capacity_per_worker = max(0, int(CLUSTER_EXPECTED_WORKER_CAPACITY))
     observed_active_worker_count = len(observed_active_owners)

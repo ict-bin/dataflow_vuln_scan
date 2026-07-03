@@ -89,7 +89,7 @@ def _clean_restart_update_fields(row: AppDvsTask, *, reason: str) -> dict:
 def claim_specific_task(db: Session, owner_id: str, task_id: str) -> ClaimedTask | None:
     """Celery worker 收到 LAUNCH 后按 task_id 认领 (非竞争性)。
 
-    与 claim_one_runnable_task 的区别: 不扫表竞争, 只认领指定 task_id。
+    与 v1 claim (已删) 的区别: 不扫表竞争, 只认领指定 task_id。
     用于 Celery 消费: dispatcher 已把该 task 路由到本 worker, 这里设 owner/epoch/lease。
     只认领 pending (正常) 或 running 但租约过期 (acks_late 重投/孤儿);
     running 且租约新鲜 → 返回 None (别的活 worker 在跑, 本消息作废 ack 掉)。

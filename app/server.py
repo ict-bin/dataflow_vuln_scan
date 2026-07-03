@@ -362,8 +362,8 @@ def submit_analyse(body: AnalyseRequest):
     """提交分析任务。只需一句话 prompt。"""
     if not PUBLIC_API_ENABLED:
         raise _forbidden_for_role("legacy submit API")
-    if not EXECUTOR_ENABLED:
-        raise _forbidden_for_role("legacy in-process executor")
+    # celery 模式: API pod 不再 in-process 执行任务 (走 dispatcher→celery)
+    raise _forbidden_for_role("legacy in-process executor (celery mode)")
     svc = _get_svc_config()
     cwd = body.cwd or TARGET_DIR
     cfg = build_task_config(svc, body.prompt, cwd=cwd)
