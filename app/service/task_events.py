@@ -189,9 +189,30 @@ def _timeline_party_from_payload(payload: dict[str, object] | None, key: str) ->
     return party
 
 
+_REVERSE_EVENT_TYPE_MAP = {
+    "trace_started": "trace_start",
+    "callee_discovered": "trace_callees",
+    "root_analysis_started": "task_start",
+    "round_started": "round_start",
+    "round_finished": "round_end",
+    "judge_completed": "judge_done",
+    "result_materialized": "task_end",
+    "depth_limit_reached": "trace_start",
+    "task_runtime_error": "error",
+}
+
+
 def _build_task_event_response(event: AppDvsTaskEvent) -> dict[str, object]:
     recorder = _timeline_party_from_payload(event.payload, "recorder") or {}
     origin = _timeline_party_from_payload(event.payload, "event_origin") or {}
+    # 前端 buildDfaTree 用 evt.type + evt.data, 需要 reverse-map event_type + payload
+    original_type = _REVERSE_EVENT_TYPE_MAP.get(event.event_type, event.event_type)
+    data = dict(event.payload or {})
+    # 补充直接字段到 data (前端读 d.function, d.callees 等)
+    if "function" not in data and event.function_name:
+        data["function"] = event.function_name
+    if "source_file" not in data and event.source_file:
+        data["source_file"] = event.source_file
     return {
         "id": event.id,
         "task_id": event.task_id,
@@ -225,6 +246,8 @@ def _build_task_event_response(event: AppDvsTaskEvent) -> dict[str, object]:
         "origin_pod_ip": origin.get("pod_ip"),
         "origin_role": origin.get("role"),
         "created_at": isoformat_local(event.created_at),
+        "type": original_type,
+        "data": data,
     }
 
 
