@@ -344,6 +344,8 @@ class TaskTimelineEventResponse(BaseModel):
     origin_pod_ip: str | None = None
     origin_role: str | None = None
     created_at: str | None = None
+    type: str | None = None
+    data: Dict[str, Any] = Field(default_factory=dict)
 
 
 class TaskTimelineResponse(BaseModel):
