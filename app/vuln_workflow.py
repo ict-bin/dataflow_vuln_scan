@@ -276,33 +276,80 @@ def _check_finding_dimensions(dims: dict) -> bool:
 
 
 def _extract_json_from_text(text: str, key: str | None = None) -> Any:
-    candidates: list[str] = []
-    for m in re.finditer(r"```(?:json)?\s*\n(.*?)\n\s*```", text, re.S):
-        candidates.append(m.group(1))
-    candidates.append(text)
-    parsed: list[Any] = []
-    for raw in candidates:
-        raw = raw.strip()
+    """从文本提取 JSON 对象。
+
+    两步策略：
+    1) markdown 代码块 (宽松匹配, 允许无换行);
+    2) 平衡括号扫描整个文本——遍历每个 '{' 找到配对的 '}', 逐个 json.loads。
+       这比 first-'{'-to-last-'}' 健壮: 不会因散文里零散的 {/} 导致 span 错位。
+    key=None 时收集所有可解析对象, 优先含 function+edges 的完整 taint-graph;
+    key 非空时只接受含该 key 的 dict。
+    """
+    candidates: list[Any] = []
+    seen_ids: list[int] = []
+
+    def _try_add(obj: Any) -> None:
+        if key is None or (isinstance(obj, dict) and key in obj):
+            oid = id(obj)
+            if oid not in seen_ids:
+                candidates.append(obj)
+                seen_ids.append(oid)
+
+    # 1) markdown 代码块
+    for m in re.finditer(r"```(?:json)?\s*(.*?)\s*```", text, re.S):
+        raw = m.group(1).strip()
         for start_char, end_char in [("{", "}"), ("[", "]")]:
             start = raw.find(start_char)
             end = raw.rfind(end_char)
             if start >= 0 and end > start:
                 try:
-                    obj = json.loads(raw[start:end+1])
-                    if key is None or (isinstance(obj, dict) and key in obj):
-                        parsed.append(obj)
-                        break  # move to next candidate
-                except Exception as _e:
-                    logger.warning("unexpected error in vuln_workflow.py: %s", _e, exc_info=True)
-    if not parsed:
+                    _try_add(json.loads(raw[start:end + 1]))
+                    break
+                except Exception:
+                    pass
+
+    # 2) 平衡括号扫描整个文本 (处理无 fence / prose 混杂 / fence 内未闭合)
+    n = len(text)
+    for i in range(n):
+        if text[i] != "{":
+            continue
+        depth = 0
+        in_str = False
+        escape = False
+        for j in range(i, n):
+            c = text[j]
+            if escape:
+                escape = False
+                continue
+            if c == "\\":
+                if in_str:
+                    escape = True
+                continue
+            if c == '"' and not escape:
+                in_str = not in_str
+                continue
+            if in_str:
+                continue
+            if c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        _try_add(json.loads(text[i:j + 1]))
+                    except Exception:
+                        pass
+                    break
+
+    if not candidates:
         return None
     if key is None:
         # Prefer a complete taint-graph object (has function+edges) over partial
-        # JSON fragments the model may emit while reasoning inside code fences.
-        for obj in parsed:
+        # JSON fragments the model may emit while reasoning.
+        for obj in candidates:
             if isinstance(obj, dict) and "function" in obj and "edges" in obj:
                 return obj
-    return parsed[0]
+    return candidates[0]
 
 
 def _read_prompt(path: str) -> str:
@@ -588,7 +635,7 @@ class DataflowVulnWorkflow:
                 tools=acfg.tools or self.cfg.workers.default_tools,
                 cwd=str(self.ws), session_file=session_file, system_prompt=system_prompt,
                 cancel_event=self.cancel_event,
-                run_timeout_seconds=min(self.cfg.agent_run_timeout_seconds or 300, 120),
+                run_timeout_seconds=self.cfg.agent_run_timeout_seconds,
                 pi_max_retries=1, pi_retry_delay=2,
                 max_retries=1, retry_delay=2,
                 task_context={"task_id": self.task_id, "task_root": str(self.out_dir.parent),
@@ -1059,7 +1106,7 @@ class DataflowVulnWorkflow:
             cwd=str(self.ws), session_file=str(fork_session),
             system_prompt=system_prompt,
             cancel_event=self.cancel_event,
-            run_timeout_seconds=min(self.cfg.agent_run_timeout_seconds or 300, 120),
+            run_timeout_seconds=self.cfg.agent_run_timeout_seconds,
             pi_max_retries=self.cfg.pi_max_retries, pi_retry_delay=self.cfg.pi_retry_delay,
             task_context={
                 "task_id": self.task_id,
