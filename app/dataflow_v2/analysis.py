@@ -559,8 +559,9 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                         'output_dir':str(fdir)}
                 cols = list(data)
                 with self.graph_store.connect() as conn:
-                    conn.execute("INSERT OR IGNORE INTO analysis_runs (run_id,task_id,root_file,root_function,source_root,status) VALUES (?,?,?,?,?,?)",
-                                 (self.run_id, self.task_id, func.file, func.name, self.source_root, "completed"))
+                    import time as _time
+                    conn.execute("INSERT OR IGNORE INTO analysis_runs (run_id,task_id,root_file,root_function,source_root,status,started_at) VALUES (?,?,?,?,?,?,?)",
+                                 (self.run_id, self.task_id, func.file, func.name, self.source_root, "completed", _time.time()))
                     conn.execute("INSERT OR IGNORE INTO taint_nodes (node_id,source_file,function_name,taint_kind,symbol,line,call_expr,description,parent_node_id,depth,context_session,run_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                                  (node, func.file, func.name, "vuln_site", fline, str(fline), "", func.description or "", "", 0, "", self.run_id))
                     conn.execute(f"INSERT OR REPLACE INTO vulnerability_findings ({','.join(cols)}) VALUES ({','.join('?' for _ in cols)})",
