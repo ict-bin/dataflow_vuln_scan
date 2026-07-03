@@ -49,6 +49,12 @@ LLM 只负责**污点跟踪语义**: 哪些变量被污染 (source_taint/target_
 **不要输出** call_line / condition / is_indirect_call / dispatch_kind / signature /
 target_file —— 这些由服务端 clang/脚本从 AST 精确获取 (行号/分支/间接调用/签名/文件)。
 
+- `source_taint`：本函数内被污染的变量名 (入口污点或派生污点)。
+- `target_taint`：**callee 接收的污点参数名**——即 callee 签名中的形参名, 代表污点传入 callee 后在该参数上的名称。
+  **不是 callee 的返回值或内部产物**。如果本函数调 `xmlFdOpen(filename, 1, &ret)`,
+  `target_taint` 应填 `filename` (传给 callee 的参数), 不是 `fd` (callee 的返回值)。
+  ❌ `source_taint="filename"`, `target_taint="fd"` (fd 是返回值, 错误)
+  ✅ `source_taint="filename"`, `target_taint="filename"` (filename 是 callee 参数, 正确)
 - `target_function`：本函数**真实调用**的 callee 名 (clang 会校验并定位精确 CallExpr)。
   传播到外部/全局变量时留空 + `is_external=true`。
 - `validations`：本传播过程中 (从源污点到调用点) 累积的校验, 每项 `{condition, content}`。
