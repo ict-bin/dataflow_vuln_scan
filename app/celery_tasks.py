@@ -90,10 +90,11 @@ def _cleanup_pi_processes() -> None:
 
 
 def _clean_task_artifacts(task_id: str) -> None:
-    """restart 语义: 清空任务 run/output 产物, 保留 input + DB 事件时间线。
+    """restart 语义: 清空任务 run/output 产物 + DB stages_json/result_json, 保留 input + DB 事件时间线。
 
     每次 (重投/restart/首次) 执行前都清: 首次无产物=no-op; 重投时清掉旧
-    run/dataflow-v2 (functions.db/sessions) + output, 确保从头跑而非续跑。
+    run/dataflow-v2 (functions.db/sessions) + output + DB stages_json(前端分析日志回放缓冲),
+    确保从头跑而非续跑, 前端 /logs 也重置。DB task_events 事件时间线保留(审计)。
     """
     import shutil
     from pathlib import Path
@@ -107,17 +108,22 @@ def _clean_task_artifacts(task_id: str) -> None:
             row = db.query(AppDvsTask).filter_by(task_id=task_id).first()
             if row is None:
                 return
+            # 1. 清 DB 回放缓冲 (前端 /logs 读 stages_json), 保留 task_events 审计时间线
+            row.stages_json = None
+            row.result_json = None
+            row.latest_abnormal_reason_json = None
+            db.commit()
+            # 2. 清文件产物 run/output (保留 input)
             task_root = Path(row.output_path or OUTPUT_DIR) / task_id
-            if not task_root.is_dir():
-                return
-            for child_name in ("run", "output"):
-                child = task_root / child_name
-                if child.exists():
-                    try:
-                        shutil.rmtree(child)
-                        logger.info("cleaned task artifacts: %s/%s", task_id, child_name)
-                    except Exception as exc:
-                        logger.warning("clean task artifact %s failed: %s", child_name, exc)
+            if task_root.is_dir():
+                for child_name in ("run", "output"):
+                    child = task_root / child_name
+                    if child.exists():
+                        try:
+                            shutil.rmtree(child)
+                            logger.info("cleaned task artifacts: %s/%s", task_id, child_name)
+                        except Exception as exc:
+                            logger.warning("clean task artifact %s failed: %s", child_name, exc)
         finally:
             try:
                 next(db_gen)
