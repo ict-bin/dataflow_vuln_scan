@@ -280,18 +280,20 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
             if self.cancel_event is not None and self.cancel_event.is_set():
                 break
             retry_used += 1
-            self.on_event("v2_taint_retry_json", function=func.name, attempt=retry_used,
-                          reason=parse_warn)
-            # 检测 stopReason=length 或 error → session 可能过大, 先 compact
+            # 从 messages 找最后一条 assistant 的 stopReason
             stop_reason = ''
             for msg in reversed(getattr(output, 'messages', [])):
                 if msg.get('role') == 'assistant':
                     stop_reason = msg.get('stopReason', '')
                     break
-            if stop_reason in ('length', 'error', 'max_tokens'):
+            self.on_event("v2_taint_retry_json", function=func.name, attempt=retry_used,
+                          reason=parse_warn, stop_reason=stop_reason)
+            # 只有 stop=length (超长截断) 才 compact + 用截断专用 prompt
+            # stop=error (502/timeout 等) 不 compact, 用原始 prompt 重试
+            if stop_reason == 'length':
+                # compact: 清理截断的 assistant 消息, 压缩 session
                 self.on_event("v2_compact_before_retry", function=func.name,
-                              reason="stopReason=" + stop_reason)
-                # 手动触发 compact (auto-compaction 在 RPC 模式下不触发)
+                              reason="stopReason=length")
                 try:
                     from ..runner_helpers import _build_args as _ba
                     from ..runner import _find_pi_command, _run_pi_compact
@@ -302,19 +304,31 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                                     timeout_seconds=min(self.cfg.agent_run_timeout_seconds or 300, 300))
                 except Exception as _ce:
                     logger.warning("v2 compact before retry failed: %s", _ce, exc_info=True)
-            # retry prompt: 针对截断, 要求精简输出
-            _retry_prompt = (
-                "你的上一轮输出被截断了（输出长度超限）。\n"
-                "请直接输出完整的 taint-analysis JSON，不要推理/thinking，\n"
-                "精简 description 和各字段内容，确保 JSON 完整闭合。\n"
-                "格式：```json\n"
-                '{"description": "一句话", "self_contained": false, '
-                '"taints": [{"name": "x", "description": "y"}], '
-                '"propagations": [{"source_taint": "x", "target_taint": "y", '
-                '"target_function": "Z", "is_external": false, '
-                '"description": "z"}], "return_taints": []}\n```\n'
-                "无传播时 propagations=[]。不要输出 thinking。"
-            )
+                _retry_prompt = (
+                    "你的上一轮输出被截断了（输出长度超限）。\n"
+                    "请直接输出完整的 taint-analysis JSON，不要推理/thinking，\n"
+                    "精简 description 和各字段内容，确保 JSON 完整闭合。\n"
+                    "格式：```json\n"
+                    '{"description": "一句话", "self_contained": false, '
+                    '"taints": [{"name": "x", "description": "y"}], '
+                    '"propagations": [{"source_taint": "x", "target_taint": "y", '
+                    '"target_function": "Z", "is_external": false, '
+                    '"description": "z"}], "return_taints": []}\n```\n'
+                    "无传播时 propagations=[]。不要输出 thinking。"
+                )
+            elif stop_reason == 'error':
+                # API 错误 (502/timeout 等), 不是 LLM 的问题, 用原始 prompt 重试
+                _retry_prompt = prompt
+            else:
+                # 其他原因 (stop=stop 但没 JSON 等), 引导输出 JSON
+                _retry_prompt = (
+                    "请基于你的分析输出 taint-analysis JSON。\n"
+                    "格式：```json\n"
+                    '{"description": "...", "self_contained": false, '
+                    '"taints": [{"name": "...", "description": "..."}], '
+                    '"propagations": [...], "return_taints": []}\n```\n'
+                    "无传播时 propagations=[]。"
+                )
             output = _run_taint_agent(_retry_prompt)
             if self.on_event:
                 emit_agent_runtime_events(self.on_event, result=output, stage="taint_analysis_v2_retry",
