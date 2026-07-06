@@ -194,8 +194,12 @@ class DfsOrchestrator:
             func.description = result.description
             self.store.upsert_function(func)
 
-        callee_names = [p.target_function for p in result.propagations if p.target_function]
-        self.cbs.on_event("trace_callees", function=func.name, callees=callee_names, depth=depth)
+        # 第一次 trace_callees: 只含直接调用 (非间接/非外部)
+        # 间接调用的 target_function 是原始表达式 (如 ctxt->sax->cdataBlock),
+        # 等 _build_paths 解析后再发第二次 trace_callees 带解析后的真实函数名
+        direct_callees = [p.target_function for p in result.propagations
+                          if p.target_function and not p.is_indirect_call and not p.is_external]
+        self.cbs.on_event("trace_callees", function=func.name, callees=direct_callees, depth=depth)
 
         self_contained = result.self_contained
         chain_session = result.session_path
@@ -218,6 +222,23 @@ class DfsOrchestrator:
             paths = self._build_paths(result.propagations, func, ctx, depth)
         else:
             paths = []
+
+        # 5b) 发 trace_callees_resolved: 用解析后的函数名 (tracker 解析间接调用后)
+        # 第一次 trace_callees 用原始 callee 表达式 (如 ctxt->sax->cdataBlock)
+        # 这里发解析后的真实函数名 (如 xmlSAX2CDataBlock), 前端 buildDfaTree 能匹配 trace_start
+        resolved_callees: list[str] = []
+        for path_steps in paths:
+            if path_steps and path_steps[0].func:
+                resolved_callees.append(path_steps[0].func.name)
+        # 也加上直接调用 (非间接/非外部) 的 target_function
+        for p in result.propagations:
+            if p.target_function and not p.is_indirect_call and not p.is_external:
+                if p.target_function not in resolved_callees:
+                    resolved_callees.append(p.target_function)
+        if resolved_callees:
+            self.cbs.on_event("trace_callees", function=func.name,
+                              callees=resolved_callees, depth=depth,
+                              resolved=True)
 
         base_accumulated = list(pre_validations) + list(my_discovered)
         all_callee_return_taints: list[TaintRecord] = []
