@@ -299,13 +299,25 @@ def build_v2_trace_tree(run_root: str | Path) -> dict[str, Any] | None:
     oc.close()
 
     if not orch_edges:
-        # 无 orchestration 边: 只分析了一个根函数, 用 functions.db 构建
+        # 无 orchestration 边: 只分析了一个根函数, 手动构建单节点树
         analyzed = [f for f in func_map.values() if f.get("processed_taints") and f["processed_taints"] != "[]"]
         if not analyzed:
             return None
         f = analyzed[0]
-        return _build(f["func_id"], func_map, taints_by_func, props_by_source,
-                       findings_by_func, 0, "root", "")
+        fname = f.get("name", "")
+        ffile = f.get("file", "")
+        taint_inputs = taints_by_func.get(f["func_id"], [])
+        my_props = props_by_source.get(f["func_id"], [])
+        taint_summary = [{"from_symbol": p.get("source_taint_name", ""), "to_symbol": p.get("target_taint_name", ""),
+                           "line": str(p.get("call_line", "")), "operation": "call_arg",
+                           "evidence": p.get("description", ""), "termination_reason": ""}
+                          for p in my_props]
+        return {"run_id": f["func_id"], "function_name": fname, "source_file": ffile,
+                "line_hint": "", "depth": 0, "status": "completed",
+                "taint_inputs": taint_inputs, "taint_summary": taint_summary,
+                "child_count": 0, "followup_status": "root", "followup_reason": "",
+                "findings_count": findings_by_func.get(fname, 0), "termination_reasons": [],
+                "children": []}
 
     # 邻接: source_func_id → [{target_func_id, target_function, depth, edge_order, status, taint_params, call_line}]
     adj: dict[str, list[dict]] = {}
