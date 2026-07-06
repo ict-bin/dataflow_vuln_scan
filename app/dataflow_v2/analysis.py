@@ -257,7 +257,18 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                 return p, "propagations must be a list"
             return p, ""
 
-        parsed, parse_warn = _parse_and_check(output.output)
+        # 收集所有 assistant 消息的 text (output.output 只取最后一条)
+        def _collect_all_texts(result):
+            texts = []
+            for msg in getattr(result, 'messages', []):
+                if msg.get('role') == 'assistant':
+                    for c in (msg.get('content') or []):
+                        if isinstance(c, dict) and c.get('type') == 'text' and c.get('text', '').strip():
+                            texts.append(c['text'])
+            return texts
+
+        all_texts = _collect_all_texts(output)
+        parsed, parse_warn = _parse_and_check(output.output, all_texts)
         retry_used = 0
         _V2_RETRY_MAX = 3
         while parse_warn and retry_used < _V2_RETRY_MAX:
@@ -284,7 +295,8 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                 emit_agent_runtime_events(self.on_event, result=output, stage="taint_analysis_v2_retry",
                                           role="workers", model=acfg.model,
                                           extra={"function": func.name, "attempt": retry_used})
-            parsed, parse_warn = _parse_and_check(output.output)
+            all_texts = _collect_all_texts(output)
+            parsed, parse_warn = _parse_and_check(output.output, all_texts)
 
         if parse_warn:
             self.on_event("v2_taint_analysis_failed", function=func.name,
