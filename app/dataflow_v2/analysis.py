@@ -246,11 +246,16 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                                       extra={"function": func.name, "fork_purpose": "taint_analysis"})
 
         # 5) 解析 JSON + 校验 + 重试 (最多 3 次; 全失败发具体原因事件)
-        def _parse_and_check(text: str):
+        def _parse_and_check(text: str, all_texts: list = None):
             p = _extract_json_object(text, "propagations")
             if not p:
-                # 尝试从截断的 JSON 中提取 (LLM output 被 stopReason=length 截断)
                 p = _try_extract_truncated_json(text)
+            if not p and all_texts:
+                for prev_text in all_texts:
+                    p = _extract_json_object(prev_text, "propagations")
+                    if p: break
+                    p = _try_extract_truncated_json(prev_text)
+                    if p: break
             if not p:
                 return None, "missing taint-analysis JSON (no object containing 'propagations')"
             if not isinstance(p.get("propagations"), list):

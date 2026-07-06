@@ -44,6 +44,13 @@ class DataflowV2Runner:
             if self._raw_on_event is not None:
                 self._raw_on_event(SwarmEvent(type=etype, task_id=self.task_id, data=data))
         except Exception:
+            pass
+
+    def abort(self) -> None:
+        """取消任务 (与 v1 Orchestrator.abort 接口兼容)。"""
+        if self._cancel_event is not None:
+            self._cancel_event.set()
+        except Exception:
             logger.debug("v2 _emit %s failed", etype, exc_info=True)
 
     def cancel(self) -> None:
