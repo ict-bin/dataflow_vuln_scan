@@ -321,21 +321,37 @@ def build_v2_trace_tree(run_root: str | Path) -> dict[str, Any] | None:
 
     # 邻接: source_func_id → [{target_func_id, target_function, depth, edge_order, status, taint_params, call_line}]
     adj: dict[str, list[dict]] = {}
+    # 所有 target_func_id 集合 (用于排除非根节点)
+    all_targets: set[str] = set()
+    # 最小 depth 的边 (root → callee 的边)
+    min_depth = min((e["depth"] for e in orch_edges), default=1)
     root_fid = None
     for e in orch_edges:
-        if e["depth"] == 0 and root_fid is None:
-            root_fid = e["source_func_id"]
         adj.setdefault(e["source_func_id"], []).append({
             "target_func_id": e["target_func_id"], "target_function": e["target_function"],
             "depth": e["depth"], "edge_order": e["edge_order"], "status": e["status"],
             "taint_params": e["taint_params"], "edge_id": e["edge_id"],
         })
-        if e["depth"] == 0:
-            if root_fid is None:
-                root_fid = e["source_func_id"]
+        if e["target_func_id"]:
+            all_targets.add(e["target_func_id"])
+        # 最小 depth 的 source 就是根函数
+        if e["depth"] == min_depth and root_fid is None:
+            root_fid = e["source_func_id"]
 
     if root_fid is None:
         root_fid = orch_edges[0]["source_func_id"]
+
+    # 确认 root_fid 不是任何边的 target (否则它不是真正的根)
+    if root_fid in all_targets:
+        # 找一个 source 但不是 target 的节点作为根
+        all_sources = {e["source_func_id"] for e in orch_edges if e["source_func_id"]}
+        roots = all_sources - all_targets
+        if roots:
+            # 优先选最小 depth 的 source
+            for e in orch_edges:
+                if e["source_func_id"] in roots:
+                    root_fid = e["source_func_id"]
+                    break
 
     def _build(fid: str, depth: int, followup_status: str, followup_reason: str,
                callee_line: str = "", visited: set | None = None) -> dict[str, Any]:
