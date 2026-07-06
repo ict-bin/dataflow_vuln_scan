@@ -123,6 +123,9 @@ def claim_specific_task(db: Session, owner_id: str, task_id: str) -> ClaimedTask
         AppDvsTask.execution_heartbeat_at: now,
         AppDvsTask.execution_epoch: new_epoch,
         AppDvsTask.dispatch_status: "leased",
+        AppDvsTask.started_at: now,  # 每次 claim (含 restart/重投) 重置开始时间
+        AppDvsTask.finished_at: None,
+        AppDvsTask.error: None,
     }
     if expected_status == "running":
         # 孤儿重抢: 回 pending, begin_execution_if_owner 会再设 running
