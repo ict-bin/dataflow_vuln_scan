@@ -10,6 +10,14 @@ RUN npm uninstall -g @mariozechner/pi-coding-agent 2>/dev/null || true \
     && npm install -g @earendil-works/pi-coding-agent@latest \
     && command -v pi && pi --version 2>/dev/null || command -v pi
 
+# Patch: openai-completions buildParams 不 fallback 到 model.maxTokens → MiniMax API 默认 max_tokens 太低 → JSON 截断
+RUN JS=$(npm root -g)/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/dist/api/openai-completions.js \
+    && sed -i 's/if (options?.maxTokens) {/const maxTokens = options?.maxTokens ?? (model.maxTokens > 0 ? model.maxTokens : undefined);\n    if (maxTokens !== undefined) {/' $JS \
+    && sed -i 's/params.max_tokens = options.maxTokens;/params.max_tokens = maxTokens;/' $JS \
+    && sed -i 's/params.max_completion_tokens = options.maxTokens;/params.max_completion_tokens = maxTokens;/' $JS \
+    && echo 'patched openai-completions.js: maxTokens fallback to model.maxTokens' \
+    && grep -n 'maxTokens' $JS | head -5
+
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         zip \
