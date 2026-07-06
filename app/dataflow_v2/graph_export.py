@@ -304,8 +304,8 @@ def build_v2_trace_tree(run_root: str | Path) -> dict[str, Any] | None:
         if not analyzed:
             return None
         f = analyzed[0]
-        return _build_node(f["func_id"], func_map, taints_by_func, props_by_source,
-                           findings_by_func, 0, "root", "")
+        return _build(f["func_id"], func_map, taints_by_func, props_by_source,
+                       findings_by_func, 0, "root", "")
 
     # 邻接: source_func_id → [{target_func_id, target_function, depth, edge_order, status, taint_params, call_line}]
     adj: dict[str, list[dict]] = {}
