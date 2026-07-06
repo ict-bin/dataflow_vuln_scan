@@ -113,6 +113,11 @@ def _read_pgid(pid: int) -> int | None:
         return None
 
 
+def _proc_exists(pid: int) -> bool:
+    """检查进程是否还在 /proc 中 (包括 zombie)."""
+    return os.path.exists(f"/proc/{pid}")
+
+
 def _normalize_path(path_value: str | None) -> str:
     raw = str(path_value or "").strip()
     if not raw:
@@ -249,15 +254,21 @@ def _kill_process_group(
         if info.pgid is not None:
             with contextlib.suppress(ProcessLookupError):
                 os.killpg(info.pgid, signal.SIGTERM)
-            time.sleep(0.2)
+            time.sleep(1.0)
             with contextlib.suppress(ProcessLookupError):
                 os.killpg(info.pgid, signal.SIGKILL)
         else:
             with contextlib.suppress(ProcessLookupError):
                 os.kill(info.pid, signal.SIGTERM)
-            time.sleep(0.2)
+            time.sleep(1.0)
             with contextlib.suppress(ProcessLookupError):
                 os.kill(info.pid, signal.SIGKILL)
+        # 等待进程真正退出 (最多 5s), 避免残留进程影响下一个任务
+        _deadline = time.monotonic() + 5.0
+        while time.monotonic() < _deadline:
+            if not _proc_exists(info.pid):
+                break
+            time.sleep(0.2)
         return True
     except Exception:
         return False

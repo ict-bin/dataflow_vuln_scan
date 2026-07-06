@@ -206,7 +206,7 @@ def resolve_external(
         "可以 read 验证 (如 g_1=g_2 链)。\n"
         '输出 JSON: {"confirmed": [{"function": "...", "reason": "..."}, ...]}\n'
     )
-    v2_env = {"DVS_V2_DB_DIR": str(sessions_dir.parent / "dataflow-v2"),
+    v2_env = {"DVS_V2_DB_DIR": str(store.run_dir),
               "DVS_SOURCE_ROOT": source_root}
 
     confirmed_names = set()
@@ -321,7 +321,7 @@ def resolve_indirect(
         "用 v2_db lookup 读取需要的函数体后判断。\n"
         '输出 JSON: {"handlers": [{"function": "...", "file": "...", "reason": "..."}]}\n'
     )
-    v2_env = {"DVS_V2_DB_DIR": str(sessions_dir.parent / "dataflow-v2"),
+    v2_env = {"DVS_V2_DB_DIR": str(store.run_dir),
               "DVS_SOURCE_ROOT": source_root}
     # 传路径不传函数体
     cand_info = [f"### {c['name']} ({c['file']})\n(用 `v2_db lookup {c['name']}` 读取函数体)"
