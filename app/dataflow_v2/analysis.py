@@ -282,7 +282,27 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
             retry_used += 1
             self.on_event("v2_taint_retry_json", function=func.name, attempt=retry_used,
                           reason=parse_warn)
-            # 引导性 retry: 针对 stopReason=length 截断, 要求 LLM 精简输出
+            # 检测 stopReason=length 或 error → session 可能过大, 先 compact
+            stop_reason = ''
+            for msg in reversed(getattr(output, 'messages', [])):
+                if msg.get('role') == 'assistant':
+                    stop_reason = msg.get('stopReason', '')
+                    break
+            if stop_reason in ('length', 'error', 'max_tokens'):
+                self.on_event("v2_compact_before_retry", function=func.name,
+                              reason="stopReason=" + stop_reason)
+                # 手动触发 compact (auto-compaction 在 RPC 模式下不触发)
+                try:
+                    from ..runner_helpers import _build_args as _ba
+                    from ..runner import _find_pi_command, _run_pi_compact
+                    _pi_cmd = _find_pi_command()
+                    _cargs = _ba(_pi_cmd, acfg.model, acfg.tools or self.cfg.workers.default_tools, "off", str(fork_session))
+                    _run_pi_compact(args=_cargs, cwd=str(self.run_dir), env=v2_env,
+                                    cancel_event=self.cancel_event,
+                                    timeout_seconds=min(self.cfg.agent_run_timeout_seconds or 300, 300))
+                except Exception as _ce:
+                    logger.warning("v2 compact before retry failed: %s", _ce, exc_info=True)
+            # retry prompt: 针对截断, 要求精简输出
             _retry_prompt = (
                 "你的上一轮输出被截断了（输出长度超限）。\n"
                 "请直接输出完整的 taint-analysis JSON，不要推理/thinking，\n"
