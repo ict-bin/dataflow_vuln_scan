@@ -451,6 +451,14 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                                   reason="LLM marked external + clang phantom → indirect call")
                     validated_props.append(prop)
                     continue
+                # 如果 callee 在全局函数库中存在, 不丢弃 (clang 可能因 macro/include 漏检)
+                if prop.target_function and store.find_function(prop.target_function):
+                    prop.target_func_id = self._resolve_target_func_id(store, prop)
+                    validated_props.append(prop)
+                    self.on_event("v2_phantom_callee_kept", function=prop.target_function,
+                               caller=func.name, claimed_line=prop.call_line,
+                               reason="exists in function DB, clang may have missed callsite (macro/include)")
+                    continue
                 logger.info("drop phantom callee %s in %s (not in body)", prop.target_function, func.name)
                 self.on_event("v2_phantom_callee_dropped", function=prop.target_function,
                            caller=func.name, claimed_line=prop.call_line)
