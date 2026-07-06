@@ -1513,9 +1513,6 @@ def get_task_vuln_graph(task_id: str, db: Session = Depends(get_db)):
         "trace_tree": trace_tree,
         "graph": graph,
     }
-        "trace_tree": trace_tree,
-        "graph": graph,
-    }
 
 
 @router.get("/tasks/{task_id}/vuln-findings")
