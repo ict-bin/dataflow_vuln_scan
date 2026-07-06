@@ -288,10 +288,15 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                     break
             self.on_event("v2_taint_retry_json", function=func.name, attempt=retry_used,
                           reason=parse_warn, stop_reason=stop_reason)
-            # 只有 stop=length (超长截断) 才 compact + 用截断专用 prompt
-            # stop=error (502/timeout 等) 不 compact, 用原始 prompt 重试
+            # 1. 保存错误 session (加 -error{N} 后缀, 保留供后续定位)
+            _err_session = self.sessions_dir / f"d{ctx.depth:02d}-{_safe_name(func.name)}-taint-error{retry_used}.jsonl"
+            try:
+                safe_copyfile(str(fork_session), str(_err_session))
+            except OSError:
+                pass
+            # 2. 解决错误: 只有 stop=length 才 compact; stop=error 回退到 base_session
             if stop_reason == 'length':
-                # compact: 清理截断的 assistant 消息, 压缩 session
+                # compact: 压缩 session (含截断的 assistant 消息), 保留摘要
                 self.on_event("v2_compact_before_retry", function=func.name,
                               reason="stopReason=length")
                 try:
@@ -304,32 +309,20 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                                     timeout_seconds=min(self.cfg.agent_run_timeout_seconds or 300, 300))
                 except Exception as _ce:
                     logger.warning("v2 compact before retry failed: %s", _ce, exc_info=True)
-                _retry_prompt = (
-                    "你的上一轮输出被截断了（输出长度超限）。\n"
-                    "请直接输出完整的 taint-analysis JSON，不要推理/thinking，\n"
-                    "精简 description 和各字段内容，确保 JSON 完整闭合。\n"
-                    "格式：```json\n"
-                    '{"description": "一句话", "self_contained": false, '
-                    '"taints": [{"name": "x", "description": "y"}], '
-                    '"propagations": [{"source_taint": "x", "target_taint": "y", '
-                    '"target_function": "Z", "is_external": false, '
-                    '"description": "z"}], "return_taints": []}\n```\n'
-                    "无传播时 propagations=[]。不要输出 thinking。"
-                )
             elif stop_reason == 'error':
-                # API 错误 (502/timeout 等), 不是 LLM 的问题, 用原始 prompt 重试
-                _retry_prompt = prompt
-            else:
-                # 其他原因 (stop=stop 但没 JSON 等), 引导输出 JSON
-                _retry_prompt = (
-                    "请基于你的分析输出 taint-analysis JSON。\n"
-                    "格式：```json\n"
-                    '{"description": "...", "self_contained": false, '
-                    '"taints": [{"name": "...", "description": "..."}], '
-                    '"propagations": [...], "return_taints": []}\n```\n'
-                    "无传播时 propagations=[]。"
-                )
-            output = _run_taint_agent(_retry_prompt)
+                # API 错误 (502/timeout 等): 回退到 base_session, 剥离所有错误消息
+                self.on_event("v2_rollback_before_retry", function=func.name,
+                              reason="stopReason=error, rollback to base_session")
+                try:
+                    if base_session and Path(base_session).exists():
+                        safe_copyfile(base_session, str(fork_session))
+                    else:
+                        # 无 base_session, 清空 fork_session 重建
+                        fork_session.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            # 3. 回退到上个 user 重发: 统一用原始 prompt (不是新的 retry prompt)
+            output = _run_taint_agent(prompt)
             if self.on_event:
                 emit_agent_runtime_events(self.on_event, result=output, stage="taint_analysis_v2_retry",
                                           role="workers", model=acfg.model,
