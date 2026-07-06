@@ -948,10 +948,10 @@ def _process_line(
                 else:
                     result.error = err_msg
 
-            # RPC mode: when LLM completes (stop/end_turn), signal stdout
+            # RPC mode: when LLM completes (stop/end_turn/length/error), signal stdout
             # reader to close stdin so pi detects EOF and sends agent_end.
             stop_reason = msg.get("stopReason", "")
-            if stop_reason in ("stop", "end_turn", "error"):
+            if stop_reason in ("stop", "end_turn", "error", "length", "max_tokens"):
                 result._rpc_completed = True
 
     return False

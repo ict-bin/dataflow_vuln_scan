@@ -216,13 +216,19 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
             retry_used += 1
             self.on_event("v2_taint_retry_json", function=func.name, attempt=retry_used,
                           reason=parse_warn)
+            # 引导性 retry: 不说"校验未通过", 而是明确告诉 LLM 该做什么
             _retry_prompt = (
-                "[系统反馈] 上一轮 taint-analysis JSON 校验未通过，原因: "
-                + parse_warn
-                + "。请重新输出完整的 JSON 对象，推理过程中不要在代码块里写 JSON 片段，"
-                "最终只输出一个 ```json 块，必需顶层 key: "
-                "description/self_contained/taints/propagations；本函数无任何污点传播时 "
-                "propagations 设为 []。"
+                "你刚才分析了函数但没有输出 JSON 结果。\n"
+                "请基于你刚才的分析（思考中已经识别了污点传播路径），"
+                "直接输出 taint-analysis JSON。\n"
+                "不要重新分析，不要调用工具，直接输出你已有的分析结论。\n"
+                "格式：```json\n"
+                '{"description": "...", "self_contained": true/false, '
+                '"taints": [{"name": "...", "description": "..."}], '
+                '"propagations": [{"source_taint": "...", "target_taint": "...", '
+                '"target_function": "...", "is_external": false, '
+                '"description": "..."}], "return_taints": []}\n```\n'
+                "如果本函数无污点传播，propagations 设为 []。"
             )
             output = _run_taint_agent(_retry_prompt)
             if self.on_event:
