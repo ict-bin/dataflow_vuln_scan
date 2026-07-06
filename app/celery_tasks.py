@@ -66,6 +66,10 @@ def run_dvs_task(self, task_id: str) -> dict:
             _PGID.pop(celery_id, None)
         return {"task_id": task_id, "status": "skipped"}
 
+    # restart 语义: 清空上一轮产物 (run/output), 保留 input + DB 事件时间线, 从头跑
+    # 每次 (重投/restart/首次) 都清: 首次无产物=no-op, 重投清掉旧 dataflow-v2/sessions 避免续跑
+    _clean_task_artifacts(task_id)
+
     try:
         svc = get_task_service()
         svc._execute_task(task_id, claimed.epoch, claimed.control_version)
@@ -83,6 +87,44 @@ def _cleanup_pi_processes() -> None:
         cleanup_worker_runtime_processes(logger.warning, label="celery_task_done")
     except Exception:
         logger.debug("pi cleanup failed", exc_info=True)
+
+
+def _clean_task_artifacts(task_id: str) -> None:
+    """restart 语义: 清空任务 run/output 产物, 保留 input + DB 事件时间线。
+
+    每次 (重投/restart/首次) 执行前都清: 首次无产物=no-op; 重投时清掉旧
+    run/dataflow-v2 (functions.db/sessions) + output, 确保从头跑而非续跑。
+    """
+    import shutil
+    from pathlib import Path
+    from app.db import get_db
+    from app.db.models import AppDvsTask
+    from app.config import OUTPUT_DIR
+    try:
+        db_gen = get_db()
+        db = next(db_gen)
+        try:
+            row = db.query(AppDvsTask).filter_by(task_id=task_id).first()
+            if row is None:
+                return
+            task_root = Path(row.output_path or OUTPUT_DIR) / task_id
+            if not task_root.is_dir():
+                return
+            for child_name in ("run", "output"):
+                child = task_root / child_name
+                if child.exists():
+                    try:
+                        shutil.rmtree(child)
+                        logger.info("cleaned task artifacts: %s/%s", task_id, child_name)
+                    except Exception as exc:
+                        logger.warning("clean task artifact %s failed: %s", child_name, exc)
+        finally:
+            try:
+                next(db_gen)
+            except StopIteration:
+                pass
+    except Exception:
+        logger.warning("_clean_task_artifacts failed task=%s", task_id, exc_info=True)
 
 
 @task_revoked.connect
