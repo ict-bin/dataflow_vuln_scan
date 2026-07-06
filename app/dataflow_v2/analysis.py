@@ -45,6 +45,53 @@ _TAINT_ANALYSIS_PROMPT = _read_prompt("prompts/v2/taint-analysis.md")
 import re as _re
 
 
+def _try_extract_truncated_json(text: str) -> dict | None:
+    """尝试从被 stopReason=length 截断的文本中提取部分 JSON。
+
+    LLM 输出被截断时, text 可能包含不完整的 ```json {... ``` 块。
+    尝试找到 JSON 开头, 补全缺失的括号/引号, 解析。
+    """
+    import json
+    # 找 json 代码块开头
+    idx = text.find('{')
+    if idx < 0:
+        return None
+    fragment = text[idx:]
+    # 去掉末尾不完整的部分 (最后一个完整字段后截断)
+    # 尝试直接解析
+    try:
+        return json.loads(fragment)
+    except json.JSONDecodeError:
+        pass
+    # 尝试补全: 找最后一个完整的 key-value 对, 截断后面的
+    last_comma = fragment.rfind(',')
+    last_brace = fragment.rfind('}')
+    last_bracket = fragment.rfind(']')
+    # 尝试在最后一个逗号/括号后截断并补全
+    for cut_pos in [last_bracket, last_brace, last_comma]:
+        if cut_pos <= 0:
+            continue
+        partial = fragment[:cut_pos + 1]
+        # 补全缺失的闭合符号
+        opens_braces = partial.count('{') - partial.count('}')
+        opens_brackets = partial.count('[') - partial.count(']')
+        # 去掉末尾可能的逗号
+        partial = partial.rstrip().rstrip(',')
+        candidate = partial + ('}' * max(0, opens_braces)) + (']' * max(0, opens_brackets))
+        try:
+            result = json.loads(candidate)
+            if isinstance(result, dict) and ('propagations' in result or 'taints' in result or 'description' in result):
+                # 确保有 propagations 字段
+                if 'propagations' not in result:
+                    result['propagations'] = []
+                if not isinstance(result.get('propagations'), list):
+                    result['propagations'] = []
+                return result
+        except json.JSONDecodeError:
+            continue
+    return None
+
+
 def _extract_params(func: FunctionRecord) -> set[str]:
     """从函数签名提取参数名集合。"""
     scope: set[str] = set()
@@ -202,6 +249,9 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
         def _parse_and_check(text: str):
             p = _extract_json_object(text, "propagations")
             if not p:
+                # 尝试从截断的 JSON 中提取 (LLM output 被 stopReason=length 截断)
+                p = _try_extract_truncated_json(text)
+            if not p:
                 return None, "missing taint-analysis JSON (no object containing 'propagations')"
             if not isinstance(p.get("propagations"), list):
                 return p, "propagations must be a list"
@@ -216,19 +266,18 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
             retry_used += 1
             self.on_event("v2_taint_retry_json", function=func.name, attempt=retry_used,
                           reason=parse_warn)
-            # 引导性 retry: 不说"校验未通过", 而是明确告诉 LLM 该做什么
+            # 引导性 retry: 针对 stopReason=length 截断, 要求 LLM 精简输出
             _retry_prompt = (
-                "你刚才分析了函数但没有输出 JSON 结果。\n"
-                "请基于你刚才的分析（思考中已经识别了污点传播路径），"
-                "直接输出 taint-analysis JSON。\n"
-                "不要重新分析，不要调用工具，直接输出你已有的分析结论。\n"
+                "你的上一轮输出被截断了（输出长度超限）。\n"
+                "请直接输出完整的 taint-analysis JSON，不要推理/thinking，\n"
+                "精简 description 和各字段内容，确保 JSON 完整闭合。\n"
                 "格式：```json\n"
-                '{"description": "...", "self_contained": true/false, '
-                '"taints": [{"name": "...", "description": "..."}], '
-                '"propagations": [{"source_taint": "...", "target_taint": "...", '
-                '"target_function": "...", "is_external": false, '
-                '"description": "..."}], "return_taints": []}\n```\n'
-                "如果本函数无污点传播，propagations 设为 []。"
+                '{"description": "一句话", "self_contained": false, '
+                '"taints": [{"name": "x", "description": "y"}], '
+                '"propagations": [{"source_taint": "x", "target_taint": "y", '
+                '"target_function": "Z", "is_external": false, '
+                '"description": "z"}], "return_taints": []}\n```\n'
+                "无传播时 propagations=[]。不要输出 thinking。"
             )
             output = _run_taint_agent(_retry_prompt)
             if self.on_event:
