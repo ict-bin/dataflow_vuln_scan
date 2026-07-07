@@ -1610,7 +1610,7 @@ def _do_report_finding(task_id: str, finding_id: str, db: Session):
         project_id=project_id,
         task_id=task_id,
         task_name=task_name,
-        parent_task_name=str(row.parent_task_name or ""),
+        parent_task_name=str(row.task_name or ""),
         parent_task_id=parent_task_id,
         parent_task_type=str(row.parent_task_type or ""),
         finding=rec,
