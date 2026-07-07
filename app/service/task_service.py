@@ -1351,9 +1351,12 @@ class TaskService:
 
     def get_task_timeline(self, db: Session, task_id: str) -> dict:
         row = self._get_or_404(db, task_id)
+        # 只返回当前 epoch 的事件 (restart 后旧 epoch 事件不混入)
+        current_epoch = row.execution_epoch or 0
         events = (
             db.query(AppDvsTaskEvent)
             .filter(AppDvsTaskEvent.task_id == row.task_id)
+            .filter(AppDvsTaskEvent.execution_epoch == current_epoch)
             .order_by(AppDvsTaskEvent.created_at.desc())
             .all()
         )
