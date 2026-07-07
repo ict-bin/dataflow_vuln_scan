@@ -552,18 +552,13 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                       taint_params: TaintParamInfo, pre_validations: list[Validation]) -> str:
         if taint_params.names == ["auto"] or taint_params.signature == "auto":
             taint_desc = ("自行分析（EA 未指定具体污点参数）。\n"
-                          "请识别本函数中所有外部输入来源：\n"
-                          "1. 所有入参都可能携带外部输入，逐个分析哪些是污点源\n"
-                          "2. 污点也可能来自函数内部调用（如 recv/read/fetch/open 等），不限于入参\n"
-                          "3. 被动传递：函数可能通过内部调用获取外部数据并返回，如 A() { msg=recv(); return msg; }\n"
+                          "请识别本函数中所有外部输入来源，包括但不限于：\n"
+                          "- 入参中携带外部输入的变量\n"
+                          "- 函数内部通过调用外部接口获取的数据\n"
                           "将识别到的所有污点源填入 taints[]，并跟踪其传播路径")
-        elif taint_params.positions:
-            taint_desc = (f"位置 {taint_params.positions} 签名 {taint_params.signature} "
-                          f"名字 {taint_params.names}\n"
-                          "注意：污点也可能来自函数内部调用（如 recv/read/fetch/open 等），"
-                          "不限于上述入参。如发现内部调用产生的外部数据，一并加入 taints[] 并跟踪传播。")
         else:
-            taint_desc = "所有参数"
+            taint_desc = (f"位置 {taint_params.positions} 签名 {taint_params.signature} "
+                          f"名字 {taint_params.names}")
         pre_val_text = "\n".join(f"- {v.condition}: {v.content}" for v in pre_validations) or "(无)"
         return (
             f"# 阶段：单函数污点传播分析 Fork\n\n"
