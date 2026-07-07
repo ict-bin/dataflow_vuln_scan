@@ -141,9 +141,18 @@ def _load_findings_by_func(vuln_sqlite: Path | None) -> dict[str, int]:
 def load_dataflow_v2_graph(run_root: str | Path) -> dict[str, Any]:
     """读四库 + findings, 返回 V1 兼容图谱结构 + V2 专属 paths。"""
     v2 = _find_v2_dir(run_root)
+    vuln_sqlite = _find_vuln_sqlite(run_root)
     if v2 is None:
+        # 无 V2 dataflow-v2 目录 (旧 V1 任务): 仍读 findings
+        findings: list[dict] = []
+        if vuln_sqlite is not None:
+            try:
+                from ..vuln_store import VulnScanStore
+                findings = VulnScanStore(vuln_sqlite).export_json().get("vulnerability_findings") or []
+            except Exception:
+                pass
         return {"analysis_runs": [], "taint_nodes": [], "taint_edges": [], "followups": [],
-                "vulnerability_findings": [], "v2_paths": [], "v2_available": False}
+                "vulnerability_findings": findings, "v2_paths": [], "v2_available": False}
 
     func_map = _load_func_map(v2)
     taints_by_func = _load_taints_by_func(v2)
