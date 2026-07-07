@@ -128,7 +128,7 @@ class TaskConfig(BaseModel):
     task_name: str = Field(default="", description="SecFlow 任务名称，用于漏洞疑点上报元数据")
     parent_task_id: str = Field(default="", description="编排器父任务 ID")
     parent_task_name: str = Field(default="", description="编排器父任务名称，上报漏洞时优先使用此名称")
-    parent_task_type: str = Field(default="", description="父任务类型: source=EA, 其他=编排器"
+    parent_task_type: str = Field(default="", description="父任务类型: source=EA, 其他=编排器")
     cwd: str = Field(default="/data/target", description="待分析文件所在目录")
     task_pi_dir: str = Field(default="", description="任务级 PI runtime 目录")
     task_pi_dirs: dict[str, str] = Field(default_factory=dict, description="按角色划分的任务级 PI runtime 目录")
