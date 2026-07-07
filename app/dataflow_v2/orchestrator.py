@@ -274,8 +274,6 @@ class DfsOrchestrator:
         # 7) return_taints 回传: 对每个 callee 返回的新污点, 在当前函数启动新分析分支
         for rt in all_callee_return_taints:
             rt_sig = rt.signature or rt.name
-            if depth < 0:
-                continue  # depth 不能为负, 超出分析范围不分析
             if self.store.find_processed_taint(func.func_id, rt_sig, pre_val_sig):
                 continue  # 已分析过此污点, 跳过
             # 新 fork session (从父链重新 fork, taint 不同)

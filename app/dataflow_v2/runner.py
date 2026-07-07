@@ -108,12 +108,21 @@ class DataflowV2Runner:
                 return TaskResult(task_id=tid, status=TaskStatus.INVALID_INPUT, task=cfg.task,
                                   error=f"v2: 根函数 {cfg.function_name} 未在 {cfg.source_file} 找到")
 
-            # 2) 根污点参数 (位置 0..n-1 + 签名 + 名字)
-            tp_names = cfg.taint_params or ["all"]
-            root_taint = TaintParamInfo(
-                positions=list(range(len(tp_names))),
-                signature=",".join(tp_names),
-                names=tp_names)
+            # 2) 根污点参数
+            #    EA 给了具体 taint_params → 直接用
+            #    EA 没给 → 标记为 "auto", prompt 告知 LLM 自行分析所有入参 + 内部调用产生的污点
+            if cfg.taint_params:
+                tp_names = cfg.taint_params
+                root_taint = TaintParamInfo(
+                    positions=list(range(len(tp_names))),
+                    signature=",".join(tp_names),
+                    names=tp_names)
+            else:
+                # EA 未指定污点: LLM 自行识别
+                root_taint = TaintParamInfo(
+                    positions=[],  # 空 = 不限定位置, LLM 自行判断
+                    signature="auto",
+                    names=["auto"])
 
             # 3) 回调 + 编排器
             cbs = TaintAnalysisCallbacks(
