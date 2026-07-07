@@ -112,6 +112,10 @@ def _clean_task_artifacts(task_id: str) -> None:
             row.stages_json = None
             row.result_json = None
             row.latest_abnormal_reason_json = None
+            # 1b. 重置漏洞计数 (避免旧 run 的计数残留)
+            row.vuln_total_count = -1
+            row.vuln_reported_count = -1
+            row.vuln_unreported_count = -1
             db.commit()
             # 2. 清文件产物 run/output (保留 input)
             task_root = Path(row.output_path or OUTPUT_DIR) / task_id
