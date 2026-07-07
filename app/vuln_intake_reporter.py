@@ -122,7 +122,7 @@ def build_intake_payload(
     taint_path_report_path: str = "",
 ) -> dict[str, Any]:
     """Convert a stored DVS finding into the vuln-platform intake schema."""
-    effective_task_id = parent_task_id or task_id
+    effective_task_id = task_id
     report_id = _stable_report_id(project_id=project_id, task_id=effective_task_id, finding=finding)
     report_text = _read_text(report_path) if report_path else ""
     taint_text = _read_text(taint_path_report_path, limit=120_000) if taint_path_report_path else ""
@@ -207,9 +207,10 @@ def build_intake_payload(
             "source": {
                 "service_name": SERVICE_NAME,
                 "service_id": SERVICE_NAME,
-                "task_id": parent_task_id or task_id,
+                "task_id": task_id,
+                "parent_task_id": parent_task_id,
                 "parent_task_name": parent_task_name or task_name or "",
-                "task_name": parent_task_id or task_id or "",
+                "task_name": task_name,
                 "run_id": finding.run_id,
                 "node_id": finding.node_id,
                 "finding_id": finding.finding_id,
