@@ -1365,6 +1365,9 @@ class TaskService:
                 events.append({
                     "id": f"sj-{ev.get('ts','')}-{ev_type}",
                     "task_id": task_id,
+                    "project_id": str(row.project_id or ""),
+                    "source": "dvs",
+                    "level": "info",
                     "event_type": ev_type,
                     "type": ev_type,
                     "data": ev_data,
