@@ -349,9 +349,10 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
         for t in parsed.get("taints") or []:
             if not isinstance(t, dict):
                 continue
+            _tname = str(t.get("name") or "")
             taints.append(TaintRecord(
-                func_id=func.func_id, name=str(t.get("name") or ""),
-                signature="", file=func.file, function=func.name,
+                func_id=func.func_id, name=_tname,
+                signature=_tname, file=func.file, function=func.name,
                 description=str(t.get("description") or "")))
 
         # propagations: LLM 只输出语义字段; 结构字段 (call_line/condition/is_indirect/signature)
@@ -391,9 +392,9 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
             raw_props.append(PropagationRecord(
                 source_func_id=func.func_id,
                 source_taint_name=str(p.get("source_taint") or ""),
-                source_taint_signature="",  # 签名由 AST/funcdb 提供
+                source_taint_signature=str(p.get("source_taint") or ""),
                 target_taint_name=str(p.get("target_taint") or ""),
-                target_taint_signature="",
+                target_taint_signature=str(p.get("target_taint") or ""),
                 target_function=target_fn,
                 target_file="",  # 系统按名从全局函数库解析
                 call_line=0,  # clang 标注时填 (直接调用)
@@ -479,9 +480,10 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
         for rt in parsed.get("return_taints") or []:
             if not isinstance(rt, dict):
                 continue
+            _rtname = str(rt.get("name") or "")
             return_taints.append(TaintRecord(
-                func_id=func.func_id, name=str(rt.get("name") or ""),
-                signature="", file=func.file, function=func.name,
+                func_id=func.func_id, name=_rtname,
+                signature=_rtname, file=func.file, function=func.name,
                 description=str(rt.get("description") or "")))
 
         return AnalysisResult(taints=taints, propagations=validated_props,
