@@ -116,13 +116,18 @@ def build_intake_payload(
     task_name: str = "",
     parent_task_name: str = "",
     parent_task_id: str = "",
+    parent_task_type: str = "",
     finding: VulnFindingRecord,
     source_root: str = "",
     report_path: str = "",
     taint_path_report_path: str = "",
 ) -> dict[str, Any]:
     """Convert a stored DVS finding into the vuln-platform intake schema."""
-    effective_task_id = task_id
+    # 编排器下发的任务用编排器 task_id; source(EA) 或手动任务用 DVS task_id
+    if parent_task_id and parent_task_type and parent_task_type != "source":
+        effective_task_id = parent_task_id
+    else:
+        effective_task_id = task_id
     report_id = _stable_report_id(project_id=project_id, task_id=effective_task_id, finding=finding)
     report_text = _read_text(report_path) if report_path else ""
     taint_text = _read_text(taint_path_report_path, limit=120_000) if taint_path_report_path else ""
@@ -207,7 +212,7 @@ def build_intake_payload(
             "source": {
                 "service_name": SERVICE_NAME,
                 "service_id": SERVICE_NAME,
-                "task_id": task_id,
+                "task_id": effective_task_id,
                 "parent_task_id": parent_task_id,
                 "parent_task_name": parent_task_name or task_name or "",
                 "task_name": task_name,
@@ -238,6 +243,7 @@ def report_finding_to_intake(
     task_name: str = "",
     parent_task_name: str = "",
     parent_task_id: str = "",
+    parent_task_type: str = "",
     finding: VulnFindingRecord,
     source_root: str = "",
     report_path: str = "",
@@ -262,6 +268,7 @@ def report_finding_to_intake(
         task_name=task_name,
         parent_task_name=parent_task_name,
         parent_task_id=parent_task_id,
+        parent_task_type=parent_task_type,
         finding=finding,
         source_root=source_root,
         report_path=report_path,

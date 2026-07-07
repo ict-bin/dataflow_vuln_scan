@@ -2165,6 +2165,7 @@ class TaskService:
             cfg.project_id = str(row.project_id or "")
             cfg.parent_task_id = str(row.parent_task_id or "")
             cfg.parent_task_name = str(row.task_name or "")
+            cfg.parent_task_type = str(row.parent_task_type or "")
             cfg.task_name = str(row.task_name or "")
             if tcfg.get("source_file"):
                 cfg.source_file = str(tcfg["source_file"])
