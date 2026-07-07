@@ -322,17 +322,22 @@ class DataflowStore:
 
     def find_processed_taint(self, func_id: str, taint_signature: str,
                              pre_validation_signature: str) -> ProcessedTaint | None:
-        """三重去重: (函数签名→func_id, 污点参数→taint_signature, 前置校验→pre_validation_signature)。
+        """去重: (func_id, taint_signature)。
 
+        函数内部污点传播行为不随前置校验链变化, pre_validation_signature 不参与去重。
+        taint_signature 为空时, 按已分析的任意 taint 去重 (避免同一函数重复分析)。
         返回已处理记录则跳过重复分析。
         """
         f = self.get_function(func_id)
         if f is None:
             return None
-        ts, ps = _norm_sig(taint_signature), _norm_sig(pre_validation_signature)
+        ts = _norm_sig(taint_signature)
         for pt in f.processed_taints:
-            if _norm_sig(pt.taint_signature) == ts and _norm_sig(pt.pre_validation_signature) == ps:
+            if _norm_sig(pt.taint_signature) == ts:
                 return pt
+        # taint_signature 为空时, 如果已有任意分析记录, 也跳过
+        if not ts and f.processed_taints:
+            return f.processed_taints[0]
         return None
 
     # ── 污点库 ──────────────────────────────────────────────────────────────
