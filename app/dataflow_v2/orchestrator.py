@@ -168,7 +168,50 @@ class DfsOrchestrator:
             base_session: str = "") -> None:
         """从根函数出发 DFS。"""
         ctx = PathContext(path_id=_path_id(root_func.func_id, root_taint.signature, "0"))
-        self._process(root_func, root_taint, ctx.pre_validations, base_session, ctx, 0)
+        _, root_return_taints = self._process(root_func, root_taint, ctx.pre_validations, base_session, ctx, 0)
+
+        # 向上回溯: 根函数返回了污点 → 查找调用者, 在 depth -1 分析
+        # 场景: A(入口) { msg=recv(); return msg; } → B(调用者) { msg=A(); handle(msg); }
+        # B 才是真正处理数据的地方
+        if root_return_taints:
+            self._analyze_callers(root_func, root_return_taints, base_session, ctx)
+
+    def _analyze_callers(self, func: FunctionRecord, return_taints: list,
+                         base_session: str, ctx: Any) -> None:
+        """查找 func 的调用者, 用 return_taints 在 depth -1 分析。"""
+        from .function_extractor import read_function_body
+        callers: list[FunctionRecord] = []
+        fname = func.name
+        for f in self.store.list_functions():
+            if f.func_id == func.func_id:
+                continue
+            # 快速过滤: 函数体包含 fname(
+            try:
+                body = read_function_body(self.source_root, f, max_lines=500)
+                if body and (fname + "(" in body or fname + " (" in body):
+                    callers.append(f)
+            except Exception:
+                continue
+        if callers:
+            self.cbs.on_event("v2_caller_tracked", function=func.name,
+                              caller_count=len(callers),
+                              return_taints=[rt.name for rt in return_taints])
+        for caller in callers:
+            for rt in return_taints:
+                rt_sig = rt.signature or rt.name
+                if self.store.find_processed_taint(caller.func_id, rt_sig, _validation_sig([])):
+                    continue
+                new_tp = TaintParamInfo(positions=[], signature=rt_sig, names=[rt.name])
+                from pathlib import Path as _P
+                new_session = str(_P(base_session).parent / f"dm01-{_safe_name(caller.name)}-taint-{_safe_name(rt.name)}.jsonl") if base_session else ""
+                if base_session:
+                    from ..copy_utils import safe_copyfile
+                    try:
+                        safe_copyfile(base_session, new_session)
+                    except OSError:
+                        pass
+                caller_ctx = ctx.fork(_path_id(caller.func_id, rt_sig, "-1"))
+                self._process(caller, new_tp, [], new_session, caller_ctx, -1)
 
     # ── 核心: 处理一个函数 (返回 my_discovered + return_taints) ──────────────
     def _process(self, func: FunctionRecord, taint_params: TaintParamInfo,
