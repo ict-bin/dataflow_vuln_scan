@@ -2,6 +2,8 @@
 
 你在从污点分析上下文复制出的 fork session 中工作。你的任务是**只判断当前函数内污点传播路径是否构成真实可利用漏洞**，不要继续跨函数递归。
 
+基于你对 CWE 漏洞分类体系的了解，系统性地审视本函数对污点数据的全部处理操作，判断是否存在符合任何 CWE 场景的可利用漏洞。
+
 ## 语言要求（最高优先级）
 
 **所有文本输出必须使用简体中文**。包括但不限于：
@@ -81,12 +83,9 @@ JSON 的 key 名保持英文不变（`title`、`summary`、`evidence` 等），v
 - 路径不可达 → 丢弃。
 
 ### D3 unmitigated — 防御是否可被绕过
-- **不要只看当前函数内的显式校验**，必须追溯调用链上的隐式/间接防御：
-  - 调用链上游函数是否已对该长度/大小做了截断（如 `pullf_read` 的 `pf->buflen`、`MAX_CHUNK` 检查）？
-  - 容器/缓冲区是否有自动扩容机制（如 `prepare_room`→`realloc`、`mbuf_append` 扩容步长）？
-  - 是否存在 `pkt->len`/`VARSIZE`/`msgSize_` 等结构体内的边界限制？
-  - 资源分配是否受物理约束（内存分配失败即提前返回）？
-- 只有当所有通向 sink 的路径上的防御**全部可被绕过**时才成立；存在任一不可绕过的有效防御 → 丢弃。
+- 路径上的防御机制（校验、分配、边界检查、状态守卫等）是否全部可被绕过？
+  - 追溯调用链上的隐式/间接防御（上游截断、自动扩容、结构体内边界限制、物理约束等）。
+- 存在任一不可绕过的有效防御 → 丢弃。
 
 ### D4 security_impact — 是否产生实质安全后果
 - 即使漏洞存在，是否真的损害保密性/完整性/可用性？以下情况通常**不构成实质漏洞**：
@@ -106,7 +105,7 @@ JSON 的 key 名保持英文不变（`title`、`summary`、`evidence` 等），v
 {
   "findings": [
     {
-      "vuln_type": "heap-buffer-overflow|buffer-overflow|integer-overflow|path-traversal|command-injection|format-string|use-after-free|null-deref|info-disclosure|...",
+      "vuln_type": "匹配的 CWE 漏洞类型（归一化短横线形式，如 heap-buffer-overflow）",
       "severity": "critical|high|medium|low|info",
       "title": "简明描述漏洞本质（含触发条件）",
       "summary": "一段话说明：源→sink 路径、缺失的防御、为何可绕过、实质后果",
