@@ -703,6 +703,7 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                     task_name=self.cfg.task_name, parent_task_name=self.cfg.parent_task_name,
                     parent_task_id=self.cfg.parent_task_id,
                     parent_task_type=self.cfg.parent_task_type,
+                    task_origin_type=self.cfg.task_origin_type,
                     finding=rec,
                     source_root=self.source_root,
                     report_path=str(fdir / "vulnerability-report.md"),

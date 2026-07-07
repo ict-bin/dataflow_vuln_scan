@@ -1613,6 +1613,7 @@ def _do_report_finding(task_id: str, finding_id: str, db: Session):
         parent_task_name=str(row.task_name or ""),
         parent_task_id=parent_task_id,
         parent_task_type=str(row.parent_task_type or ""),
+        task_origin_type=str(row.task_origin_type or ""),
         finding=rec,
         source_root=source_root,
         report_path=report_path,

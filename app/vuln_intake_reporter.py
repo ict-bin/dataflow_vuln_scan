@@ -117,14 +117,16 @@ def build_intake_payload(
     parent_task_name: str = "",
     parent_task_id: str = "",
     parent_task_type: str = "",
+    task_origin_type: str = "",
     finding: VulnFindingRecord,
     source_root: str = "",
     report_path: str = "",
     taint_path_report_path: str = "",
 ) -> dict[str, Any]:
     """Convert a stored DVS finding into the vuln-platform intake schema."""
-    # 编排器下发的任务用编排器 task_id; source(EA) 或手动任务用 DVS task_id
-    if parent_task_id and parent_task_type and parent_task_type != "source":
+    # 编排器下发的任务 (task_origin_type != manual) 用 parent_task_id (编排器)
+    # 手动创建的任务用 DVS task_id
+    if parent_task_id and task_origin_type and task_origin_type != "manual":
         effective_task_id = parent_task_id
     else:
         effective_task_id = task_id
@@ -244,6 +246,7 @@ def report_finding_to_intake(
     parent_task_name: str = "",
     parent_task_id: str = "",
     parent_task_type: str = "",
+    task_origin_type: str = "",
     finding: VulnFindingRecord,
     source_root: str = "",
     report_path: str = "",
@@ -269,6 +272,7 @@ def report_finding_to_intake(
         parent_task_name=parent_task_name,
         parent_task_id=parent_task_id,
         parent_task_type=parent_task_type,
+        task_origin_type=task_origin_type,
         finding=finding,
         source_root=source_root,
         report_path=report_path,
