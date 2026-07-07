@@ -1351,7 +1351,35 @@ class TaskService:
 
     def get_task_timeline(self, db: Session, task_id: str) -> dict:
         row = self._get_or_404(db, task_id)
-        # 只返回当前 epoch 的事件 (restart 后旧 epoch 事件不混入)
+        # 优先从 stages_json 读事件 (完整, 不丢事件)
+        # task_events 表可能因 DB 写入异常丢事件
+        sj = row.stages_json
+        if isinstance(sj, str):
+            import json as _json
+            sj = _json.loads(sj)
+        if sj and sj.get("events"):
+            events = []
+            for ev in (sj.get("events") or []):
+                ev_type = str(ev.get("type") or "")
+                ev_data = dict(ev.get("data") or {})
+                events.append({
+                    "id": f"sj-{ev.get('ts','')}-{ev_type}",
+                    "task_id": task_id,
+                    "event_type": ev_type,
+                    "type": ev_type,
+                    "data": ev_data,
+                    "payload": ev_data,
+                    "function_name": str(ev_data.get("function") or ""),
+                    "source_file": str(ev_data.get("source_file") or ""),
+                    "message": "",
+                    "status": row.status,
+                    "execution_epoch": row.execution_epoch,
+                    "created_at": "",
+                })
+            # 按时间倒序 (与 task_events 一致)
+            events.sort(key=lambda e: e.get("data",{}).get("ts",0), reverse=True)
+            return {"task_id": task_id, "events": events}
+        # fallback: 从 task_events 表读 (按当前 epoch 过滤)
         current_epoch = row.execution_epoch or 0
         events = (
             db.query(AppDvsTaskEvent)
