@@ -40,10 +40,19 @@ def _as_positive_int(value: Any, default: int) -> int:
         return default
 
 
+# context_window 下限: 低于 128K 的一律取 128K (防网关别名 max_tokens_default 等误配小值导致 LLM 输出被截断)
+_MIN_CONTEXT_WINDOW = 128000
+
+
+def _floor_context_window(cw: int) -> int:
+    """context_window 下限保护: 低于 128K 取 128K."""
+    return max(cw, _MIN_CONTEXT_WINDOW)
+
+
 def _model_entries(provider: dict[str, Any]) -> list[dict[str, Any]]:
     model_id = str(provider.get("model") or "").strip()
     extra_config = provider.get("extra_config") if isinstance(provider.get("extra_config"), dict) else {}
-    context_window = _as_positive_int(
+    context_window = _floor_context_window(_as_positive_int(
         provider.get("model_context_window")
         or provider.get("context_window")
         or provider.get("contextWindow")
@@ -54,7 +63,7 @@ def _model_entries(provider: dict[str, Any]) -> list[dict[str, Any]]:
         or extra_config.get("context_length")
         or extra_config.get("contextLength"),
         _DEFAULT_CONTEXT_WINDOW,
-    )
+    ))
     pi_models = extra_config.get("pi_models")
     raw_models = pi_models if isinstance(pi_models, list) else (
         [{"id": model_id, "reasoning": False}] if model_id else []
@@ -107,8 +116,8 @@ def build_models_json(providers: list[dict[str, Any]], gateway_model_aliases: li
                     "name": alias_name,
                     "reasoning": False,
                     "input": ["text"],
-                    "contextWindow": _as_positive_int(a.get("max_tokens_default"), _DEFAULT_CONTEXT_WINDOW),
-                    "contextLength": _as_positive_int(a.get("max_tokens_default"), _DEFAULT_CONTEXT_WINDOW),
+                    "contextWindow": _floor_context_window(_as_positive_int(a.get("max_tokens_default"), _DEFAULT_CONTEXT_WINDOW)),
+                    "contextLength": _floor_context_window(_as_positive_int(a.get("max_tokens_default"), _DEFAULT_CONTEXT_WINDOW)),
                     "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
                 })
             if alias_models:

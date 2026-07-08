@@ -144,6 +144,16 @@ class DataflowV2Runner:
 
             if self._cancel_event is not None and self._cancel_event.is_set():
                 status, err_msg = TaskStatus.FAILED, "v2: cancelled"
+            else:
+                # 0 传播边 = taint 分析未产出有效 callee (LLM 截断/格式错/重试耗尽) → 不应 passed
+                try:
+                    _edge_count = store._q("orchestration", "SELECT count(*) FROM orchestration")
+                    _edge_count = int(_edge_count[0][0]) if _edge_count else 0
+                except Exception:
+                    _edge_count = 0
+                if _edge_count == 0:
+                    status = TaskStatus.COMPLETED_LIMITED
+                    err_msg = "v2: taint 分析未产出传播边 (LLM 输出可能截断或格式错误)"
             final_output = self._build_final_report(tid, cfg, store, graph_db_path)
             vuln_summary = {"functions": len(store.list_functions()),
                             "findings": self._count_findings(graph_db_path)}
