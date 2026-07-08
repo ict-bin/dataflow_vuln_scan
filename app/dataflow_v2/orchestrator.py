@@ -47,6 +47,7 @@ class AnalysisResult:
     description: str = ""        # 函数功能说明 (回写函数库)
     session_path: str = ""      # 本函数 taint 分析 fork session 路径 (供子函数/mining 继承链)
     return_taints: list[TaintRecord] = field(default_factory=list)  # 本函数 return 语句返回的污点
+    taint_failed: bool = False  # taint 分析全失败 (retry 用尽), 跳过 mining
 
 
 class PathContext:
@@ -257,7 +258,8 @@ class DfsOrchestrator:
             [v for p in result.propagations for v in p.validations])
 
         # 4) self_contained=true → 立即 mine (无 callee, 不用等)
-        if self_contained:
+        #    taint 分析失败时跳过 mining — 无污点分析结果, 挖掘无意义
+        if self_contained and not result.taint_failed:
             self._run_llm(self.cbs.mine_vulns, self.store, func, taint_params, ctx, chain_session)
 
         # 5) 构造有序路径 + 跟入 callee
@@ -317,7 +319,8 @@ class DfsOrchestrator:
                 all_callee_return_taints.extend(rts)
 
         # 6) self_contained=false → 后序 mine (callee 已完成, 含 callee 分析结果)
-        if not self_contained:
+        #    taint 分析失败时跳过 mining
+        if not self_contained and not result.taint_failed:
             self._run_llm(self.cbs.mine_vulns, self.store, func, taint_params, ctx, chain_session)
 
         # 7) return_taints 回传: 对每个 callee 返回的新污点, 在当前函数启动新分析分支

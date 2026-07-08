@@ -335,12 +335,15 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                           retry_used=retry_used, reason=parse_warn)
             parsed = parsed or {}
 
-        return self._build_result(store, func, taint_params, parsed, fork_session, body)
+        # taint 分析失败时跳过后续 mining — 无污点分析结果, 挖掘无意义
+        taint_failed = bool(parse_warn)
+        return self._build_result(store, func, taint_params, parsed, fork_session, body, taint_failed=taint_failed)
 
     # ── 结果构造 + clang 标注 ───────────────────────────────────────────────
     def _build_result(self, store: DataflowStore, func: FunctionRecord,
                       taint_params: TaintParamInfo, parsed: dict,
-                      fork_session: Path, body: str = "") -> AnalysisResult:
+                      fork_session: Path, body: str = "",
+                      taint_failed: bool = False) -> AnalysisResult:
         description = str(parsed.get("description") or "")
         self_contained = bool(parsed.get("self_contained", False))
 
@@ -489,7 +492,8 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
         return AnalysisResult(taints=taints, propagations=validated_props,
                               self_contained=self_contained, description=description,
                               session_path=str(fork_session),
-                              return_taints=return_taints)
+                              return_taints=return_taints,
+                              taint_failed=taint_failed)
 
     def _within_source_root(self, file: str) -> bool:
         """文件是否在源码目录内 (目录内=合理可分析, 目录外=不分析; 不按文件名过滤,
