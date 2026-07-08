@@ -42,7 +42,7 @@ class TestPathBuilding(unittest.TestCase):
 
     def _paths(self, props):
         ctx = PathContext(path_id="p0")
-        return self.orch._build_paths(props, self.A, ctx, 0)
+        return self.orch._build_paths(props, self.A, ctx, 0, ["msg"])
 
     def test_sequential_chain(self):
         # C, F 顺序 (无分支) → 单链 [C, F]
