@@ -42,11 +42,22 @@ def _as_positive_int(value: Any, default: int) -> int:
 
 # context_window 下限: 低于 128K 的一律取 128K (防网关别名 max_tokens_default 等误配小值导致 LLM 输出被截断)
 _MIN_CONTEXT_WINDOW = 128000
+# max_output_tokens 下限: 最小 32K (防 pi 默认 16384 太小导致 JSON 截断)
+_MIN_MAX_TOKENS = 32768
 
 
 def _floor_context_window(cw: int) -> int:
     """context_window 下限保护: 低于 128K 取 128K."""
     return max(cw, _MIN_CONTEXT_WINDOW)
+
+
+def _floor_max_tokens(mt: Any) -> int:
+    """max_output_tokens 下限保护: 低于 32K 取 32K; None/无效取 32K."""
+    try:
+        v = int(mt)
+        return max(v, _MIN_MAX_TOKENS) if v > 0 else _MIN_MAX_TOKENS
+    except (TypeError, ValueError):
+        return _MIN_MAX_TOKENS
 
 
 def _model_entries(provider: dict[str, Any]) -> list[dict[str, Any]]:
@@ -73,10 +84,12 @@ def _model_entries(provider: dict[str, Any]) -> list[dict[str, Any]]:
         if not isinstance(raw, dict):
             continue
         entry = dict(raw)
-        # Strip any maxTokens restriction to allow unlimited LLM output
+        # max_output_tokens 下限 32K (不再 strip, 防 pi 默认 16384 太小截断 LLM 输出)
+        _existing_mt = None
         for _k in list(entry.keys()):
             if _k.lower() in ("maxtokens", "max_tokens", "max_output_tokens", "maxoutputtokens"):
-                entry.pop(_k, None)
+                _existing_mt = entry.pop(_k)
+        entry["maxTokens"] = _floor_max_tokens(_existing_mt)
         entry.setdefault("id", model_id)
         entry.setdefault("name", entry.get("id") or model_id)
         entry.setdefault("reasoning", False)
@@ -118,6 +131,7 @@ def build_models_json(providers: list[dict[str, Any]], gateway_model_aliases: li
                     "input": ["text"],
                     "contextWindow": _floor_context_window(_as_positive_int(a.get("max_tokens_default"), _DEFAULT_CONTEXT_WINDOW)),
                     "contextLength": _floor_context_window(_as_positive_int(a.get("max_tokens_default"), _DEFAULT_CONTEXT_WINDOW)),
+                    "maxTokens": _floor_max_tokens(a.get("max_tokens_default")),
                     "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
                 })
             if alias_models:
