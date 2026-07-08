@@ -21,6 +21,11 @@ STALE_INTERVAL = float(os.environ.get("DVS_DISPATCHER_STALE_INTERVAL", "30"))
 PUMP_BATCH = int(os.environ.get("DVS_DISPATCHER_PUMP_BATCH", "20"))
 STALE_HEARTBEAT_SECONDS = int(os.environ.get("DVS_DISPATCHER_STALE_HEARTBEAT_SECONDS", "600"))  # 10min 无心跳=卡死
 INSPECT_TIMEOUT = float(os.environ.get("DVS_DISPATCHER_INSPECT_TIMEOUT", "3"))
+DEBUG_DISPATCH_INTERVAL = float(os.environ.get("DVS_DISPATCHER_DEBUG_INTERVAL", "15"))
+DEBUGGER_HOST = os.environ.get("DVS_DEBUGGER_HOST", "secflow-app-dataflow-vuln-scan-debugger")
+DEBUGGER_PORT = int(os.environ.get("DVS_DEBUGGER_PORT", "8080"))
+# 需调试的终态
+_DEBUG_STATUSES = ("failed", "error", "completed_limited")
 
 
 class Dispatcher:
@@ -35,7 +40,10 @@ class Dispatcher:
         t.start(); self._threads.append(t)
         t = threading.Thread(target=self._stale_loop, name="dvs_disp_stale", daemon=True)
         t.start(); self._threads.append(t)
-        logger.info("Dispatcher started: pump=%ss stale=%ss", PUMP_INTERVAL, STALE_INTERVAL)
+        # debugger 调度: 扫终态失败任务 → 发给 debugger 分析 (scheduler 职责, 不靠 worker)
+        t = threading.Thread(target=self._debug_dispatch_loop, name="dvs_disp_debug", daemon=True)
+        t.start(); self._threads.append(t)
+        logger.info("Dispatcher started: pump=%ss stale=%ss debug=%ss", PUMP_INTERVAL, STALE_INTERVAL, DEBUG_DISPATCH_INTERVAL)
 
     def stop(self) -> None:
         self._stop.set()
@@ -197,6 +205,64 @@ class Dispatcher:
             except StopIteration:
                 pass
         return reset
+
+    # ── debugger 调度: 扫终态失败任务 → 发给 debugger (scheduler 职责) ──
+    def _debug_dispatch_loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                self._debug_dispatch_once()
+            except Exception as exc:
+                logger.warning("debug dispatch loop error: %s", exc, exc_info=True)
+            self._stop.wait(DEBUG_DISPATCH_INTERVAL)
+
+    def _debug_dispatch_once(self) -> int:
+        """扫 DB 中 failed/error/completed_limited 且无 failure_debug 报告的任务 → POST 给 debugger。
+
+        scheduler 集中调度 (不靠 worker fire-and-forget, worker 死了也不丢)。
+        debugger 端 /internal/failure-debug 幂等 (已有报告则不重复)。
+        """
+        import urllib.request
+        from app.db import get_db
+        from app.db.models import AppDvsTask, AppDvsFailureDebug
+        db_gen = get_db()
+        db = next(db_gen)
+        dispatched = 0
+        try:
+            # 已有报告的 task_id 集
+            existing = {r.task_id for r in db.query(AppDvsFailureDebug).all()}
+            rows = (
+                db.query(AppDvsTask)
+                .filter(
+                    AppDvsTask.status.in_(_DEBUG_STATUSES),
+                    AppDvsTask.is_deleted.is_(False),
+                    AppDvsTask.finished_at.is_not(None),
+                )
+                .order_by(AppDvsTask.finished_at.desc())
+                .limit(50)
+                .all()
+            )
+            for row in rows:
+                if row.task_id in existing:
+                    continue
+                # POST 给 debugger (幂等创建报告 + 入队 LLM 调试)
+                url = f"http://{DEBUGGER_HOST}:{DEBUGGER_PORT}/api/app/dataflow-vuln-scan/internal/failure-debug"
+                payload = json.dumps({"task_id": row.task_id}).encode()
+                try:
+                    req = urllib.request.Request(url, data=payload, method="POST",
+                                                 headers={"Content-Type": "application/json"})
+                    with urllib.request.urlopen(req, timeout=10) as resp:
+                        if 200 <= resp.status < 300:
+                            dispatched += 1
+                            logger.info("debug dispatched task=%s (status=%s)", row.task_id, row.status)
+                            existing.add(row.task_id)  # 防本批次重复
+                except Exception as exc:
+                    logger.warning("debug dispatch failed task=%s: %s", row.task_id, exc)
+        finally:
+            try:
+                next(db_gen)
+            except StopIteration:
+                pass
+        return dispatched
 
 
 _dispatcher: Dispatcher | None = None

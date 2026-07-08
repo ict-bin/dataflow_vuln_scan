@@ -2491,14 +2491,7 @@ class TaskService:
             log_event(logger, logging.INFO, "terminal state committed", event="task_terminal_committed",
                       task_id=task_id, owner_id=WORKER_ID, epoch=epoch, control_version=control_version,
                       status=terminal_status)
-            # 失败/有限完成 → 通知 debugger 角色调试 (fire-and-forget)
-            if terminal_status in {"failed", "error", "completed_limited"}:
-                threading.Thread(
-                    target=self._dispatch_failure_debug,
-                    args=(task_id,),
-                    name=f"dvs_debug_dispatch_{task_id}",
-                    daemon=True,
-                ).start()
+            # 失败任务的 debugger 调度由 scheduler (dispatcher) 负责, 不再 worker fire-and-forget
             terminal_cleaned_groups = self._cleanup_worker_runtime(label=f"task_terminal:{task_id}", task_id=task_id, reason="task_terminal_committed")
             def _record_terminal_cleanup(_db: Session, _attempt: int):
                 refreshed = _db.query(AppDvsTask).filter_by(task_id=task_id).first()
