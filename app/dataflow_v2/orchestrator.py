@@ -262,7 +262,8 @@ class DfsOrchestrator:
 
         # 5) 构造有序路径 + 跟入 callee
         if depth < self.max_depth:
-            paths = self._build_paths(result.propagations, func, ctx, depth)
+            paths = self._build_paths(result.propagations, func, ctx, depth,
+                                      taint_params.names)
         else:
             paths = []
 
@@ -358,10 +359,19 @@ class DfsOrchestrator:
 
     # ── 路径构造: 有序链 + 互斥分叉 + 外部分叉 ───────────────────────────────
     def _build_paths(self, props: list[PropagationRecord], func: FunctionRecord,
-                     ctx: PathContext, depth: int) -> list[list[ChainStep]]:
+                     ctx: PathContext, depth: int,
+                     entry_taint_names: list[str]) -> list[list[ChainStep]]:
         if not props:
             return []
-        props_sorted = sorted(props, key=lambda p: p.call_line)
+        # 只跟入 source_taint 是入口污点的 propagation
+        # 返回值派生的 propagation (source_taint 不是入口污点) 不跟入
+        # 它们会在 return_taints 重分析轮中被自然拾起
+        entry_set = set(entry_taint_names)
+        props_sorted = sorted(
+            [p for p in props if p.source_taint_name in entry_set],
+            key=lambda p: p.call_line)
+        if not props_sorted:
+            return []
         # 预分组互斥 arm: group_id -> {arm -> [props]}
         groups: dict[str, dict[str, list[PropagationRecord]]] = {}
         for p in props_sorted:
@@ -410,11 +420,15 @@ class DfsOrchestrator:
                                                            p.call_line, p.prop_id)])
                 paths = new_paths
             else:
+                # 直接调用: 每个 callee 独立一条路径 (并行)
+                # 同一入口污点的多个 callee 互相独立, 不需要串行
                 step = self._prop_to_step(p)
                 if step is None:
                     continue  # callee 解析失败, 跳过
-                for path in paths:
-                    path.append(step)
+                new_paths = []
+                for base in paths:
+                    new_paths.append(base + [step])
+                paths = new_paths
         return [p for p in paths if p]  # 剔除空链
 
     def _prop_to_step(self, p: PropagationRecord) -> ChainStep | None:

@@ -95,7 +95,7 @@ def _run_pi_compact(
     返回 True 表示压缩成功。
     """
     from .runner_helpers import _terminate_pi_process_tree
-    compact_timeout = min(timeout_seconds or 300, 300)  # 最多 5 分钟
+    compact_timeout = min(timeout_seconds or 900, 900)  # 最多 15 分钟
     try:
         proc = subprocess.Popen(
             args, cwd=cwd, env=env,

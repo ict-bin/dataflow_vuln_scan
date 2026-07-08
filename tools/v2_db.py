@@ -7,6 +7,7 @@
   v2_db propagations <func_name>          # 查传播库→返回函数的传播路径
   v2_db orchestration <func_name>         # 查编排库→返回调用链
   v2_db index <file_path>                 # 索引新文件到函数库 (查不到时用)
+  v2_db symbol <name>                     # 查宏定义/typedef/struct/enum (grep 全盘 .h/.c)
 
 环境变量:
   DVS_V2_DB_DIR    — dataflow-v2 目录路径 (含 functions.db 等四库)
@@ -16,6 +17,7 @@
   1. LLM 需要函数源码 → v2_db lookup <name>
   2. 查到 → 返回函数体 (从原源文件 start_line~end_line 读取)
   3. 查不到 → 提示用 v2_db index <file> 建库后再查
+  4. 需要宏/typedef/struct 定义 → v2_db symbol <name> (一次 grep 全盘)
 """
 import json
 import os
@@ -222,6 +224,41 @@ def _simple_index(conn, rel: str, src_file: Path):
     print(f"简化索引 '{rel}': {count} 个函数。")
 
 
+def cmd_symbol(name: str) -> None:
+    """查宏定义/typedef/struct/enum — 一次 grep 全盘 .h/.c 文件。"""
+    import subprocess, os
+    src = os.environ.get("DVS_SOURCE_ROOT", "")
+    if not src:
+        print("ERROR: DVS_SOURCE_ROOT 未设置")
+        return
+    # grep 搜索 #define / typedef / struct / enum 定义
+    patterns = [
+        f"#define\\s+{name}\\b",
+        f"typedef\\s+.*\\b{name}\\b",
+        f"struct\\s+{name}\\b",
+        f"enum\\s+{name}\\b",
+        f"{name}\\s*=.*;".replace(f"{name}\\s*=.*;", f"\\b{name}\\s*="),  # enum member
+    ]
+    results = []
+    for pattern in patterns:
+        try:
+            r = subprocess.run(
+                ["grep", "-rn", "--include=*.h", "--include=*.c", "--include=*.cpp",
+                 "-E", pattern, src],
+                capture_output=True, text=True, timeout=15)
+            for line in r.stdout.strip().split("\n"):
+                if line and line not in results:
+                    results.append(line)
+        except Exception:
+            pass
+    if results:
+        for line in results[:20]:
+            print(line)
+    else:
+        print(f"NOT_FOUND: 符号 '{name}' 在源码中未找到定义。")
+        print(f"提示: 可能是外部库/系统头文件中的符号, 用 grep -rn {name} /usr/include 搜索。")
+
+
 def main():
     if len(sys.argv) < 2:
         print(__doc__)
@@ -237,6 +274,8 @@ def main():
         cmd_orchestration(sys.argv[2])
     elif cmd == "index" and len(sys.argv) >= 3:
         cmd_index(sys.argv[2])
+    elif cmd == "symbol" and len(sys.argv) >= 3:
+        cmd_symbol(sys.argv[2])
     else:
         print(f"未知命令: {cmd}")
         print(__doc__)
