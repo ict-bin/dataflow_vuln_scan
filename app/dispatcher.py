@@ -32,6 +32,7 @@ class Dispatcher:
     def __init__(self) -> None:
         self._stop = threading.Event()
         self._threads: list[threading.Thread] = []
+        self._debug_watermark = None  # 已处理终态任务 finished_at 水位线, 之前的不回扫
 
     def start(self) -> None:
         self._stop.clear()
@@ -216,9 +217,10 @@ class Dispatcher:
             self._stop.wait(DEBUG_DISPATCH_INTERVAL)
 
     def _debug_dispatch_once(self) -> int:
-        """扫 DB 中 failed/error/completed_limited 且无 failure_debug 报告的任务 → POST 给 debugger。
+        """实时触发: 处理本次轮询新出现的 failed/error/completed_limited 终态任务 → POST 给 debugger。
 
-        scheduler 集中调度 (不靠 worker fire-and-forget, worker 死了也不丢)。
+        用 finished_at 水位线: 只处理 watermark 之后新结束的任务, 不回扫历史错误。
+        首次运行设水位线=当前 max(finished_at), 跳过所有历史 (不处理旧错误)。
         debugger 端 /internal/failure-debug 幂等 (已有报告则不重复)。
         """
         import urllib.request
@@ -228,23 +230,30 @@ class Dispatcher:
         db = next(db_gen)
         dispatched = 0
         try:
-            # 已有报告的 task_id 集
-            existing = {r.task_id for r in db.query(AppDvsFailureDebug).all()}
-            rows = (
-                db.query(AppDvsTask)
-                .filter(
-                    AppDvsTask.status.in_(_DEBUG_STATUSES),
-                    AppDvsTask.is_deleted.is_(False),
-                    AppDvsTask.finished_at.is_not(None),
-                )
-                .order_by(AppDvsTask.finished_at.desc())
-                .limit(50)
-                .all()
+            # 查 watermark 之后的终态任务 (新结束的)
+            q = db.query(AppDvsTask).filter(
+                AppDvsTask.status.in_(_DEBUG_STATUSES),
+                AppDvsTask.is_deleted.is_(False),
+                AppDvsTask.finished_at.is_not(None),
             )
+            if self._debug_watermark is not None:
+                q = q.filter(AppDvsTask.finished_at > self._debug_watermark)
+            rows = q.order_by(AppDvsTask.finished_at.asc()).limit(50).all()
+            if not rows:
+                return 0
+            # 首次运行: 设水位线=本批次 max(finished_at), 不处理历史 (本批次也跳过)
+            # 但本批次是新于 None watermark 的, 首次应跳过 → 设水位线后返回
+            if self._debug_watermark is None:
+                self._debug_watermark = max(r.finished_at for r in rows)
+                logger.info("debug dispatch: 首次水位线=%s, 跳过历史终态任务", self._debug_watermark)
+                return 0
+            # 已有报告的 task_id (仅查本批次, 幂等)
+            batch_ids = [r.task_id for r in rows]
+            existing = {r.task_id for r in db.query(AppDvsFailureDebug).filter(
+                AppDvsFailureDebug.task_id.in_(batch_ids)).all()}
             for row in rows:
                 if row.task_id in existing:
                     continue
-                # POST 给 debugger (幂等创建报告 + 入队 LLM 调试)
                 url = f"http://{DEBUGGER_HOST}:{DEBUGGER_PORT}/api/app/dataflow-vuln-scan/internal/failure-debug"
                 payload = json.dumps({"task_id": row.task_id}).encode()
                 try:
@@ -254,9 +263,11 @@ class Dispatcher:
                         if 200 <= resp.status < 300:
                             dispatched += 1
                             logger.info("debug dispatched task=%s (status=%s)", row.task_id, row.status)
-                            existing.add(row.task_id)  # 防本批次重复
+                            existing.add(row.task_id)
                 except Exception as exc:
                     logger.warning("debug dispatch failed task=%s: %s", row.task_id, exc)
+            # 推进水位线
+            self._debug_watermark = max(r.finished_at for r in rows)
         finally:
             try:
                 next(db_gen)
