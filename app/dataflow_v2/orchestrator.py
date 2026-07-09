@@ -323,23 +323,6 @@ class DfsOrchestrator:
         if not self_contained and not result.taint_failed:
             self._run_llm(self.cbs.mine_vulns, self.store, func, taint_params, ctx, chain_session)
 
-        # 6b) 外部 callee 透传: callee 定义不在源码 → 无校验无处理 → 污点透传
-        # B 不做任何污点处理, 进入 B 的污点原样透传到 B 的返回值
-        # 加入 return_taints → 调用者重新分析 → 链路继续 (A→B(外部)→C)
-        external_callee_taints: list[TaintRecord] = []
-        for p in result.propagations:
-            if p.is_external_callee and p.target_function:
-                rt_name = f"ret_{p.target_function}"
-                external_callee_taints.append(TaintRecord(
-                    func_id=func.func_id, name=rt_name,
-                    signature=rt_name, file=func.file, function=func.name,
-                    description=f"外部函数 {p.target_function} 返回值透传 (无校验无处理)"))
-                self.cbs.on_event("v2_external_callee_passthrough",
-                                  function=func.name,
-                                  external_callee=p.target_function,
-                                  return_taint=rt_name)
-        all_callee_return_taints.extend(external_callee_taints)
-
         # 7) return_taints 回传: 对每个 callee 返回的新污点, 在当前函数启动新分析分支
         for rt in all_callee_return_taints:
             rt_sig = rt.signature or rt.name
@@ -357,9 +340,8 @@ class DfsOrchestrator:
             new_tp = TaintParamInfo(positions=[], signature=rt_sig, names=[rt.name])
             self._process(func, new_tp, list(pre_validations), new_session, ctx, depth)
 
-        # 8) 返回 (本函数校验, 本函数的 return_taints + 外部 callee 透传)
-        all_return_taints = list(result.return_taints) + external_callee_taints
-        return my_discovered, all_return_taints
+        # 8) 返回 (本函数校验, 本函数的 return_taints)
+        return my_discovered, result.return_taints
 
     def _run_path(self, steps: list[ChainStep], base_accumulated: list[Validation],
                   func: FunctionRecord, base_session: str, ctx: PathContext,
