@@ -368,3 +368,30 @@ def index_source_tree(source_root: str, store: DataflowStore) -> int:
     # 3) class 继承图
     _build_class_hierarchy(source_root, store)
     return count
+
+
+def find_func_in_source(name: str, src_root) -> tuple[str, str] | None:
+    """在源码树中搜索函数定义所在文件 (grep)。
+    返回 (rel_file, matched_name) 或 None。
+    用于 .h 声明找不到定义时, 搜索 .cpp/.c 定义文件。
+    """
+    import subprocess, re
+    from pathlib import Path
+    src_root = Path(src_root)
+    pattern = rf'\b{re.escape(name)}\s*\('
+    try:
+        r = subprocess.run(
+            ["grep", "-rl", "--include=*.c", "--include=*.cpp", "--include=*.cc",
+             "-E", pattern, str(src_root)],
+            capture_output=True, text=True, timeout=15)
+        for line in r.stdout.strip().split("\n"):
+            if not line:
+                continue
+            try:
+                rel = str(Path(line).relative_to(src_root)).replace("\\", "/")
+                return (rel, name)
+            except ValueError:
+                continue
+    except Exception:
+        pass
+    return None

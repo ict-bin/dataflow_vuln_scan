@@ -81,7 +81,7 @@ def _read_body(func: dict) -> str:
         return f"// 读取失败: {e}"
 
 
-def _find_func_in_source(name: str, src_root: Path) -> tuple[str, str] | None:
+def _find_func_in_source_v2db(name: str, src_root: Path) -> tuple[str, str] | None:
     """在源码树中搜索函数定义所在文件 (grep)。
     返回 (rel_file, matched_name) 或 None。
     """
@@ -122,7 +122,7 @@ def cmd_lookup(name: str) -> None:
 
     # db 没找到 → 在源码树中搜索函数定义所在文件
     src_root = Path(_source_root())
-    found = _find_func_in_source(name, src_root)
+    found = __import__("app.dataflow_v2.function_extractor", fromlist=["find_func_in_source"]).find_func_in_source(name, src_root)
     if not found:
         print(f"NOT_FOUND: 函数 '{name}' 在源码树中未找到。")
         return

@@ -101,9 +101,18 @@ class DataflowV2Runner:
             if not cfg.source_file:
                 return TaskResult(task_id=tid, status=TaskStatus.INVALID_INPUT,
                                   task=cfg.task, error="v2: source_file 未指定")
-            ensure_file_indexed(source_root, cfg.source_file, store)
             root_func = store.find_function(cfg.function_name, cfg.source_file) \
                 or store.find_function(cfg.function_name)
+            # .h 文件只有声明没有定义 → grep 搜索同名函数的 .cpp 定义文件
+            if root_func is None:
+                from .function_extractor import find_func_in_source, ensure_file_indexed as _ensure
+                src = Path(source_root)
+                found = find_func_in_source(cfg.function_name, src)
+                if found:
+                    rel_def_file, _ = found
+                    _ensure(source_root, rel_def_file, store)
+                    root_func = store.find_function(cfg.function_name, rel_def_file) \
+                        or store.find_function(cfg.function_name)
             if root_func is None:
                 return TaskResult(task_id=tid, status=TaskStatus.INVALID_INPUT, task=cfg.task,
                                   error=f"v2: 根函数 {cfg.function_name} 未在 {cfg.source_file} 找到")
