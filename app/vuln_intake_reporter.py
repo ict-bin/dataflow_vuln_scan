@@ -21,6 +21,9 @@ from .vuln_store import VulnFindingRecord
 
 SERVICE_NAME = "secflow-app-dataflow-vuln-scan"
 SERVICE_VERSION = os.environ.get("BUILD_VERSION", "unknown")
+# vuln-platform intake 的 reporter.name 是注册的工具 ID (toolid),
+# 取自 secflow-platform-tool-registry 的 Tool.id; 引擎路由按此值匹配
+SOURCE_ID = os.environ.get("DVS_VULN_SOURCE_ID", "kg_source_vuln_scan_e2e")
 DEFAULT_BASE_URL = os.environ.get("DVS_VULN_ENGINE_BASE_URL", "http://secflow-platform-vuln")
 DEFAULT_SUBMIT_PATH = os.environ.get("DVS_VULN_ENGINE_SUBMIT_PATH", "/api/vuln/public/intake/submissions")
 DEFAULT_TIMEOUT = float(os.environ.get("DVS_VULN_ENGINE_TIMEOUT_SECONDS", "20"))
@@ -180,7 +183,7 @@ def build_intake_payload(
         "fingerprint": hashlib.sha256(fingerprint_raw.encode("utf-8", errors="replace")).hexdigest(),
         "reported_at": _now_iso(),
         "reporter": {
-            "name": SERVICE_NAME,
+            "name": SOURCE_ID,
             "version": SERVICE_VERSION,
             "type": "service",
             "endpoint": os.environ.get("DVS_PUBLIC_ENDPOINT", "/api/app/dataflow-vuln-scan"),
@@ -213,7 +216,7 @@ def build_intake_payload(
         "metadata": {
             "source": {
                 "service_name": SERVICE_NAME,
-                "service_id": SERVICE_NAME,
+                "service_id": SOURCE_ID,
                 "task_id": effective_task_id,
                 "parent_task_id": parent_task_id,
                 "parent_task_name": parent_task_name or task_name or "",
