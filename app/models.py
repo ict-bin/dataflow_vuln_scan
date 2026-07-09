@@ -122,8 +122,6 @@ class TaskConfig(BaseModel):
     entry_reason: str = Field(default="", description="上游入口分析给出的入口判定原因")
     entry_reason_source: str = Field(default="", description="入口判定原因来源：agent/default")
     taint_details: list[dict[str, str]] = Field(default_factory=list, description="上游入口分析给出的逐 taint 说明")
-    funcdb_path: str = Field(default="", description="EA 阶段 funcdb 文件或 funcdb 目录路径，用于精确提取函数体")
-    func_hash: str = Field(default="", description="EA 阶段函数哈希，用于在 funcdb 中精确定位函数")
     project_id: str = Field(default="", description="SecFlow 项目 ID，用于漏洞疑点上报")
     task_name: str = Field(default="", description="SecFlow 任务名称，用于漏洞疑点上报元数据")
     parent_task_id: str = Field(default="", description="编排器父任务 ID")

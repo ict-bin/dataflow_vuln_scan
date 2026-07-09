@@ -27,8 +27,6 @@ class TaskCreateRequest(BaseModel):
     function_description_source: Optional[str] = None
     entry_reason: Optional[str] = None
     entry_reason_source: Optional[str] = None
-    funcdb_path: Optional[str] = None
-    func_hash: Optional[str] = None
     task_origin_type: Optional[str] = None
     parent_project_id: Optional[str] = None
     parent_task_id: Optional[str] = None
