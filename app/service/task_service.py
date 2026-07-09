@@ -1687,6 +1687,12 @@ class TaskService:
         row.execution_heartbeat_at = None
         row.dispatch_status = None
         row.celery_task_id = None
+        # 清空大字段 (避免累积导致 sort memory 不足)
+        row.stages_json = None
+        row.result_json = None
+        row.latest_abnormal_reason_json = None
+        row.task_config_json = None
+        row.prompt_content = None
         reason, changed = _sync_task_abnormal_reason(row)
         _record_abnormal_reason(row, reason, changed=changed)
         _record_abnormal_reason_timeline(db, row, reason, changed=changed)
@@ -1789,6 +1795,13 @@ class TaskService:
             },
         )
         row.is_deleted = True
+        # 硬删除: 清除 MySQL 内的大字段 (避免累积导致 sort memory 不足)
+        # 保留行记录用于审计, 但清空 JSON 大字段
+        row.stages_json = None
+        row.result_json = None
+        row.latest_abnormal_reason_json = None
+        row.task_config_json = None
+        row.prompt_content = None
         db.commit()
 
     def _execute_task(self, task_id: str, epoch: int, control_version: int) -> None:
