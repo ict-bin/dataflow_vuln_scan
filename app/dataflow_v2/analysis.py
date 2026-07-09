@@ -510,7 +510,6 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                         prop.is_external_callee = False
                     # validation: 校验描述
                     if inf.get("validation"):
-                        from ..models import Validation
                         prop.validations.append(
                             Validation(str(inf.get("validation")), ""))
                     self.on_event("v2_external_callee_inferred",
