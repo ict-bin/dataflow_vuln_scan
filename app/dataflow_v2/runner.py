@@ -20,7 +20,7 @@ from ..copy_utils import safe_copy2
 from ..models import SwarmEvent, TaskConfig, TaskResult, TaskStatus
 from ..vuln_store import VulnScanStore
 from .analysis import TaintAnalysisCallbacks
-from .function_extractor import ensure_file_indexed, index_source_tree
+from .function_extractor import ensure_file_indexed
 from .models import TaintParamInfo
 from .orchestrator import DfsOrchestrator
 from .store import DataflowStore
@@ -93,10 +93,10 @@ class DataflowV2Runner:
 
         try:
             store = DataflowStore(v2_run_dir)
-            # 全局函数索引 (冷启动全量提取源码目录所有函数, 复用); callee 按名系统解析
-            # 前端 summary.runs 只显示已分析数 (非索引数), 不会误导
+            # 增量索引: 只索引根函数所在文件 (不全量扫描)
+            # 分析过程中 callee 查不到时用 v2_db index <file> 增量索引
             self._emit("v2_indexing_source_tree")
-            index_source_tree(source_root, store)
+            ensure_file_indexed(source_root, cfg.source_file, store)
             self._emit("v2_indexed", functions=len(store.list_functions()))
             if not cfg.source_file:
                 return TaskResult(task_id=tid, status=TaskStatus.INVALID_INPUT,
