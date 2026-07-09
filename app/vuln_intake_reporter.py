@@ -125,11 +125,18 @@ def build_intake_payload(
     source_root: str = "",
     report_path: str = "",
     taint_path_report_path: str = "",
+    use_self_task_id: bool = False,
 ) -> dict[str, Any]:
-    """Convert a stored DVS finding into the vuln-platform intake schema."""
-    # 编排器下发的任务 (task_origin_type != manual) 用 parent_task_id (编排器)
-    # 手动创建的任务用 DVS task_id
-    if parent_task_id and task_origin_type and task_origin_type != "manual":
+    """Convert a stored DVS finding into the vuln-platform intake schema.
+
+    use_self_task_id=True 时强制用 DVS 自身 task_id 作为 metadata.source.task_id
+    (父任务被删/不可挂载时的退避重试)。
+    """
+    # 编排器下发的任务 (task_origin_type != manual) 用 parent_task_id (编排器);
+    # 手动创建或退避重试时用 DVS task_id
+    if use_self_task_id:
+        effective_task_id = task_id
+    elif parent_task_id and task_origin_type and task_origin_type != "manual":
         effective_task_id = parent_task_id
     else:
         effective_task_id = task_id
@@ -254,9 +261,11 @@ def report_finding_to_intake(
     source_root: str = "",
     report_path: str = "",
     taint_path_report_path: str = "",
+    use_self_task_id: bool = False,
 ) -> dict[str, Any]:
     """Submit a DVS finding to the vuln-platform intake endpoint.
 
+    use_self_task_id=True 强制用 DVS 自身 task_id (父任务退避重试用)。
     Returns a status dict and never raises for ordinary HTTP/configuration errors.
     """
     if not REPORTING_ENABLED:
@@ -280,6 +289,7 @@ def report_finding_to_intake(
         source_root=source_root,
         report_path=report_path,
         taint_path_report_path=taint_path_report_path,
+        use_self_task_id=use_self_task_id,
     )
     try:
         with httpx.Client(timeout=DEFAULT_TIMEOUT) as client:

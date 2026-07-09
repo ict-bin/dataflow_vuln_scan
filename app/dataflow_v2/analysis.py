@@ -826,12 +826,34 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                                   fdir: Path) -> None:
         """上报 finding 到 vuln-platform intake, 失败不影响任务。
 
-        report_finding_to_intake 永不 raise (HTTP 错误吞进返回 dict); 这里捕获返回
-        dict, 回写 report_status/report_case_id + 发事件 + 记日志
-        (info 成功 / warning 失败)。任何意外异常都吞掉, 不让 mine_vulns 报错。
+        退避策略: 先用 parent_task_id (编排器任务) 上报; 若被 vuln-platform 以
+        task_id 不存在拒绝 (父任务已删/不可挂载), 退避用 DVS 自身 task_id 重试;
+        自身仍失败才记为真正失败。全程永不 raise, mine_vulns 不受影响。
         """
+        # attempt 1: 父任务 (编排器) task_id
+        res = self._do_intake(finding_id, rec, fdir, use_self=False)
+        if str(res.get("status") or "") == "reported":
+            self._record_intake_result(finding_id, rec, res)
+            return
+        # 退避: 父任务被 task_id 校验拒绝 → 用自身 task_id 重试
+        if self._is_task_id_rejection(res):
+            logger.warning("v2 intake parent task rejected for %s, retry with self task_id: %s",
+                           finding_id, str(res.get("error") or "")[:300])
+            self.on_event("vuln_intake_fallback_self", finding_id=finding_id,
+                          function=rec.function_name,
+                          parent_error=str(res.get("error") or "")[:300])
+            res = self._do_intake(finding_id, rec, fdir, use_self=True)
+            if str(res.get("status") or "") == "reported":
+                self._record_intake_result(finding_id, rec, res)
+                return
+        # 真正失败 (父+自身都失败, 或非 task_id 类错误不退避)
+        self._record_intake_result(finding_id, rec, res)
+
+    def _do_intake(self, finding_id: str, rec: VulnFindingRecord,
+                   fdir: Path, *, use_self: bool) -> dict:
+        """单次 intake 调用 (永不 raise, 异常转成 failed dict)。"""
         try:
-            res = report_finding_to_intake(
+            return report_finding_to_intake(
                 project_id=self.cfg.project_id, task_id=self.task_id,
                 task_name=self.cfg.task_name, parent_task_name=self.cfg.parent_task_name,
                 parent_task_id=self.cfg.parent_task_id,
@@ -840,15 +862,27 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                 finding=rec,
                 source_root=self.source_root,
                 report_path=str(fdir / "vulnerability-report.md"),
-                taint_path_report_path=str(fdir / "taint-path-report.md"))
+                taint_path_report_path=str(fdir / "taint-path-report.md"),
+                use_self_task_id=use_self)
         except Exception as exc:  # 双保险: report_finding_to_intake 不应 raise, 但防意外
             logger.warning("v2 intake report failed for %s: %s", finding_id, exc, exc_info=True)
-            self.on_event("vuln_intake_report_failed", finding_id=finding_id,
-                          function=rec.function_name, error=str(exc))
-            return
+            return {"status": "failed", "error": str(exc)}
+
+    @staticmethod
+    def _is_task_id_rejection(res: dict) -> bool:
+        """是否 vuln-platform 因 task_id 不存在而拒绝 (可退避用自身 task_id 重试)。"""
+        if str(res.get("status") or "") != "failed":
+            return False
+        err = str(res.get("error") or "")
+        low = err.lower()
+        return ("不存在" in err) or ("does not exist" in low) \
+            or ("not exist" in low) or ("not found" in low and "task" in low)
+
+    def _record_intake_result(self, finding_id: str, rec: VulnFindingRecord,
+                              res: dict) -> None:
+        """回写 report_status/case_id + 发事件 + 记日志。"""
         status = str(res.get("status") or "")
         case_id = str(res.get("case_id") or res.get("report_id") or "")
-        # 回写 vuln-scan.sqlite (供前端/重算/重试读取上报状态)
         try:
             self.graph_store.update_finding_report_status(
                 finding_id, status=status, case_id=case_id)
@@ -860,7 +894,6 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                           function=rec.function_name, case_id=case_id,
                           duplicate=bool(res.get("duplicate")))
         else:
-            # failed / skipped / disabled — 记日志 + 事件, 不影响任务
             err = str(res.get("error") or status or "")
             logger.warning("v2 intake report failed for %s: status=%s error=%s url=%s",
                            finding_id, status, err, res.get("url", ""))
