@@ -128,11 +128,20 @@ def extract_file_functions(source_root: str, rel_file: str, store: DataflowStore
 
 
 def ensure_file_indexed(source_root: str, rel_file: str, store: DataflowStore) -> None:
-    """确保某文件已索引 (如跟入函数所在文件尚未索引)。"""
+    """确保某文件已索引 (增量: tree-sitter 函数 + include + class 继承)。"""
     existing = [f for f in store.list_functions() if f.file == rel_file]
     if existing:
-        return
+        return  # 已索引
+    # 1) tree-sitter 函数提取
     extract_file_functions(source_root, rel_file, store)
+    # 2) include 索引 (该文件的直接 include → 入库)
+    incs = _extract_includes(source_root, rel_file)
+    if incs:
+        for header in incs:
+            store.add_include(header, rel_file)
+    # 3) class 继承图 + member (该文件的 class 定义 → 入库)
+    if _TS_AVAILABLE:
+        _extract_class_info_for_file(source_root, rel_file, store)
 
 
 # ── include 索引 (C 作用域) ──────────────────────────────────────────────
@@ -276,6 +285,28 @@ def _extract_class_info(source: bytes, tree: Any, rel_file: str) -> list[dict]:
 
     walk(tree.root_node)
     return classes
+
+
+def _extract_class_info_for_file(source_root: str, rel_file: str, store: DataflowStore) -> None:
+    """对单个文件提取 class 继承图 + member (增量, 不全量扫描)。"""
+    if not _TS_AVAILABLE:
+        return
+    path = Path(source_root) / rel_file
+    if not path.is_file():
+        return
+    source = path.read_bytes()
+    try:
+        parser = _parser_for(path)
+        if parser is None:
+            return
+        tree = parser.parse(source)
+    except Exception:
+        return
+    classes = _extract_class_info(source, tree, rel_file)
+    for cls in classes:
+        store.add_class(cls["name"], cls["bases"], cls["file"])
+        for member_name, member_type in cls["members"]:
+            store.add_class_member(cls["name"], member_name, member_type, cls["file"])
 
 
 def _build_class_hierarchy(source_root: str, store: DataflowStore) -> int:

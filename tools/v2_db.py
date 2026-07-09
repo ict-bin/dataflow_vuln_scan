@@ -128,16 +128,14 @@ def cmd_lookup(name: str) -> None:
         return
 
     rel_file, matched_name = found
-    # 用 tree-sitter 索引该文件入 functions.db
-    # clang callsite 分析在 _build_result 里做 (需要 callee_names, lookup 时不知道)
-    # clang TU 缓存是 in-process, v2_db 是不同进程, 无法预缓存
+    # 用 ensure_file_indexed 索引该文件 (tree-sitter + include + class, 增量)
     db_dir = _db_dir()
     sys.path.insert(0, os.environ.get("DVS_APP_DIR", "/opt/dataflow_vuln_scan"))
     try:
-        from app.dataflow_v2.function_extractor import extract_file_functions
+        from app.dataflow_v2.function_extractor import ensure_file_indexed
         from app.dataflow_v2.store import DataflowStore
         store = DataflowStore(db_dir)
-        extract_file_functions(str(src_root), rel_file, store)
+        ensure_file_indexed(str(src_root), rel_file, store)
         store.close()
     except Exception as e:
         print(f"INDEX_ERROR: 索引文件 {rel_file} 失败: {e}")
