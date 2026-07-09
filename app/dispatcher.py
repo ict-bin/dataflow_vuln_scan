@@ -109,7 +109,7 @@ class Dispatcher:
         published = 0
         try:
             rows = (
-                db.query(AppDvsTask)
+                db.query(AppDvsTask.task_id)
                 .filter(
                     AppDvsTask.status == "pending",
                     AppDvsTask.is_deleted.is_(False),
@@ -120,12 +120,13 @@ class Dispatcher:
                 .all()
             )
             for row in rows:
+                tid = row[0] if isinstance(row, tuple) else row.task_id
                 try:
-                    ar = run_dvs_task.delay(row.task_id)
-                    row.celery_task_id = ar.id
+                    ar = run_dvs_task.delay(tid)
+                    db.query(AppDvsTask).filter(AppDvsTask.task_id == tid).update({"celery_task_id": ar.id})
                     db.commit()
                     published += 1
-                    logger.info("published task=%s celery_id=%s", row.task_id, ar.id)
+                    logger.info("published task=%s celery_id=%s", tid, ar.id)
                 except Exception as exc:
                     logger.warning("publish failed task=%s: %s (retry next loop)", row.task_id, exc)
                     db.rollback()
