@@ -227,6 +227,18 @@ class WorkspaceManager:
                 shutil.rmtree(str(_nfs_sessions), ignore_errors=True)
                 logger.info("workspace_manager: cleaned run/sessions temp copies %s", str(_nfs_sessions))
 
+            # Clean up old epoch directories on NFS (only keep current epoch)
+            _epochs_dir = self._nfs_run_root.parent  # epochs/
+            if _epochs_dir.is_dir():
+                _current_epoch_name = self._nfs_run_root.name  # e.g. 0006
+                for _entry in _epochs_dir.iterdir():
+                    if _entry.name != _current_epoch_name and _entry.is_dir():
+                        shutil.rmtree(str(_entry), ignore_errors=True)
+                        logger.info(
+                            "workspace_manager: cleaned old epoch dir %s",
+                            str(_entry),
+                        )
+
             logger.info(
                 "workspace_manager: final sync completed %s status=%s",
                 str(self._nfs_run_root), status,
@@ -248,6 +260,21 @@ class WorkspaceManager:
             # Clean up the local temp directory (with retries)
             if self._local_run_root and self._local_run_root.exists():
                 _cleanup_local_temp(self._local_run_root)
+            # Also clean up any other /tmp workspace for this task (all epochs)
+            # in case previous runs left leftovers
+            try:
+                _local_root_path = _local_root()
+                for _pattern in [f"{self._task_id}_epoch*", self._task_id]:
+                    for _path in list(_local_root_path.glob(_pattern)):
+                        if _path.is_dir() and not _path.is_symlink():
+                            if str(_path) != str(self._local_run_root):
+                                shutil.rmtree(str(_path), ignore_errors=True)
+                                logger.info(
+                                    "workspace_manager: cleaned leftover local %s",
+                                    str(_path),
+                                )
+            except Exception:
+                pass
 
     @staticmethod
     def cleanup_temp_for_task(task_id: str) -> None:
