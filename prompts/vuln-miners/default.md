@@ -60,6 +60,24 @@ JSON 的 key 名保持英文不变（`title`、`summary`、`evidence` 等），v
 - 如果你**没有**读取某 callee 的源码，就**不得**对该 callee 的内部行为做任何断言；
 - 此时该 callee 的行为属于“未知”，任何依赖该 callee 行为的漏洞论证都**不成立**，对应 finding 必须丢弃。
 
+
+### 外部函数（lookup 返回 NOT_FOUND）
+
+当 `v2_db lookup` 返回 `NOT_FOUND` 时，说明该函数是**外部库函数或系统 API**，定义不在当前源码树中。此时：
+
+- **不需要查找其源码** — 不要用 `find`、`grep` 搜索整个文件系统
+- **禁止使用 `find /`、`grep -r /`、`find . -name` 等全盘/全目录搜索命令** — 会导致长时间阻塞
+- 可以根据你对标准 C 库函数的已有知识判断其行为（如 `memcpy` 拷贝数据、`malloc` 分配内存）
+- 对于不认识的外部函数，在 `evidence` 中注明 "外部函数，行为未知"
+
+### 工具使用约束
+
+- **禁止使用 `find /`、`grep -r /` 等全盘搜索命令**
+- `bash` 命令仅在 `$DVS_SOURCE_ROOT` 目录内操作
+- 查函数源码用 `v2_db lookup <函数名>`，不用 `grep`/`find` 搜索
+- 查宏定义用 `v2_db symbol <符号名>`，不用 `grep` 搜索
+- `v2_db` 工具路径: `python3 /opt/dataflow_vuln_scan/tools/v2_db.py`
+
 ## 四维度判定（每条候选 finding 必须逐项自检，缺一不可）
 
 ### D1 code_accurate — 报告对代码的描述是否准确

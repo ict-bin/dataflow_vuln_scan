@@ -1,0 +1,26 @@
+#!/bin/bash
+# Restricted find: 只允许在 $DVS_SOURCE_ROOT 内搜索
+# 如果参数包含 / (根路径), 替换为 $DVS_SOURCE_ROOT
+REAL_FIND="/usr/bin/find"
+SRC="${DVS_SOURCE_ROOT:-.}"
+
+args=()
+for arg in "$@"; do
+    case "$arg" in
+        /|/*)
+            # 绝对路径: 如果不在 SRC 内, 替换为 SRC
+            case "$arg" in
+                "$SRC"*) args+=("$arg") ;;
+                *) args+=("$SRC") ;;
+            esac
+            ;;
+        .)
+            args+=("$SRC")
+            ;;
+        *)
+            args+=("$arg")
+            ;;
+    esac
+done
+
+exec "$REAL_FIND" "${args[@]}"

@@ -1,0 +1,33 @@
+#!/bin/bash
+# Restricted grep: 只允许在 $DVS_SOURCE_ROOT 内搜索
+REAL_GREP="/usr/bin/grep"
+SRC="${DVS_SOURCE_ROOT:-.}"
+
+# 找到路径参数 (非选项参数中第一个以 / 开头的)
+args=()
+path_found=false
+for arg in "$@"; do
+    if [ "$path_found" = false ] && echo "$arg" | grep -q '^/' 2>/dev/null; then
+        case "$arg" in
+            "$SRC"*) args+=("$arg") ;;
+            *) args+=("-r" "$SRC") ;;  # 替换为 -r $SRC
+        esac
+        path_found=true
+    else
+        args+=("$arg")
+    fi
+done
+
+# 如果没有路径参数, 默认在 SRC 内搜索
+if [ "$path_found" = false ]; then
+    # 检查是否有 -r 选项 (递归搜索)
+    has_r=false
+    for a in "${args[@]}"; do
+        [ "$a" = "-r" ] || [ "$a" = "-rn" ] || [ "$a" = "-rl" ] || [ "$a" = "-R" ] && has_r=true
+    done
+    if [ "$has_r" = true ]; then
+        args+=("$SRC")
+    fi
+fi
+
+exec "$REAL_GREP" "${args[@]}"

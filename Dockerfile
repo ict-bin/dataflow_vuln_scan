@@ -62,6 +62,7 @@ COPY main.py     ./
 COPY prompts/           ./prompts/
 COPY scripts/           ./scripts/
 COPY tools/             ./tools/
+COPY bin/               ./bin/
 COPY skills/            ./skills/
 COPY config.example.json .env.example ./
 RUN printf '{"build_version":"%s"}\n' "$SECFLOW_BUILD_VERSION" > /opt/dataflow_vuln_scan/build_meta.json

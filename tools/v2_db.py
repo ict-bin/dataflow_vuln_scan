@@ -124,7 +124,7 @@ def cmd_lookup(name: str) -> None:
     src_root = Path(_source_root())
     found = __import__("app.dataflow_v2.function_extractor", fromlist=["find_func_in_source"]).find_func_in_source(name, src_root)
     if not found:
-        print(f"NOT_FOUND: 函数 '{name}' 在源码树中未找到。")
+        print(f"NOT_FOUND: 函数 '{name}' 在源码树中未找到。该函数可能是外部库函数或系统 API，定义不在当前源码树中，不需要查找其源码。")
         return
 
     rel_file, matched_name = found
@@ -153,13 +153,13 @@ def cmd_lookup(name: str) -> None:
         print(f"---")
         print(body)
     else:
-        print(f"NOT_FOUND: 函数 '{name}' 在文件 {rel_file} 中未找到定义 (可能不是函数)。")
+        print(f"NOT_FOUND: 函数 '{name}' 在文件 {rel_file} 中未找到定义。该函数可能是外部库函数，不需要查找其源码。")
 
 
 def cmd_taints(name: str) -> None:
     func = _find_func(name)
     if not func:
-        print(f"NOT_FOUND: 函数 '{name}' 不在数据库中。")
+        print(f"NOT_FOUND: 函数 '{name}' 不在数据库中。该函数可能是外部库函数或系统 API，定义不在当前源码树中，不需要查找其源码。")
         return
     rows = _query("taints.db", "SELECT * FROM taints WHERE func_id = ?", (func["func_id"],))
     if not rows:
@@ -172,7 +172,7 @@ def cmd_taints(name: str) -> None:
 def cmd_propagations(name: str) -> None:
     func = _find_func(name)
     if not func:
-        print(f"NOT_FOUND: 函数 '{name}' 不在数据库中。")
+        print(f"NOT_FOUND: 函数 '{name}' 不在数据库中。该函数可能是外部库函数或系统 API，定义不在当前源码树中，不需要查找其源码。")
         return
     rows = _query("propagations.db",
                   "SELECT * FROM propagations WHERE source_func_id = ?", (func["func_id"],))
@@ -189,7 +189,7 @@ def cmd_propagations(name: str) -> None:
 def cmd_orchestration(name: str) -> None:
     func = _find_func(name)
     if not func:
-        print(f"NOT_FOUND: 函数 '{name}' 不在数据库中。")
+        print(f"NOT_FOUND: 函数 '{name}' 不在数据库中。该函数可能是外部库函数或系统 API，定义不在当前源码树中，不需要查找其源码。")
         return
     rows = _query("orchestration.db",
                   "SELECT * FROM orchestration WHERE source_func_id = ? ORDER BY path_id, edge_order",

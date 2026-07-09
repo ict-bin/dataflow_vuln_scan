@@ -488,6 +488,10 @@ def _build_agent_env(
     merged.setdefault("TMPDIR", os.path.join(cwd, "tmp"))
     if task_context:
         merged["DVS_TASK_CONTEXT"] = json.dumps(task_context, ensure_ascii=False)
+    # Prepend restricted tool wrappers to PATH — find/grep 只能在源码目录内搜索
+    _wrapper_dir = "/opt/dataflow_vuln_scan/bin/restricted"
+    if os.path.isdir(_wrapper_dir):
+        merged["PATH"] = _wrapper_dir + ":" + merged.get("PATH", "")
     return merged
 
 
