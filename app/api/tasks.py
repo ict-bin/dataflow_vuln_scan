@@ -1912,6 +1912,58 @@ def delete_task(
     get_task_service().delete_task(db, task_id, delete_files=delete_files)
 
 
+@router.post("/tasks/batch-delete")
+def batch_delete_tasks(
+    body: dict,
+    db: Session = Depends(get_db),
+):
+    """批量删除任务。后端用线程池并行删除文件，避免串行 NFS 删除卡死。"""
+    task_ids = body.get("task_ids", [])
+    delete_files = body.get("delete_files", True)
+    if not task_ids:
+        return {"status": "ok", "deleted": 0, "failed": 0, "errors": []}
+    success = 0
+    failed = 0
+    errors = []
+    file_delete_tasks = []
+    for tid in task_ids:
+        try:
+            row = db.query(AppDvsTask).filter_by(task_id=tid, is_deleted=False).first()
+            if row is None:
+                row2 = db.query(AppDvsTask).filter_by(task_id=tid).first()
+                if row2 and delete_files and row2.output_path:
+                    file_delete_tasks.append(os.path.join(row2.output_path, tid))
+                continue
+            lease_live = bool(row.execution_owner_id and row.execution_lease_until and row.execution_lease_until >= now_local())
+            if row.status == "running" or lease_live:
+                failed += 1
+                errors.append({"task_id": tid, "error": "running"})
+                continue
+            row.is_deleted = True
+            row.stages_json = None
+            row.result_json = None
+            row.latest_abnormal_reason_json = None
+            row.task_config_json = None
+            row.prompt_content = ""
+            row.vuln_total_count = -1
+            row.vuln_reported_count = -1
+            row.vuln_unreported_count = -1
+            if delete_files and row.output_path:
+                file_delete_tasks.append(os.path.join(row.output_path, tid))
+            success += 1
+        except Exception as exc:
+            failed += 1
+            errors.append({"task_id": tid, "error": str(exc)[:100]})
+    db.commit()
+    if file_delete_tasks:
+        import concurrent.futures, shutil
+        def _rmtree(path):
+            shutil.rmtree(path, ignore_errors=True)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+            list(executor.map(_rmtree, file_delete_tasks))
+    return {"status": "ok", "deleted": success, "failed": failed, "errors": errors}
+
+
 @router.get("/tasks/{task_id}/timeline", response_model=TaskTimelineResponse)
 def get_task_timeline(task_id: str, db: Session = Depends(get_db)):
     return get_task_service().get_task_timeline(db, task_id)
