@@ -323,6 +323,24 @@ class DfsOrchestrator:
         if not self_contained and not result.taint_failed:
             self._run_llm(self.cbs.mine_vulns, self.store, func, taint_params, ctx, chain_session)
 
+        # 6b) 外部 callee 透传: callee 定义不在源码 → 无校验无处理 → 污点透传
+        # 把外部 callee 的 target_function 名加入 return_taints
+        # 这样调用者会重新分析, 处理该 callee 返回的污点
+        external_callee_taints: list[TaintRecord] = []
+        for p in result.propagations:
+            if p.is_external_callee and p.target_function:
+                # 外部 callee 返回值视为污点 (透传, 无清洗)
+                rt_name = f"ret_{p.target_function}"
+                external_callee_taints.append(TaintRecord(
+                    func_id=func.func_id, name=rt_name,
+                    signature=rt_name, file=func.file, function=func.name,
+                    description=f"外部函数 {p.target_function} 返回值透传 (无校验)"))
+                self.cbs.on_event("v2_external_callee_passthrough",
+                                  function=func.name,
+                                  external_callee=p.target_function,
+                                  return_taint=rt_name)
+        all_callee_return_taints.extend(external_callee_taints)
+
         # 7) return_taints 回传: 对每个 callee 返回的新污点, 在当前函数启动新分析分支
         for rt in all_callee_return_taints:
             rt_sig = rt.signature or rt.name
@@ -340,8 +358,9 @@ class DfsOrchestrator:
             new_tp = TaintParamInfo(positions=[], signature=rt_sig, names=[rt.name])
             self._process(func, new_tp, list(pre_validations), new_session, ctx, depth)
 
-        # 8) 返回 (本函数校验, 本函数的 return_taints)
-        return my_discovered, result.return_taints
+        # 8) 返回 (本函数校验, 本函数的 return_taints + 外部 callee 透传)
+        all_return_taints = list(result.return_taints) + external_callee_taints
+        return my_discovered, all_return_taints
 
     def _run_path(self, steps: list[ChainStep], base_accumulated: list[Validation],
                   func: FunctionRecord, base_session: str, ctx: PathContext,
@@ -429,8 +448,11 @@ class DfsOrchestrator:
                                                            p.call_line, p.prop_id)])
                 paths = new_paths
             else:
-                # 直接调用: 追加到有序链 (串行)
-                # 同一函数内的多个 callee 按调用顺序串行分析
+                # 直接调用
+                if p.is_external_callee:
+                    # callee 定义不在源码树 — 记录传播但不跟入, 不走 tracker
+                    # propagation 已存 DB, 调用树显示但不可展开
+                    continue
                 step = self._prop_to_step(p)
                 if step is None:
                     continue  # callee 解析失败, 跳过

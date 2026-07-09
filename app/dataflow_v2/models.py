@@ -127,6 +127,7 @@ class PropagationRecord:
     condition: str = ""                 # 传播条件 (人类可读; 分支互斥性由 clang 判)
     is_external: bool = False           # 传播到外部/全局数据变量 → 触发 nonlocal 跟踪 LLM
     is_indirect_call: bool = False     # 函数指针/回调/dispatch 间接调用 → 触发 function_pointer tracker
+    is_external_callee: bool = False   # callee 定义不在源码树 → 记录传播但不跟入, 不走 tracker
     dispatch_kind: str = ""            # 间接调用类型 (function_pointer_field/callback/vtable/dispatch_map)
     # clang 标注 (analyze_function 填, 编排器路径分叉消费):
     callsite_validated: bool = False    # clang 确认该 call_line 确有对 target_function 的 CallExpr
@@ -153,6 +154,7 @@ class PropagationRecord:
             "target_file": self.target_file, "call_line": self.call_line,
             "condition": self.condition, "is_external": 1 if self.is_external else 0,
             "is_indirect_call": 1 if self.is_indirect_call else 0, "dispatch_kind": self.dispatch_kind,
+            "is_external_callee": 1 if self.is_external_callee else 0,
             "callsite_validated": 1 if self.callsite_validated else 0,
             "branch_group_id": self.branch_group_id, "branch_arm_id": self.branch_arm_id,
             "branch_path": json.dumps(self.branch_path, ensure_ascii=False),

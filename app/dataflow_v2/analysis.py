@@ -543,7 +543,9 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                 rec = store.find_function(prop.target_function)
         if rec is None:
             # 定义不在源码树 (外部库/系统 API) — 记录传播但不跟入
-            # 不设 is_external=True (那是外部变量传播, 走 tracker)
+            # 不设 is_external (那是外部变量传播, 走 tracker)
+            # 设 is_external_callee (callee 实现不可达, 不跟入不走 tracker)
+            prop.is_external_callee = True
             self.on_event("v2_callee_external_unresolved",
                           function=prop.target_function, caller=prop.source_func_id,
                           reason="definition not found in source tree")
