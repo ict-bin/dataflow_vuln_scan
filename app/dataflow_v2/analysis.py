@@ -489,6 +489,38 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                 signature=_rtname, file=func.file, function=func.name,
                 description=str(rt.get("description") or "")))
 
+        # 外部 callee 语义推断: 批量 LLM 调用
+        external_props = [p for p in validated_props
+                          if p.is_external_callee and p.target_function]
+        if external_props:
+            inferred = self._infer_external_callees(external_props, func)
+            for prop in external_props:
+                inf = inferred.get(prop.target_function)
+                if inf and inf.get("inferable"):
+                    prop.is_external_callee = False
+                    # return_taint: 外部函数返回值携带污点
+                    if inf.get("return_taint"):
+                        rt_name = str(inf["return_taint"])
+                        return_taints.append(TaintRecord(
+                            func_id=func.func_id, name=rt_name,
+                            signature=rt_name, file=func.file, function=func.name,
+                            description=f"外部函数 {prop.target_function} 返回值携带污点 (LLM推断)"))
+                    # propagation: 参数间传播 (如 memcpy src→dst)
+                    if inf.get("propagation"):
+                        prop.is_external_callee = False
+                    # validation: 校验描述
+                    if inf.get("validation"):
+                        from ..models import Validation
+                        prop.validations.append(
+                            Validation(str(inf.get("validation")), ""))
+                    self.on_event("v2_external_callee_inferred",
+                                  function=prop.target_function,
+                                  caller=func.name,
+                                  return_taint=inf.get("return_taint"),
+                                  propagation=inf.get("propagation"),
+                                  validation=inf.get("validation"))
+                # else: inferable=false → 保持 is_external_callee=True (视为不存在)
+
         return AnalysisResult(taints=taints, propagations=validated_props,
                               self_contained=self_contained, description=description,
                               session_path=str(fork_session),
@@ -557,6 +589,66 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
         return rec.func_id
 
     # ── prompt 构造 ─────────────────────────────────────────────────────────
+    def _infer_external_callees(self, external_props: list, func: FunctionRecord) -> dict:
+        """批量 LLM 推断外部函数语义 (一次调用)。
+
+        返回 {function_name: {inferable, return_taint, propagation, validation}}
+        """
+        acfg = self.cfg.workers.agents[0] if self.cfg.workers.agents else None
+        if acfg is None:
+            return {}
+        # 构造批量推断 prompt
+        lines = []
+        for i, p in enumerate(external_props, 1):
+            lines.append(f"{i}. 函数: {p.target_function}, 污点参数: {p.source_taint_name} → {p.target_taint_name}")
+        prompt = (
+            "以下外部函数被污点参数调用, 定义不在源码中。\n"
+            "请根据函数名和调用上下文, 逐个判断能否推断其污点行为。\n\n"
+            + "\n".join(lines) + "\n\n"
+            "对每个函数输出 JSON (在一个 JSON 数组中):\n"
+            '- 能推断: {"function": "open", "inferable": true, '
+            '"return_taint": "fd", "propagation": null, "validation": null}\n'
+            '  * return_taint: 返回值携带污点的变量名 (如 open → fd)\n'
+            '  * propagation: 参数间传播 "dst<-src" (如 memcpy: src→dst)\n'
+            '  * validation: 校验描述 (如 "strncpy 限制拷贝长度")\n'
+            '- 不能推断: {"function": "MSG_Proc", "inferable": false}\n\n'
+            '输出格式: ```json\n[{"function": "...", ...}, ...]\n```'
+        )
+        # 用 fresh session (不继承 taint 分析上下文)
+        result = run_agent(
+            prompt=prompt, model=acfg.model,
+            tools=acfg.tools or self.cfg.workers.default_tools,
+            cwd=str(self.run_dir), session_file=None,
+            system_prompt="你是 C/C++ 安全分析专家。根据函数名推断外部函数的污点行为。",
+            cancel_event=self.cancel_event,
+            env={"DVS_V2_DB_DIR": str(self.vuln_root.parent / "dataflow-v2"),
+                 "DVS_SOURCE_ROOT": self.source_root},
+            run_timeout_seconds=self.cfg.agent_run_timeout_seconds,
+            timeout_retry_enabled=self.cfg.agent_timeout_retry_enabled,
+            timeout_max_retries=self.cfg.agent_timeout_max_retries,
+            pi_max_retries=self.cfg.pi_max_retries, pi_retry_delay=self.cfg.pi_retry_delay,
+        )
+        # 解析 JSON 数组
+        from ..parsers import _extract_json_object
+        text = result.output or ""
+        import json as _json
+        # 尝试解析 JSON 数组
+        import re as _re
+        m = _re.search(r'\[.*?\]', text, _re.DOTALL)
+        if not m:
+            return {}
+        try:
+            arr = _json.loads(m.group())
+        except Exception:
+            return {}
+        inferred = {}
+        for item in arr:
+            if isinstance(item, dict):
+                fn = str(item.get("function") or "")
+                if fn:
+                    inferred[fn] = item
+        return inferred
+
     def _build_prompt(self, func: FunctionRecord, body: str,
                       taint_params: TaintParamInfo, pre_validations: list[Validation]) -> str:
         if taint_params.names == ["auto"] or taint_params.signature == "auto":
