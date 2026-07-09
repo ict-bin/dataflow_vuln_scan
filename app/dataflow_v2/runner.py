@@ -154,15 +154,24 @@ class DataflowV2Runner:
             if self._cancel_event is not None and self._cancel_event.is_set():
                 status, err_msg = TaskStatus.FAILED, "v2: cancelled"
             else:
-                # 0 传播边 = taint 分析未产出有效 callee (LLM 截断/格式错/重试耗尽) → 不应 passed
+                # 0 传播边: 检查是否有 taint 分析成功
+                # self_contained=True 的函数不需要跟入 callee, 有 vuln mining 就是正常完成
+                # propagations.db 有记录但 target_func_id 为空 (callee 找不到) 也是正常分析
                 try:
                     _edge_count = store._q("orchestration", "SELECT count(*) FROM orchestration")
                     _edge_count = int(_edge_count[0][0]) if _edge_count else 0
                 except Exception:
                     _edge_count = 0
-                if _edge_count == 0:
+                try:
+                    _prop_count = store._q("propagations", "SELECT count(*) FROM propagations")
+                    _prop_count = int(_prop_count[0][0]) if _prop_count else 0
+                except Exception:
+                    _prop_count = 0
+                if _edge_count == 0 and _prop_count == 0:
+                    # 无传播边也无 propagation 记录 = taint 分析确实失败
                     status = TaskStatus.COMPLETED_LIMITED
                     err_msg = "v2: taint 分析未产出传播边 (LLM 输出可能截断或格式错误)"
+                # else: 有 propagation 记录但 edge_count=0 (callee 找不到/不跟入) = 正常完成
             final_output = self._build_final_report(tid, cfg, store, graph_db_path)
             vuln_summary = {"functions": len(store.list_functions()),
                             "findings": self._count_findings(graph_db_path)}
