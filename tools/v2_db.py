@@ -129,6 +129,8 @@ def cmd_lookup(name: str) -> None:
 
     rel_file, matched_name = found
     # 用 tree-sitter 索引该文件入 functions.db
+    # clang callsite 分析在 _build_result 里做 (需要 callee_names, lookup 时不知道)
+    # clang TU 缓存是 in-process, v2_db 是不同进程, 无法预缓存
     db_dir = _db_dir()
     sys.path.insert(0, os.environ.get("DVS_APP_DIR", "/opt/dataflow_vuln_scan"))
     try:
