@@ -532,19 +532,23 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
             return ""
 
     def _resolve_target_func_id(self, store: DataflowStore, prop: PropagationRecord) -> str:
-        """按 callee 名解析 func_id (系统解析, 不依赖 LLM target_file)。
-        先查已索引库, 找不到则 grep 源码树按需索引其文件。"""
+        """按 callee 名解析 func_id。找不到定义时标记 is_external=True (外部符号)。"""
         if not prop.target_function:
             return ""
         rec = store.find_function(prop.target_function)
         if rec is None:
-            # 按需: grep 源码树找 callee 定义文件 → 索引 → 重试
             fpath = self._search_callee_file(prop.target_function)
             if fpath and self._within_source_root(fpath):
                 ensure_file_indexed(self.source_root, fpath, store)
                 rec = store.find_function(prop.target_function)
         if rec is None:
-            return ""  # 全局库+源码树均找不到 (外部库/系统 API), 不递归
+            # 源码树中找不到定义 (外部库/系统 API/类成员声明在 .h)
+            # 标记为外部符号, 不丢弃
+            prop.is_external = True
+            self.on_event("v2_callee_external_unresolved",
+                          function=prop.target_function, caller=prop.source_func_id,
+                          reason="definition not found in source tree (external/system API)")
+            return ""
         if rec.file and not self._within_source_root(rec.file):
             self.on_event("v2_out_of_scope_skipped", function=prop.target_function,
                        file=rec.file, reason="outside_source_root")
