@@ -1692,7 +1692,7 @@ class TaskService:
         row.result_json = None
         row.latest_abnormal_reason_json = None
         row.task_config_json = None
-        row.prompt_content = None
+        row.prompt_content = ""
         reason, changed = _sync_task_abnormal_reason(row)
         _record_abnormal_reason(row, reason, changed=changed)
         _record_abnormal_reason_timeline(db, row, reason, changed=changed)
@@ -1801,7 +1801,7 @@ class TaskService:
         row.result_json = None
         row.latest_abnormal_reason_json = None
         row.task_config_json = None
-        row.prompt_content = None
+        row.prompt_content = ""
         db.commit()
 
     def _execute_task(self, task_id: str, epoch: int, control_version: int) -> None:
