@@ -540,8 +540,13 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
         except Exception:
             return False
 
-    def _search_callee_file(self, callee_name: str) -> str:
-        """按需搜索: callee 不在已索引文件时, grep 源码树找其定义文件。"""
+    def _search_callee_files(self, callee_name: str) -> list[str]:
+        """按需搜索: callee 不在已索引文件时, grep 源码树找其**所有**出现文件。
+
+        grep -l 既匹配调用点也匹配定义点, 故返回的文件列表里可能混有仅含调用点的
+        文件; 调用方需对每个文件 ensure_file_indexed (tree-sitter 建库) 后再
+        find_function, 命中即为定义所在。返回相对 source_root 的路径列表。
+        """
         import subprocess
         short = callee_name.rsplit("::", 1)[-1]
         try:
@@ -549,29 +554,45 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                 ["grep", "-rl", "--include=*.c", "--include=*.cpp", "--include=*.cc",
                  f"\\b{short}\\s*\\(", self.source_root],
                 capture_output=True, text=True, timeout=30)
-            files = [f for f in r.stdout.strip().split("\n") if f]
-            if not files:
-                return ""
-            # 取第一个匹配, 转相对路径
-            for f in files:
-                try:
-                    return str(Path(f).relative_to(self.source_root).as_posix())
-                except ValueError:
-                    continue
-            return ""
         except Exception:
-            return ""
+            return []
+        out: list[str] = []
+        for f in (r.stdout or "").split("\n"):
+            f = f.strip()
+            if not f:
+                continue
+            try:
+                rel = str(Path(f).relative_to(self.source_root).as_posix())
+            except ValueError:
+                continue  # 不在 source_root 内 (grep wrapper 已限制, 正常不会到这)
+            if rel not in out:
+                out.append(rel)
+        return out
 
     def _resolve_target_func_id(self, store: DataflowStore, prop: PropagationRecord) -> str:
-        """按 callee 名解析 func_id。找不到定义时记录为外部符号 (不跟入, 不走 tracker)。"""
+        """按 callee 名解析 func_id。
+
+        先查全局函数库; 未命中则 grep 源码树找该名字出现的**所有**文件, 逐个
+        ensure_file_indexed (tree-sitter 建库) 后再 find_function — grep 既匹配
+        调用点也匹配定义点, 故可能要索引多个文件 (含仅含调用点的文件) 才能命中
+        真正的定义。全部候选文件建库后仍查不到, 才判定为外部符号
+        (is_external_callee, 不跟入, 不走 tracker)。
+        """
         if not prop.target_function:
             return ""
         rec = store.find_function(prop.target_function)
         if rec is None:
-            fpath = self._search_callee_file(prop.target_function)
-            if fpath and self._within_source_root(fpath):
-                ensure_file_indexed(self.source_root, fpath, store)
-                rec = store.find_function(prop.target_function)
+            candidates = self._search_callee_files(prop.target_function)
+            for fpath in candidates:
+                if not self._within_source_root(fpath):
+                    continue
+                try:
+                    ensure_file_indexed(self.source_root, fpath, store)
+                except Exception:
+                    logger.debug("v2 ensure_file_indexed failed for %s", fpath, exc_info=True)
+                    continue
+            # 全部候选建库后再查 (定义可能在任一文件里, 上面已全部索引)
+            rec = store.find_function(prop.target_function)
         if rec is None:
             # 定义不在源码树 (外部库/系统 API) — 记录传播但不跟入
             # 不设 is_external (那是外部变量传播, 走 tracker)
@@ -796,21 +817,55 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
             except Exception as _fe:
                 logger.warning("v2 add_finding FK+insert failed: %s", _fe, exc_info=True)
             n += 1
-            # 上报 vuln-platform intake
-            try:
-                report_finding_to_intake(
-                    project_id=self.cfg.project_id, task_id=self.task_id,
-                    task_name=self.cfg.task_name, parent_task_name=self.cfg.parent_task_name,
-                    parent_task_id=self.cfg.parent_task_id,
-                    parent_task_type=self.cfg.parent_task_type,
-                    task_origin_type=self.cfg.task_origin_type,
-                    finding=rec,
-                    source_root=self.source_root,
-                    report_path=str(fdir / "vulnerability-report.md"),
-                    taint_path_report_path=str(fdir / "taint-path-report.md"))
-            except Exception as exc:
-                logger.warning("v2 intake report failed for %s: %s", finding_id, exc, exc_info=True)
+            # 上报 vuln-platform intake — 失败只记日志/事件 + 回写 report_status,
+            # 绝不影响任务成败 (mine_vulns 仍返回 finding 数)
+            self._report_finding_to_intake(finding_id, rec, fdir)
         return n
+
+    def _report_finding_to_intake(self, finding_id: str, rec: VulnFindingRecord,
+                                  fdir: Path) -> None:
+        """上报 finding 到 vuln-platform intake, 失败不影响任务。
+
+        report_finding_to_intake 永不 raise (HTTP 错误吞进返回 dict); 这里捕获返回
+        dict, 回写 report_status/report_case_id + 发事件 + 记日志
+        (info 成功 / warning 失败)。任何意外异常都吞掉, 不让 mine_vulns 报错。
+        """
+        try:
+            res = report_finding_to_intake(
+                project_id=self.cfg.project_id, task_id=self.task_id,
+                task_name=self.cfg.task_name, parent_task_name=self.cfg.parent_task_name,
+                parent_task_id=self.cfg.parent_task_id,
+                parent_task_type=self.cfg.parent_task_type,
+                task_origin_type=self.cfg.task_origin_type,
+                finding=rec,
+                source_root=self.source_root,
+                report_path=str(fdir / "vulnerability-report.md"),
+                taint_path_report_path=str(fdir / "taint-path-report.md"))
+        except Exception as exc:  # 双保险: report_finding_to_intake 不应 raise, 但防意外
+            logger.warning("v2 intake report failed for %s: %s", finding_id, exc, exc_info=True)
+            self.on_event("vuln_intake_report_failed", finding_id=finding_id,
+                          function=rec.function_name, error=str(exc))
+            return
+        status = str(res.get("status") or "")
+        case_id = str(res.get("case_id") or res.get("report_id") or "")
+        # 回写 vuln-scan.sqlite (供前端/重算/重试读取上报状态)
+        try:
+            self.graph_store.update_finding_report_status(
+                finding_id, status=status, case_id=case_id)
+        except Exception:
+            logger.debug("v2 update_finding_report_status failed for %s", finding_id, exc_info=True)
+        if status == "reported":
+            logger.info("v2 intake reported finding %s (case_id=%s)", finding_id, case_id)
+            self.on_event("vuln_intake_reported", finding_id=finding_id,
+                          function=rec.function_name, case_id=case_id,
+                          duplicate=bool(res.get("duplicate")))
+        else:
+            # failed / skipped / disabled — 记日志 + 事件, 不影响任务
+            err = str(res.get("error") or status or "")
+            logger.warning("v2 intake report failed for %s: status=%s error=%s url=%s",
+                           finding_id, status, err, res.get("url", ""))
+            self.on_event("vuln_intake_report_failed", finding_id=finding_id,
+                          function=rec.function_name, status=status, error=err)
 
     def _format_taint_context(self, func: FunctionRecord, tp: TaintParamInfo,
                               ctx: PathContext, taints: list[TaintRecord],
