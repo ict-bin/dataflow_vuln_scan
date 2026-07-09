@@ -81,20 +81,79 @@ def _read_body(func: dict) -> str:
         return f"// 读取失败: {e}"
 
 
+def _find_func_in_source(name: str, src_root: Path) -> tuple[str, str] | None:
+    """在源码树中搜索函数定义所在文件 (grep)。
+    返回 (rel_file, matched_name) 或 None。
+    """
+    import subprocess, re
+    # 搜索函数定义模式: name 后跟 ( 且前面有换行/分号/{/空格
+    pattern = rf'\b{re.escape(name)}\s*\('
+    try:
+        r = subprocess.run(
+            ["grep", "-rl", "--include=*.c", "--include=*.cpp", "--include=*.cc",
+             "-E", pattern, str(src_root)],
+            capture_output=True, text=True, timeout=15)
+        for line in r.stdout.strip().split("\n"):
+            if not line:
+                continue
+            try:
+                rel = str(Path(line).relative_to(src_root)).replace("\\", "/")
+                return (rel, name)
+            except ValueError:
+                continue
+    except Exception:
+        pass
+    return None
+
+
 def cmd_lookup(name: str) -> None:
+    """查函数体: db 查 → 找不到 → grep 找文件 → tree-sitter 索引入库 → 返回。"""
     func = _find_func(name)
-    if not func:
-        print(f"NOT_FOUND: 函数 '{name}' 不在数据库中。")
-        print(f"提示: 用 `v2_db index <file_path>` 索引该函数所在的源文件, 然后重新 lookup。")
+    if func:
+        body = _read_body(func)
+        print(f"function: {func['name']}")
+        print(f"file: {func['file']}")
+        print(f"lines: {func['start_line']}-{func['end_line']}")
+        print(f"signature: {func['signature']}")
+        print(f"description: {func.get('description', '')}")
+        print(f"---")
+        print(body)
         return
-    body = _read_body(func)
-    print(f"function: {func['name']}")
-    print(f"file: {func['file']}")
-    print(f"lines: {func['start_line']}-{func['end_line']}")
-    print(f"signature: {func['signature']}")
-    print(f"description: {func.get('description', '')}")
-    print(f"---")
-    print(body)
+
+    # db 没找到 → 在源码树中搜索函数定义所在文件
+    src_root = Path(_source_root())
+    found = _find_func_in_source(name, src_root)
+    if not found:
+        print(f"NOT_FOUND: 函数 '{name}' 在源码树中未找到。")
+        return
+
+    rel_file, matched_name = found
+    # 用 tree-sitter 索引该文件入 functions.db
+    db_dir = _db_dir()
+    sys.path.insert(0, os.environ.get("DVS_APP_DIR", "/opt/dataflow_vuln_scan"))
+    try:
+        from app.dataflow_v2.function_extractor import extract_file_functions
+        from app.dataflow_v2.store import DataflowStore
+        store = DataflowStore(db_dir)
+        extract_file_functions(str(src_root), rel_file, store)
+        store.close()
+    except Exception as e:
+        print(f"INDEX_ERROR: 索引文件 {rel_file} 失败: {e}")
+        return
+
+    # 再查 db
+    func = _find_func(name)
+    if func:
+        body = _read_body(func)
+        print(f"function: {func['name']}")
+        print(f"file: {func['file']}")
+        print(f"lines: {func['start_line']}-{func['end_line']}")
+        print(f"signature: {func['signature']}")
+        print(f"description: {func.get('description', '')}")
+        print(f"---")
+        print(body)
+    else:
+        print(f"NOT_FOUND: 函数 '{name}' 在文件 {rel_file} 中未找到定义 (可能不是函数)。")
 
 
 def cmd_taints(name: str) -> None:

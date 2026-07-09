@@ -66,3 +66,13 @@ python3 /opt/dataflow_vuln_scan/tools/v2_db.py <命令> <参数>
 - [传播库](sub-skills/propagations-db.md)
 - [编排库](sub-skills/orchestration-db.md)
 - [新文件建库](sub-skills/index-new-file.md)
+
+## lookup 自动索引
+
+`v2_db lookup <函数名>` 现在是全自动的：
+1. 先查 functions.db
+2. 找不到 → grep 源码树找函数定义所在文件
+3. tree-sitter 解析该文件 → 入 functions.db
+4. 返回函数体
+
+不需要手动 `v2_db index` 了 — lookup 一步到位。
