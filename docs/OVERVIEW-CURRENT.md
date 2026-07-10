@@ -23,8 +23,8 @@
 | 子模块仓库 | `https://github.com/ict-bin/dataflow_vuln_scan.git`，分支 `main`，HEAD `e8effb0`（describe `v2.0-56-ge8effb0`） |
 | 父仓库分支 | `v2.1`，远程 `https://github.com/runshine/sothoth.git` |
 | 前端 submodule | `secflow-frontend`，仓库 `https://github.com/GaiaSecHW/Chimera.git`，分支 `local` |
-| CI workflow | `.github/workflows/build-secflow-app-dataflow-vuln-scan-image.yaml`（多架构 push 到 `ghcr.io/runshine/secflow-app-dataflow-vuln-scan` 与 Docker Hub） |
-| 镜像 | `ghcr.io/runshine/secflow-app-dataflow-vuln-scan:latest`（基础镜像 `dfa-base:layer5`：Node+pi、Python3、ripgrep、`extract_func`） |
+| CI workflow | `.github/workflows/build-secflow-app-dataflow-vuln-scan-image.yaml`（多架构 push 到 `ghcr.io/gaiasechw/secflow-app-dataflow-vuln-scan` 与 Docker Hub） |
+| 镜像 | `ghcr.io/gaiasechw/secflow-app-dataflow-vuln-scan:latest`（基础镜像 `dfa-base:layer5`：Node+pi、Python3、ripgrep、`extract_func`） |
 | K8s 命名空间 | `secflow-ns` |
 | 部署目录 | `101-Chimera-deploy/02-secflow-app/`（114 系列 6 个 yaml） |
 | 前端 | `13-secflow-service/image_build/secflow-frontend`（独立 submodule，React+Vite+TS，文件在仓库根而非 `src/`） |
