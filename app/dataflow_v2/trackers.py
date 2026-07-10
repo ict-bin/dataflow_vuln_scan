@@ -79,7 +79,7 @@ def resolve_external(
     output = run_agent(
         prompt=prompt, model=acfg.model, tools=acfg.tools or cfg.workers.default_tools,
         cwd=source_root, session_file=str(fork_session), system_prompt=system_prompt,
-        cancel_event=cancel_event, run_timeout_seconds=min(cfg.agent_run_timeout_seconds, 600),
+        cancel_event=cancel_event, run_timeout_seconds=min(cfg.agent_run_timeout_seconds, 1600),
         timeout_retry_enabled=cfg.agent_timeout_retry_enabled,
         timeout_max_retries=cfg.agent_timeout_max_retries,
         pi_max_retries=cfg.pi_max_retries, pi_retry_delay=cfg.pi_retry_delay,
@@ -197,7 +197,7 @@ def resolve_indirect(
     output = run_agent(
         prompt=prompt, model=acfg.model, tools=acfg.tools or cfg.workers.default_tools,
         cwd=source_root, session_file=str(fork_session), system_prompt=system_prompt,
-        cancel_event=cancel_event, run_timeout_seconds=min(cfg.agent_run_timeout_seconds, 600),
+        cancel_event=cancel_event, run_timeout_seconds=min(cfg.agent_run_timeout_seconds, 1600),
         timeout_retry_enabled=cfg.agent_timeout_retry_enabled,
         timeout_max_retries=cfg.agent_timeout_max_retries,
         pi_max_retries=cfg.pi_max_retries, pi_retry_delay=cfg.pi_retry_delay,

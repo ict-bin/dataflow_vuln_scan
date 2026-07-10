@@ -371,13 +371,14 @@ class DfsOrchestrator:
                      taint_names: list[str]) -> list[list[ChainStep]]:
         if not props:
             return []
-        # 只跟入 source_taint 在 LLM 报的 taints[] 里的 propagation
-        # taints[] 包含入口污点 + 本地派生污点 (如 a=x 的 a)
-        # 不含 callee 返回值 (如 a=A(x) 的 a — LLM 不确定是否被污染)
-        # 返回值派生的 propagation 在 return_taints 重分析轮自然拾起
+        # 只跟入 source 有"已确认污点"支撑的 propagation (防爆炸 + 不跟未确认的 callee 返回值派生)
+        # - callee 传播: source_taint 必须 ∈ taint_set (严格, 防 callee 返回值未确认就跟入)
+        # - escape 传播 (is_external+escape_kind): 语义匹配 — carrier 整体逃逸或 carrier->field
+        #   字段访问都算, 只要背后有已确认污点 (carrier 持有 taints[] 字段, 或 field ∈ taint_set),
+        #   不强求 LLM 把 source_taint 改写成 taints[] 成员 (carrier/字段访问是 LLM 合理表达)
         taint_set = set(taint_names)
         props_sorted = sorted(
-            [p for p in props if p.source_taint_name in taint_set],
+            [p for p in props if _prop_backed_by_taint(p, taint_set)],
             key=lambda p: p.call_line)
         if not props_sorted:
             return []
@@ -470,6 +471,35 @@ def _derive_positions(actual_args: list[str], target_taint_name: str,
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
+
+def _prop_backed_by_taint(prop: PropagationRecord, taint_set: set) -> bool:
+    """propagation 的 source 是否有已确认污点支撑。
+
+    callee 传播: source_taint 必须 ∈ taint_set (严格, 防 callee 返回值未确认就跟入)。
+    escape 传播 (is_external + escape_kind): 语义匹配, 接受 carrier 整体逃逸 /
+      carrier->field 字段访问, 只要背后有已确认污点 (carrier 持有 taints[] 字段, 或
+      field ∈ taint_set)。非 blind 放行 — 仍要求确认污点支撑, 只是匹配更准。
+    """
+    src = prop.source_taint_name
+    if src in taint_set:
+        return True
+    if not (prop.is_external and prop.escape_kind):
+        return False
+    carrier = prop.carrier
+    # carrier 整体逃逸: src == carrier, carrier 是否持有已确认污点字段
+    if carrier and src == carrier:
+        for t in taint_set:
+            if t.startswith(carrier + "->") or t.startswith(carrier + "."):
+                return True
+        return False
+    # 字段访问路径: src == carrier->field / carrier.field, field 是否已确认污点
+    if carrier and (src.startswith(carrier + "->") or src.startswith(carrier + ".")):
+        field = src.rsplit("->", 1)[-1].rsplit(".", 1)[-1].strip("()")
+        if field and len(field) >= 2 and field in taint_set:
+            return True
+    return False
+
+
 def _path_id(func_id: str, taint_sig: str, depth: str) -> str:
     return hashlib.sha1(f"{func_id}\x1f{taint_sig}\x1f{depth}".encode()).hexdigest()[:16]
 

@@ -99,7 +99,10 @@ target_file —— 这些由服务端 clang/脚本从 AST 精确获取 (行号/�
 - `return` 走 `return_taints`，不在此报
 
 ### 字段填法
-- `source_taint`  **被载体携带出去的那个已确认污点变量名**——必须是你已在 `taints[]` 里列过的成员（真正被污染的数据，如 `input`/`domain`），**不是载体本身**（载体填 `carrier`）。编排器只跟入 source 是已确认污点的 propagation；若把 source_taint 填成载体名（不在 taints[]），该逃逸会被过滤掉、不被跟入。
+- `source_taint`  **被载体携带出去的那个已确认污点**——优先填 `taints[]` 成员 (如 `input`/`domain`)。
+  也接受载体整体逃逸 (填 carrier 名, 如 `request`——只要该载体持有 `taints[]` 里的字段) 或
+  字段访问路径 (如 `request->qtype`——只要 field `qtype` 在 `taints[]`)。编排器对 escape 做语义匹配,
+  背后有已确认污点即可跟入。
 - `carrier`        承载该污点逃出的对象/变量名（常是 alloc/new 产物，或携带污点字段的 struct，如 `p`/`request`）
 - `escape_via`     实现逃逸的调用名（是宏/外部库也照填，仅作记录，如 `list_add_tail`）
 - `target_taint`   逃逸到达的外部容器/对象符号（如 `head->q`/`server.request_list`），供 tracker 上下文
