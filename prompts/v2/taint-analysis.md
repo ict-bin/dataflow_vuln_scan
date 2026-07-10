@@ -99,10 +99,11 @@ target_file —— 这些由服务端 clang/脚本从 AST 精确获取 (行号/�
 - `return` 走 `return_taints`，不在此报
 
 ### 字段填法
-- `carrier`        承载污点逃出的变量名（常是 alloc/new 产物）
-- `escape_via`     实现逃逸的调用名（是宏/外部库也照填，仅作记录）
-- `target_taint`   载体名或一句逃逸目标的简述（仅供去重/展示，系统不据此字符串搜索）
-- `description`    用自然语言完整描述逃逸：污点污染了载体的什么、经什么调用、逃到了哪类外部可达对象（入参/全局/this）
+- `source_taint`  **被载体携带出去的那个已确认污点变量名**——必须是你已在 `taints[]` 里列过的成员（真正被污染的数据，如 `input`/`domain`），**不是载体本身**（载体填 `carrier`）。编排器只跟入 source 是已确认污点的 propagation；若把 source_taint 填成载体名（不在 taints[]），该逃逸会被过滤掉、不被跟入。
+- `carrier`        承载该污点逃出的对象/变量名（常是 alloc/new 产物，或携带污点字段的 struct，如 `p`/`request`）
+- `escape_via`     实现逃逸的调用名（是宏/外部库也照填，仅作记录，如 `list_add_tail`）
+- `target_taint`   逃逸到达的外部容器/对象符号（如 `head->q`/`server.request_list`），供 tracker 上下文
+- `description`    用自然语言完整描述逃逸：哪个污点(source_taint)写入了载体的什么字段、经什么调用(escape_via)、逃到了哪个外部可达对象(target_taint)
 
 ### 堆载体 (carrier) 识别
 凡是分配堆/构造对象的调用的返回值，若承载污点字段并随后逃逸，`carrier` 填该变量名。无论它叫 `zalloc`/`malloc`/`new`/`make_unique`/自定义 alloc，你据语义认，不要靠固定函数名清单。
@@ -111,9 +112,14 @@ target_file —— 这些由服务端 clang/脚本从 AST 精确获取 (行号/�
 凡是把对象挂入某集合（链表/哈希/队列/vector/map/自定义队列/裸指针挂接），且容器经入参/全局/this 可达，报 `container` 逃逸。`escape_via` 填该插入调用名（是宏/外部库也照填）。无论叫 `list_add`/`hash_add`/`push_back`/自定义 `enqueue`/裸指针挂接，你据语义认。
 
 ### 通用示例（理解模式，不要套具体符号）
-- `p = malloc(...); p->data = input; queue_push(p, &head->q);` → container, carrier=p, escape_via=queue_push, description: input 污染 p->data, p 经 queue_push 挂入入参 head 的 q 队列
-- `ctx->out = tainted;` → field_alias, carrier=ctx, description: tainted 经入参 ctx 的 out 字段传出
-- `g_cache = tainted;` → global, carrier=“”, description: tainted 写入全局 g_cache
+- `p = malloc(...); p->data = input; queue_push(p, &head->q);` → source_taint=input, carrier=p, escape_via=queue_push, target_taint=head->q, escape_kind=container
+  (input 是已在 taints[] 的污点；它污染 p->data；p 经 queue_push 挂入入参 head 的 q 队列)
+- `ctx->out = tainted;` → source_taint=tainted, carrier=ctx, target_taint=ctx->out, escape_kind=field_alias
+  (tainted 是已确认污点；经入参 ctx 的 out 字段传出)
+- `g_cache = tainted;` → source_taint=tainted, carrier="", target_taint=g_cache, escape_kind=global
+  (tainted 写入全局 g_cache)
+
+> 关键：`source_taint` 永远是“那个被污染且被带走的变量”（必须在 taints[] 里），`carrier` 是“携带它的容器/struct”。两者不要混。
 
 ### 判定要点
 - 只当逃逸目标“经入参/全局/this 可达”才报；挂入纯局部容器不报（那个容器若再逃逸，在它所在函数处理）。
