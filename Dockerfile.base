@@ -1,0 +1,69 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# dataflow_vuln_scan — 基础镜像 (稳定层, 只在 base 变更时构建)
+#
+# 含: ubuntu24.04 + 系统工具(含调试) + Node22 + pi-coding-agent + python3 venv + patch
+# 不含: requirements.txt 的 pip 安装、项目代码 (那些在 app Dockerfile, 随代码增量构建)
+#
+# 构建: docker build -f Dockerfile.base -t ghcr.io/gaiasechw/secflow-app-dataflow-vuln-scan-base:latest .
+# ══════════════════════════════════════════════════════════════════════════════
+
+FROM m.daocloud.io/docker.io/library/ubuntu:24.04
+
+ARG PI_NPM_PACKAGE=@earendil-works/pi-coding-agent
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+ENV TZ=Asia/Shanghai
+ENV VIRTUAL_ENV=/opt/venv
+ENV PATH="/opt/venv/bin:${PATH}"
+ENV PI_CODING_AGENT_DIR=/root/.pi/agent
+
+# ═══ APT mirror + 系统工具 (含完整调试能力) ════════════════════════════════
+RUN sed -i \
+    -e 's|http://archive.ubuntu.com/ubuntu/|http://mirrors.aliyun.com/ubuntu/|g' \
+    -e 's|http://security.ubuntu.com/ubuntu/|http://mirrors.aliyun.com/ubuntu/|g' \
+    /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null \
+    || sed -i \
+    -e 's|http://archive.ubuntu.com/ubuntu/|http://mirrors.aliyun.com/ubuntu/|g' \
+    -e 's|http://security.ubuntu.com/ubuntu/|http://mirrors.aliyun.com/ubuntu/|g' \
+    /etc/apt/sources.list 2>/dev/null || true
+
+RUN apt-get update && apt-get install -y \
+        bash ca-certificates curl git gnupg ripgrep tini tzdata wget zip unzip xz-utils \
+        jq file tree less vim-tiny findutils coreutils \
+        procps psmisc iproute2 net-tools lsof strace ltrace htop netcat-openbsd \
+        iputils-ping dnsutils \
+        build-essential make cmake pkg-config \
+        clang clang-tools llvm gdb cscope universal-ctags python3-dev python3-pip python3-venv \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -snf /usr/share/zoneinfo/${TZ} /etc/localtime \
+    && echo "${TZ}" > /etc/timezone
+
+# ═══ Node.js 22 + pi-coding-agent (npmmirror 加速) ═══════════════════════════
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/* \
+    && npm install -g --registry=https://registry.npmmirror.com "${PI_NPM_PACKAGE}" \
+    && command -v pi && pi --version 2>/dev/null || command -v pi \
+    && mkdir -p "${PI_CODING_AGENT_DIR}/bin" "${PI_CODING_AGENT_DIR}/skills" \
+    && ln -sf "$(command -v rg)" "${PI_CODING_AGENT_DIR}/bin/rg"
+
+# ═══ Python 3 venv ════════════════════════════════════════════════════════
+RUN python3 -m venv "${VIRTUAL_ENV}" \
+    && ln -sf "$(which rg)" "${PI_CODING_AGENT_DIR}/bin/rg" \
+    && for _cmd in rg grep find head tail cat sed awk cut tr sort uniq wc xargs \
+        ls stat file basename dirname readlink realpath jq python3; \
+    do _t="$(command -v "$_cmd" 2>/dev/null)" && [ -x "$_t" ] && \
+        ln -sf "$_t" "${PI_CODING_AGENT_DIR}/bin/$_cmd" 2>/dev/null || true; done
+
+# ═══ pi agent openai-completions patch (maxTokens fallback, 非致命) ════════
+RUN JS=$(npm root -g)/${PI_NPM_PACKAGE}/node_modules/@earendil-works/pi-ai/dist/api/openai-completions.js \
+    && if [ -f "$JS" ]; then \
+        sed -i 's/if (options?.maxTokens) {/const maxTokens = options?.maxTokens ?? (model.maxTokens > 0 ? model.maxTokens : undefined);\n    if (maxTokens !== undefined) {/' "$JS" \
+        && sed -i 's/params.max_tokens = options.maxTokens;/params.max_tokens = maxTokens;/' "$JS" \
+        && sed -i 's/params.max_completion_tokens = options.maxTokens;/params.max_completion_tokens = maxTokens;/' "$JS" \
+        && echo 'patched openai-completions.js'; \
+    else echo "::warning::$JS not found, skip patch"; fi
+
+# ═══ 默认工作目录 (app 层会 COPY 代码到此) ════════════════════════════════
+WORKDIR /opt/dataflow_vuln_scan
