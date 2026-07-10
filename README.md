@@ -357,3 +357,5 @@ python3 cli.py --config config.example.json \
 - **不使用 pi grep 工具**：pi 的 grep 工具在无外网服务器上运行时会尝试下载 ripgrep，改用 bash grep
 - **Docker 不跟随宿主机符号链接**：挂载路径须使用 `readlink -f` 解析真实路径
 - **callee 并行安全**：asyncio 单线程，`analyzed` set 无竞争，需在 gather 前预注册防重复
+
+
