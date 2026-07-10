@@ -1,16 +1,50 @@
-ARG SECFLOW_PI_AGENT_RUNTIME_IMAGE=ghcr.io/runshine/secflow-base-pi-agent-runtime:20260602
-FROM ${SECFLOW_PI_AGENT_RUNTIME_IMAGE}
+# ══════════════════════════════════════════════════════════════════════════════
+# dataflow_vuln_scan — 完全自包含 Dockerfile
+#
+# 不依赖任何私有基础镜像: FROM 公开 python:3.11-slim, 内联 base-python311 +
+# base-pi-agent-runtime 两层 (系统工具 + Node22 + pi-coding-agent), 再接 app 层。
+#
+# 构建: docker build -t dataflow_vuln_scan .
+# ══════════════════════════════════════════════════════════════════════════════
 
 ARG SECFLOW_BUILD_VERSION=""
-ENV PYTHONUNBUFFERED=1
+# 用完整版 (非 slim): 基于 debian bookworm 全量, 自带 procps/util-linux 等,
+# kill/ps/top 等调试工具从基础层即可用, 便于在 Pod 内定位问题
+FROM public.ecr.aws/docker/library/python:3.11
 
-# 覆盖升级 pi agent 到 @earendil-works/pi-coding-agent (新版, compaction_end.result 为 dict)
-# 基础镜像预装的是 @mariozechner/pi-coding-agent@0.73.1 (停更, compaction 格式不兼容)
-RUN npm uninstall -g @mariozechner/pi-coding-agent 2>/dev/null || true \
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    TZ=Asia/Shanghai \
+    VIRTUAL_ENV=/opt/venv \
+    PATH="/opt/venv/bin:${PATH}" \
+    PI_CODING_AGENT_DIR=/root/.pi/agent
+
+WORKDIR /app
+
+# ═══ Layer 1: 系统工具 (原 base-python311-runtime, 增强调试能力) ════════════
+# procps(ps/top) psmisc(killall) util-linux(kill) iproute2(ip) 从首层就装上,
+# 保证基础层即可 kill/ps/strace 定位问题, 不依赖后续层
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        bash ca-certificates curl git ripgrep tini tzdata gnupg \
+        procps psmisc util-linux iproute2 strace ltrace \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -snf /usr/share/zoneinfo/${TZ} /etc/localtime \
+    && echo "${TZ}" > /etc/timezone \
+    && python -m venv "${VIRTUAL_ENV}"
+
+# ═══ Layer 2: Node.js 22 + pi-coding-agent (原 base-pi-agent-runtime, 内联) ═══
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get update && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/* \
     && npm install -g @earendil-works/pi-coding-agent@latest \
-    && command -v pi && pi --version 2>/dev/null || command -v pi
+    && command -v pi && pi --version 2>/dev/null || command -v pi \
+    && mkdir -p "${PI_CODING_AGENT_DIR}/bin" "${PI_CODING_AGENT_DIR}/skills" \
+    && ln -sf "$(command -v rg)" "${PI_CODING_AGENT_DIR}/bin/rg"
 
-# Patch: openai-completions buildParams 不 fallback 到 model.maxTokens → MiniMax API 默认 max_tokens 太低 → JSON 截断
+# ═══ Layer 3: openai-completions patch (maxTokens fallback, 防 MiniMax 默认 max_tokens 太低 → JSON 截断) ══
 RUN JS=$(npm root -g)/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/dist/api/openai-completions.js \
     && sed -i 's/if (options?.maxTokens) {/const maxTokens = options?.maxTokens ?? (model.maxTokens > 0 ? model.maxTokens : undefined);\n    if (maxTokens !== undefined) {/' $JS \
     && sed -i 's/params.max_tokens = options.maxTokens;/params.max_tokens = maxTokens;/' $JS \
@@ -18,39 +52,16 @@ RUN JS=$(npm root -g)/@earendil-works/pi-coding-agent/node_modules/@earendil-wor
     && echo 'patched openai-completions.js: maxTokens fallback to model.maxTokens' \
     && grep -n 'maxTokens' $JS | head -5
 
+# ═══ Layer 4: 构建/调试工具 (clang/gdb/tree-sitter 编译依赖等) ════════════════
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        zip \
-        unzip \
-        xz-utils \
-        file \
-        jq \
-        tree \
-        less \
-        vim-tiny \
-        findutils \
-        coreutils \
-        procps \
-        psmisc \
-        lsof \
-        net-tools \
-        iproute2 \
-        iputils-ping \
-        dnsutils \
-        build-essential \
-        make \
-        cmake \
-        pkg-config \
-        clang \
-        clang-tools \
-        llvm \
-        gdb \
-        cscope \
-        universal-ctags \
-        python3-dev \
+        zip unzip xz-utils file jq tree less vim-tiny \
+        findutils coreutils procps psmisc lsof net-tools iproute2 \
+        iputils-ping dnsutils build-essential make cmake pkg-config \
+        clang clang-tools llvm gdb cscope universal-ctags python3-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# ═══ 项目代码 ═════════════════════════════════════════════════════════════════
+# ═══ 项目代码 ═══════════════════════════════════════════════════════════════
 WORKDIR /opt/dataflow_vuln_scan
 COPY requirements.txt ./
 # 容器运行时 PATH 优先 /opt/venv/bin，必须确保 pip 安装到同一个 Python 环境
@@ -78,12 +89,10 @@ RUN cp tools/extract_func.py /usr/local/bin/extract_func \
 # ═══ pi 配置目录 ══════════════════════════════════════════════════════════════
 # pi 的全局配置目录，models.json 放这里才能被 pi 识别
 # 容器启动脚本会将 /data/config/models.json 链接到此处
-ENV PI_CODING_AGENT_DIR=/root/.pi/agent
 COPY config/settings.json /root/.pi/agent/settings.json
-RUN mkdir -p /root/.pi/agent/bin \
+RUN mkdir -p /root/.pi/agent/skills \
     # 将 write-dataflow skill 安装到 pi 全局发现目录
     # ~/.pi/agent/skills/ 是 pi 全局 skill 目录，任何 cwd 都能发现
-    && mkdir -p /root/.pi/agent/skills \
     && ln -sf /opt/dataflow_vuln_scan/skills/write-dataflow /root/.pi/agent/skills/write-dataflow \
     && ln -sf /opt/dataflow_vuln_scan/skills/write-taint-flow /root/.pi/agent/skills/write-taint-flow \
     && ln -sf /opt/dataflow_vuln_scan/skills/write-taint-graph /root/.pi/agent/skills/write-taint-graph \
