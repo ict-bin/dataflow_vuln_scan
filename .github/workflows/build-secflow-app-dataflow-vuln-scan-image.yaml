@@ -1,10 +1,36 @@
 name: build-secflow-app-dataflow-vuln-scan-image
 
+# 独立构建 (本仓即源码, 不依赖 sothoth 主仓 submodule)
+# 触发: push main / 手动
+# 产物: ghcr.io/gaiasecw/secflow-app-dataflow-vuln-scan:{latest, <date-sha>} (amd64+arm64 合并 manifest)
+#
+# 前置 Secret (仓库 Settings → Secrets and variables → Actions):
+#   PRIVATE_REPO_PAT  — 经典 PAT, 需同时具备:
+#                        read:packages  (拉私有 base: ghcr.io/runshine/secflow-base-pi-agent-runtime)
+#                        write:packages (推本仓镜像到 ghcr.io/gaiasecw/*)
+#                        PAT 持有者须对 runshine 的 base package 有读取权限
+#                      若 base 已镜像到 gaiasecw 命名空间, 可改用 GITHUB_TOKEN (见 GHCR_LOGIN 注释)
+#   DOCKERHUB_USERNAME / DOCKERHUB_TOKEN — 可选, 仅在需要双推 Docker Hub 时配置; 未配置则跳过
+
 on:
   push:
     branches:
       - main
+    paths-ignore:
+      - "README.md"
+      - "docs/**"
+      - "USAGE.md"
   workflow_dispatch:
+    inputs:
+      base_image:
+        description: "基础镜像 (默认 runshine base; 若已镜像到 gaiasecw 可覆盖)"
+        required: false
+        default: "ghcr.io/runshine/secflow-base-pi-agent-runtime:20260602"
+
+env:
+  # base 镜像可在此一次性切换 (如镜像到 gaiasecw 后改 ghcr.io/gaiasecw/secflow-base-pi-agent-runtime:20260602)
+  BASE_IMAGE: ${{ github.event.inputs.base_image || 'ghcr.io/runshine/secflow-base-pi-agent-runtime:20260602' }}
+  IMAGE_NAME: ghcr.io/gaiasecw/secflow-app-dataflow-vuln-scan
 
 jobs:
   prepare:
@@ -37,21 +63,34 @@ jobs:
         uses: actions/checkout@v6
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
-      - name: Login to Docker Hub
-        run: echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
-      - name: Login to GitHub Container Registry
-        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.repository_owner }}" --password-stdin
+      - name: GHCR login (PAT, 可拉私有 base + 推本仓镜像)
+        # PRIVATE_REPO_PAT 需 read:packages(runshine base) + write:packages(gaiasecw)
+        # 若 base 已迁到 gaiasecw 且公开/本仓可见, 可改用: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.repository_owner }} --password-stdin
+        run: |
+          if [ -n "${{ secrets.PRIVATE_REPO_PAT }}" ]; then
+            echo "${{ secrets.PRIVATE_REPO_PAT }}" | docker login ghcr.io -u ${{ github.repository_owner }} --password-stdin
+          else
+            echo "::warning::PRIVATE_REPO_PAT 未配置, 改用 GITHUB_TOKEN (仅当 base 在本命名空间可见时能拉取)"
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.repository_owner }} --password-stdin
+          fi
+      - name: Docker Hub login (可选, 未配置则跳过)
+        run: |
+          if [ -n "${{ secrets.DOCKERHUB_USERNAME }}" ] && [ -n "${{ secrets.DOCKERHUB_TOKEN }}" ]; then
+            echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
+          else
+            echo "::notice::Docker Hub 凭据未配置, 跳过 Docker Hub 推送"
+          fi
       - name: Build and push amd64 image
         run: |
           docker buildx build \
             --platform linux/amd64 \
             --build-arg SECFLOW_BUILD_VERSION=${{ needs.prepare.outputs.date_tag }} \
-            --build-arg SECFLOW_PI_AGENT_RUNTIME_IMAGE=ghcr.io/runshine/secflow-base-pi-agent-runtime:20260602 \
+            --build-arg SECFLOW_PI_AGENT_RUNTIME_IMAGE=${{ env.BASE_IMAGE }} \
             --cache-from type=gha,scope=secflow-app-dataflow-vuln-scan-amd64 \
             --cache-to type=gha,scope=secflow-app-dataflow-vuln-scan-amd64,mode=max \
             --file Dockerfile \
-            --tag ghcr.io/gaiasechw/secflow-app-dataflow-vuln-scan:amd64-latest \
-            --tag ghcr.io/gaiasechw/secflow-app-dataflow-vuln-scan:amd64-${{ needs.prepare.outputs.date_tag }} \
+            --tag ${{ env.IMAGE_NAME }}:amd64-latest \
+            --tag ${{ env.IMAGE_NAME }}:amd64-${{ needs.prepare.outputs.date_tag }} \
             --push \
             .
 
@@ -66,21 +105,32 @@ jobs:
         uses: actions/checkout@v6
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
-      - name: Login to Docker Hub
-        run: echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
-      - name: Login to GitHub Container Registry
-        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.repository_owner }}" --password-stdin
+      - name: GHCR login (PAT, 可拉私有 base + 推本仓镜像)
+        run: |
+          if [ -n "${{ secrets.PRIVATE_REPO_PAT }}" ]; then
+            echo "${{ secrets.PRIVATE_REPO_PAT }}" | docker login ghcr.io -u ${{ github.repository_owner }} --password-stdin
+          else
+            echo "::warning::PRIVATE_REPO_PAT 未配置, 改用 GITHUB_TOKEN (仅当 base 在本命名空间可见时能拉取)"
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.repository_owner }} --password-stdin
+          fi
+      - name: Docker Hub login (可选, 未配置则跳过)
+        run: |
+          if [ -n "${{ secrets.DOCKERHUB_USERNAME }}" ] && [ -n "${{ secrets.DOCKERHUB_TOKEN }}" ]; then
+            echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
+          else
+            echo "::notice::Docker Hub 凭据未配置, 跳过 Docker Hub 推送"
+          fi
       - name: Build and push arm64 image
         run: |
           docker buildx build \
             --platform linux/arm64 \
             --build-arg SECFLOW_BUILD_VERSION=${{ needs.prepare.outputs.date_tag }} \
-            --build-arg SECFLOW_PI_AGENT_RUNTIME_IMAGE=ghcr.io/runshine/secflow-base-pi-agent-runtime:20260602 \
+            --build-arg SECFLOW_PI_AGENT_RUNTIME_IMAGE=${{ env.BASE_IMAGE }} \
             --cache-from type=gha,scope=secflow-app-dataflow-vuln-scan-arm64 \
             --cache-to type=gha,scope=secflow-app-dataflow-vuln-scan-arm64,mode=max \
             --file Dockerfile \
-            --tag ghcr.io/gaiasechw/secflow-app-dataflow-vuln-scan:arm64-latest \
-            --tag ghcr.io/gaiasechw/secflow-app-dataflow-vuln-scan:arm64-${{ needs.prepare.outputs.date_tag }} \
+            --tag ${{ env.IMAGE_NAME }}:arm64-latest \
+            --tag ${{ env.IMAGE_NAME }}:arm64-${{ needs.prepare.outputs.date_tag }} \
             --push \
             .
 
@@ -93,19 +143,22 @@ jobs:
     steps:
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
-      - name: Login to Docker Hub
-        run: echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
-      - name: Login to GitHub Container Registry
-        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.repository_owner }}" --password-stdin
+      - name: GHCR login
+        run: |
+          if [ -n "${{ secrets.PRIVATE_REPO_PAT }}" ]; then
+            echo "${{ secrets.PRIVATE_REPO_PAT }}" | docker login ghcr.io -u ${{ github.repository_owner }} --password-stdin
+          else
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.repository_owner }} --password-stdin
+          fi
       - name: Create and push multi-arch manifest (latest)
         run: |
           docker buildx imagetools create \
-            --tag ghcr.io/gaiasechw/secflow-app-dataflow-vuln-scan:latest \
-            ghcr.io/gaiasechw/secflow-app-dataflow-vuln-scan:amd64-latest \
-            ghcr.io/gaiasechw/secflow-app-dataflow-vuln-scan:arm64-latest
+            --tag ${{ env.IMAGE_NAME }}:latest \
+            ${{ env.IMAGE_NAME }}:amd64-latest \
+            ${{ env.IMAGE_NAME }}:arm64-latest
       - name: Create and push multi-arch manifest (date tag)
         run: |
           docker buildx imagetools create \
-            --tag ghcr.io/gaiasechw/secflow-app-dataflow-vuln-scan:${{ needs.prepare.outputs.date_tag }} \
-            ghcr.io/gaiasechw/secflow-app-dataflow-vuln-scan:amd64-${{ needs.prepare.outputs.date_tag }} \
-            ghcr.io/gaiasechw/secflow-app-dataflow-vuln-scan:arm64-${{ needs.prepare.outputs.date_tag }}
+            --tag ${{ env.IMAGE_NAME }}:${{ needs.prepare.outputs.date_tag }} \
+            ${{ env.IMAGE_NAME }}:amd64-${{ needs.prepare.outputs.date_tag }} \
+            ${{ env.IMAGE_NAME }}:arm64-${{ needs.prepare.outputs.date_tag }}
