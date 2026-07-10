@@ -2,9 +2,8 @@ name: build-secflow-app-dataflow-vuln-scan-image
 
 # 独立构建 (本仓即源码, 不依赖 sothoth 主仓 submodule, 不依赖任何私有基础镜像)
 # Dockerfile 自包含: FROM 公开 python:3.11 (完整版, 含 procps/util-linux 等调试工具)
-# 产物: ghcr.io/gaiasecw/secflow-app-dataflow-vuln-scan:{latest, <date-sha>} (amd64+arm64 合并 manifest)
-#
-# 前置 Secret (可选, 仅双推 Docker Hub 时配置): DOCKERHUB_USERNAME / DOCKERHUB_TOKEN
+# 触发: push main / 手动
+# 产物: ghcr.io/gaiasechw/secflow-app-dataflow-vuln-scan:{latest, <date-sha>} (amd64+arm64 合并 manifest)
 # GHCR 推送用内置 GITHUB_TOKEN (packages:write), 无需额外 PAT
 
 on:
@@ -18,7 +17,7 @@ on:
   workflow_dispatch:
 
 env:
-  IMAGE_NAME: ghcr.io/gaiasecw/secflow-app-dataflow-vuln-scan
+  IMAGE_NAME: ghcr.io/gaiasechw/secflow-app-dataflow-vuln-scan
 
 jobs:
   prepare:
@@ -54,13 +53,6 @@ jobs:
         uses: docker/setup-buildx-action@v3
       - name: Login to GitHub Container Registry
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.repository_owner }} --password-stdin
-      - name: Docker Hub login (可选, 未配置则跳过)
-        run: |
-          if [ -n "${{ secrets.DOCKERHUB_USERNAME }}" ] && [ -n "${{ secrets.DOCKERHUB_TOKEN }}" ]; then
-            echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
-          else
-            echo "::notice::Docker Hub 凭据未配置, 跳过 Docker Hub 推送"
-          fi
       - name: Build and push amd64 image
         run: |
           docker buildx build \
@@ -89,13 +81,6 @@ jobs:
         uses: docker/setup-buildx-action@v3
       - name: Login to GitHub Container Registry
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.repository_owner }} --password-stdin
-      - name: Docker Hub login (可选, 未配置则跳过)
-        run: |
-          if [ -n "${{ secrets.DOCKERHUB_USERNAME }}" ] && [ -n "${{ secrets.DOCKERHUB_TOKEN }}" ]; then
-            echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
-          else
-            echo "::notice::Docker Hub 凭据未配置, 跳过 Docker Hub 推送"
-          fi
       - name: Build and push arm64 image
         run: |
           docker buildx build \
