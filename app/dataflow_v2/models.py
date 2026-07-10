@@ -129,6 +129,9 @@ class PropagationRecord:
     is_indirect_call: bool = False     # 函数指针/回调/dispatch 间接调用 → 触发 function_pointer tracker
     is_external_callee: bool = False   # callee 定义不在源码树 → 记录传播但不跟入, 不走 tracker
     dispatch_kind: str = ""            # 间接调用类型 (function_pointer_field/callback/vtable/dispatch_map)
+    escape_kind: str = ""             # 外部逃逸种类 (container|global|field_alias), LLM 判定, 脚本不覆盖
+    carrier: str = ""                 # 逃逸载体变量名 (常是 alloc/new 产物, LLM 报, 供 tracker 上下文)
+    escape_via: str = ""             # 实现逃逸的调用名 (如 list_add_tail, LLM 报, 仅记录/观测)
     # clang 标注 (analyze_function 填, 编排器路径分叉消费):
     callsite_validated: bool = False    # clang 确认该 call_line 确有对 target_function 的 CallExpr
     branch_group_id: str = ""          # 调用点所属分支组 (if/switch); 同组不同 arm = 互斥
@@ -155,6 +158,9 @@ class PropagationRecord:
             "condition": self.condition, "is_external": 1 if self.is_external else 0,
             "is_indirect_call": 1 if self.is_indirect_call else 0, "dispatch_kind": self.dispatch_kind,
             "is_external_callee": 1 if self.is_external_callee else 0,
+            "escape_kind": self.escape_kind,
+            "carrier": self.carrier,
+            "escape_via": self.escape_via,
             "callsite_validated": 1 if self.callsite_validated else 0,
             "branch_group_id": self.branch_group_id, "branch_arm_id": self.branch_arm_id,
             "branch_path": json.dumps(self.branch_path, ensure_ascii=False),

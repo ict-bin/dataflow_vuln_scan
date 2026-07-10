@@ -47,6 +47,16 @@
       ],
       "description": "msg 透传给 C 的 pkt 参数",
       "is_external": false
+    },
+    {
+      "source_taint": "name",
+      "target_taint": "p",
+      "target_function": "queue_push",
+      "is_external": true,
+      "escape_kind": "container",
+      "carrier": "p",
+      "escape_via": "queue_push",
+      "description": "name 污染 p->data, p 经 queue_push 挂入入参 head 的队列"
     }
   ],
   "return_taints": []
@@ -74,8 +84,41 @@ target_file —— 这些由服务端 clang/脚本从 AST 精确获取 (行号/�
   包括上游传入的前置校验中**在本函数内仍然生效**的部分, 以及本函数新增加的校验。
 - `description`：传播语义 + callee 行为事实 (如"C 返回 PyBytes_AsString 借用指针, 非 xmlMalloc"),
   供下游漏洞挖掘识别跨函数漏洞 (如 double-free)。
-- `is_external`：仅当污点被写入**非本函数入参、且非本函数内定义的变量**时为 true（全局/静态变量, 如 `g_msg = msg`）。通过局部变量/入参指针访问的 struct 字段不是外部变量。污点作为参数传给 callee 时永远为 false。不要替 callee 报告其内部行为。
+- `is_external`：污点流出本函数作用域为 true。不只“写全局变量”一种，还包括：污点写入某个载体（常是堆分配）后该载体被挂入外部可达容器、或经入参指针字段传出。详见下节「逃逸传播」。污点作为参数传给本函数调用的 callee 且 callee 定义可达时为 false。
 - **函数指针/回调间接调用**：若污点经由函数指针调用传出（如 `ctxt->sax->processingInstruction(...)`、`(*fp)(msg)`、`ptr->handler(msg)`），`target_function` 填被调用的**函数指针表达式**（如 `ctxt->sax->processingInstruction`），`is_external=false`。服务端 clang 会自动判定为间接调用 (is_indirect_call) 并触发 function_pointer tracker 搜注册点解析真实处理函数。**不要把函数指针调用标为 is_external**。
+
+## 逃逸传播 (escape) — 必须识别
+
+当污点流出本函数作用域，报一条 `is_external=true` 的 propagation，并填 `escape_kind`。
+靠你理解代码语义判定，不依赖函数名硬匹配。
+
+### 逃逸种类 escape_kind
+- `container`   污点写入某对象（常是堆分配载体），该对象被挂入一个外部可达容器（链表/哈希/队列/vector/map/裸指针挂接）
+- `global`       污点写入全局/静态变量
+- `field_alias`  污点经入参指针的字段传出（如 `ctx->out = tainted`）
+- `return` 走 `return_taints`，不在此报
+
+### 字段填法
+- `carrier`        承载污点逃出的变量名（常是 alloc/new 产物）
+- `escape_via`     实现逃逸的调用名（是宏/外部库也照填，仅作记录）
+- `target_taint`   载体名或一句逃逸目标的简述（仅供去重/展示，系统不据此字符串搜索）
+- `description`    用自然语言完整描述逃逸：污点污染了载体的什么、经什么调用、逃到了哪类外部可达对象（入参/全局/this）
+
+### 堆载体 (carrier) 识别
+凡是分配堆/构造对象的调用的返回值，若承载污点字段并随后逃逸，`carrier` 填该变量名。无论它叫 `zalloc`/`malloc`/`new`/`make_unique`/自定义 alloc，你据语义认，不要靠固定函数名清单。
+
+### 容器插入识别
+凡是把对象挂入某集合（链表/哈希/队列/vector/map/自定义队列/裸指针挂接），且容器经入参/全局/this 可达，报 `container` 逃逸。`escape_via` 填该插入调用名（是宏/外部库也照填）。无论叫 `list_add`/`hash_add`/`push_back`/自定义 `enqueue`/裸指针挂接，你据语义认。
+
+### 通用示例（理解模式，不要套具体符号）
+- `p = malloc(...); p->data = input; queue_push(p, &head->q);` → container, carrier=p, escape_via=queue_push, description: input 污染 p->data, p 经 queue_push 挂入入参 head 的 q 队列
+- `ctx->out = tainted;` → field_alias, carrier=ctx, description: tainted 经入参 ctx 的 out 字段传出
+- `g_cache = tainted;` → global, carrier=“”, description: tainted 写入全局 g_cache
+
+### 判定要点
+- 只当逃逸目标“经入参/全局/this 可达”才报；挂入纯局部容器不报（那个容器若再逃逸，在它所在函数处理）。
+- `return` 语句返回污点走 `return_taints`，不重复报 escape。
+- 系统会另起 tracker 会话用 v2_db 按逃逸语义查找下游读者，你只需把逃逸描述清楚即可。
 
 ## self_contained 判定准则（设计核心）
 

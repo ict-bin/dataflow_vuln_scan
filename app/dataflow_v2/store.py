@@ -95,6 +95,9 @@ _DDL = {
             is_external            INTEGER DEFAULT 0,
             is_indirect_call       INTEGER DEFAULT 0,
             dispatch_kind          TEXT DEFAULT '',
+            escape_kind            TEXT DEFAULT '',
+            carrier                TEXT DEFAULT '',
+            escape_via             TEXT DEFAULT '',
             callsite_validated     INTEGER DEFAULT 0,
             branch_group_id        TEXT DEFAULT '',
             branch_arm_id          TEXT DEFAULT '',
@@ -152,6 +155,20 @@ class DataflowStore:
             conn.commit()
             self._conns[name] = conn
             self._locks[name] = threading.Lock()
+        # 轻量迁移: 为旧库补新列 (CREATE TABLE IF NOT EXISTS 不会加列)
+        self._migrate_columns("propagations", [
+            "escape_kind", "carrier", "escape_via",
+        ])
+
+    def _migrate_columns(self, db: str, cols: list[str]) -> None:
+        """为已有表补列 (TEXT, 默认 ''), 已有则跳过。"""
+        existing = {r["name"] for r in self._q(db, "PRAGMA table_info(propagations)")}
+        for c in cols:
+            if c not in existing:
+                try:
+                    self._exec(db, f"ALTER TABLE propagations ADD COLUMN {c} TEXT DEFAULT ''")
+                except sqlite3.OperationalError:
+                    pass  # 并发/已存在, 忽略
 
     # ── 通用 ────────────────────────────────────────────────────────────────
     def close(self) -> None:
@@ -372,12 +389,14 @@ class DataflowStore:
                 source_taint_signature,target_taint_name,target_taint_signature,
                 target_func_id,target_function,target_file,call_line,condition,is_external,
                 is_indirect_call,dispatch_kind,
+                escape_kind,carrier,escape_via,
                 callsite_validated,branch_group_id,branch_arm_id,branch_path,mutex_siblings,
                 actual_args,validations,description)
             VALUES (:prop_id,:source_func_id,:source_taint_name,
                 :source_taint_signature,:target_taint_name,:target_taint_signature,
                 :target_func_id,:target_function,:target_file,:call_line,:condition,:is_external,
                 :is_indirect_call,:dispatch_kind,
+                :escape_kind,:carrier,:escape_via,
                 :callsite_validated,:branch_group_id,:branch_arm_id,:branch_path,:mutex_siblings,
                 :actual_args,:validations,:description)
             ON CONFLICT(prop_id) DO UPDATE SET
@@ -385,6 +404,7 @@ class DataflowStore:
                 target_file=excluded.target_file, call_line=excluded.call_line,
                 condition=excluded.condition, is_external=excluded.is_external,
                 is_indirect_call=excluded.is_indirect_call, dispatch_kind=excluded.dispatch_kind,
+                escape_kind=excluded.escape_kind, carrier=excluded.carrier, escape_via=excluded.escape_via,
                 callsite_validated=excluded.callsite_validated,
                 branch_group_id=excluded.branch_group_id, branch_arm_id=excluded.branch_arm_id,
                 branch_path=excluded.branch_path, mutex_siblings=excluded.mutex_siblings,
@@ -457,6 +477,7 @@ def _row_to_propagation(row: sqlite3.Row) -> PropagationRecord:
         target_file=row["target_file"], call_line=row["call_line"], condition=row["condition"],
         is_external=bool(row["is_external"]), callsite_validated=bool(row["callsite_validated"]),
         is_indirect_call=bool(row["is_indirect_call"]), dispatch_kind=row["dispatch_kind"],
+        escape_kind=row["escape_kind"], carrier=row["carrier"], escape_via=row["escape_via"],
         branch_group_id=row["branch_group_id"], branch_arm_id=row["branch_arm_id"],
         branch_path=json.loads(row["branch_path"] or "[]"),
         mutex_siblings=json.loads(row["mutex_siblings"] or "[]"),

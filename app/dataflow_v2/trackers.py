@@ -1,10 +1,11 @@
-"""dataflow-v2 tracker: 作用域预筛 + LLM 语义判断 (fresh session)。
+"""dataflow-v2 tracker: LLM 驱动的外部逃逸下游读者追踪 + 函数指针解析。
 
-4 层防护:
-  Layer 1: 脚本校验 (analysis.py, 已实现) — 挡住非外部变量
-  Layer 2: 预筛选 (本文件) — include 索引/class 继承图缩小候选
-  Layer 3: LLM 上下文 — 传路径+命中行, 不传函数体 (LLM 用 v2_db 按需读)
-  Layer 4: LLM 语义判断 — 分批 10 个/次
+设计原则 (AI 中心): 逃逸语义判定与下游读者搜索都交给 LLM, 脚本不做语义覆盖、
+不靠字符串 pattern 搜函数体。tracker LLM fork 拿到逃逸 propagation (escape_kind/
+carrier/escape_via/description) + 源函数, 自己用 v2_db 按类型查候选、读体判断。
+
+- resolve_external   外部逃逸 (container/global/field_alias) → 下游读者, 全 LLM + v2_db
+- resolve_indirect   函数指针/回调注册点 → 处理函数, 数据库前后缀预筛 + LLM 判断
 """
 from __future__ import annotations
 
@@ -22,243 +23,102 @@ from .function_extractor import ensure_file_indexed, read_function_body
 
 logger = logging.getLogger("dvs.dataflow_v2.trackers")
 
-BATCH_SIZE = 10
 
-
-def _match_patterns(var_name: str) -> list[str]:
-    """根据变量名生成匹配模式列表 (考虑作用域)。"""
-    patterns = []
-    clean = var_name.strip("() ")
-    if len(clean) >= 3:
-        patterns.append(clean)
-    if "->" in clean:
-        field = clean.rsplit("->", 1)[-1]
-        if len(field) >= 3:
-            patterns.append("->" + field)
-    if "." in clean and "->" not in clean:
-        field = clean.rsplit(".", 1)[-1]
-        if len(field) >= 3:
-            patterns.append("." + field)
-    return list(dict.fromkeys(patterns))
-
-
-# ── Layer 2: 预筛选 ──────────────────────────────────────────────────────
-
-def _prefilter_candidates(source_root: str, var_name: str, func: FunctionRecord,
-                          store: DataflowStore, all_funcs: list[FunctionRecord]) -> list[FunctionRecord] | None:
-    """按变量类型预筛选候选函数, 返回 None 表示无法预筛 (用全库 fallback)。
-
-    变量类型判定:
-    - X->Y, base X == "this" → C++ 类成员 → class 继承图预筛
-    - X->Y, base X 是参数 → C/C++ 参数 struct 字段 → 类型签名预筛
-    - 简单名 → 全局变量 → include 索引预筛 (找声明文件)
-    """
-    clean = var_name.strip("() ")
-
-    # C++ 类成员: this->member
-    if clean.startswith("this->") or clean.startswith("this."):
-        member = clean.split("->", 1)[-1].split(".", 1)[-1] if "." in clean else clean.split("->", 1)[-1]
-        # 从函数名提取类名: Class::method → Class
-        class_name = func.name.split("::")[0] if "::" in func.name else ""
-        if class_name:
-            method_names = set(store.get_class_scope_methods(class_name, member))
-            if method_names:
-                return [f for f in all_funcs if f.name in method_names and f.func_id != func.func_id]
-        return None  # 无法预筛, fallback
-
-    # C++ 静态成员: ClassName::static_member
-    if "::" in clean and "->" not in clean:
-        class_name = clean.split("::")[0]
-        method_names = set(store.get_class_scope_methods(class_name))
-        if method_names:
-            return [f for f in all_funcs if f.name in method_names and f.func_id != func.func_id]
-        return None
-
-    # X->Y 或 X.Y: 提取 base, 从签名找类型
-    base = None
-    if "->" in clean:
-        base = clean.split("->")[0].strip()
-    elif "." in clean:
-        base = clean.split(".")[0].strip()
-
-    if base and base != "this":
-        # 从函数签名提取 base 的类型
-        sig = func.signature or ""
-        # 简单提取: 在签名中找 base 前面的类型词
-        # e.g., "xmlOutputBuffer *buf" → base="buf", type="xmlOutputBuffer"
-        type_match = re.search(rf'(\w[\w\s\*]*?)\s*\**\s*{re.escape(base)}\b', sig)
-        if type_match:
-            type_name = type_match.group(1).strip().split()[-1]  # 取最后一个词
-            # 去掉指针符号
-            type_name = type_name.rstrip("*")
-            if type_name and len(type_name) >= 3:
-                # 查 class 继承图: type_name 可能是 class
-                method_names = set(store.get_class_scope_methods(type_name))
-                if method_names:
-                    return [f for f in all_funcs if f.name in method_names and f.func_id != func.func_id]
-                # 查签名含同类型的函数
-                sig_funcs = set(store.get_functions_with_type_in_signature(type_name))
-                if sig_funcs:
-                    return [f for f in all_funcs if f.name in sig_funcs and f.func_id != func.func_id]
-        return None  # 无法确定类型, fallback
-
-    # 全局变量: 在父函数文件找声明
-    if not base:
-        # 尝试在父函数文件中找变量声明
-        from .function_extractor import _extract_includes
-        parent_file = func.file
-        # 简单 regex 在源文件中搜声明
-        src_path = Path(source_root) / parent_file
-        if src_path.is_file():
-            try:
-                text = src_path.read_text(encoding="utf-8", errors="replace")
-                # 搜全局声明: type g_msg = 或 extern type g_msg
-                decl_re = re.compile(rf'(?:extern\s+)?[\w\s\*]+\s+{re.escape(clean)}\s*[=;]', re.MULTILINE)
-                if decl_re.search(text):
-                    # 找到声明, 用 include 索引预筛
-                    files = set(store.get_files_including(parent_file))
-                    files.add(parent_file)  # 声明文件本身
-                    if files:
-                        return [f for f in all_funcs if f.file in files and f.func_id != func.func_id]
-            except OSError:
-                pass
-        return None  # 找不到声明, fallback
-
-    return None
-
-
-# ── Layer 3+4: LLM 判断 (传路径不传函数体) ──────────────────────────────
-
-def _find_refs_in_db(source_root: str, var_name: str, store: DataflowStore,
-                     exclude_func_id: str = "",
-                     prefiltered: list[FunctionRecord] | None = None) -> list[dict]:
-    """查数据库找候选, 优先用预筛结果。"""
-    patterns = _match_patterns(var_name)
-    if not patterns:
-        return []
-
-    if prefiltered is not None:
-        search_funcs = prefiltered
-    else:
-        search_funcs = store.list_functions()
-
-    candidates = []
-    seen = set()
-    for f in search_funcs:
-        if f.func_id == exclude_func_id:
-            continue
-        body = read_function_body(source_root, f, max_lines=300)
-        if not body:
-            continue
-        matched_pattern = None
-        for p in patterns:
-            if p in body:
-                matched_pattern = p
-                break
-        if not matched_pattern:
-            continue
-        if f.func_id in seen:
-            continue
-        seen.add(f.func_id)
-        ref_line = ""
-        for i, line in enumerate(body.splitlines(), f.start_line):
-            if matched_pattern in line:
-                ref_line = f"L{i}: {line.strip()}"
-                break
-        candidates.append({
-            "function": f.name, "file": f.file, "func_id": f.func_id,
-            "line": ref_line, "matched": matched_pattern,
-        })
-    return candidates
-
+# ── 外部逃逸下游读者追踪 (全 LLM + v2_db, 无字符串 pattern) ──────────────
 
 def resolve_external(
     cfg, source_root: str, sessions_dir: Path, store: DataflowStore,
-    func: FunctionRecord, taint_name: str, taint_description: str,
+    func: FunctionRecord, prop: PropagationRecord,
     cancel_event: Any = None, on_event: Callable = None, depth: int = 0,
 ) -> list[tuple[FunctionRecord, TaintParamInfo]]:
-    """外部变量下游追踪: 预筛 + 分批 LLM 判断 (传路径不传函数体)。"""
+    """外部逃逸下游追踪: LLM fork 用 v2_db 按逃逸语义查读者。
+
+    不依赖 prop.target_taint_name 做字符串匹配; 把逃逸 propagation (escape_kind/
+    carrier/escape_via/description) + 源函数交给 LLM, 它自己 v2_db 查类型/找访问者/
+    读体判断, 返回确认的读者函数。换任何项目/任何结构体名/任何 alloc 或容器变体,
+    LLM 都能自己查出来。
+    """
     acfg = cfg.workers.agents[0] if cfg.workers.agents else None
     if acfg is None:
         return []
 
-    all_funcs = store.list_functions()
-
-    # Layer 2: 预筛
-    prefiltered = _prefilter_candidates(source_root, taint_name, func, store, all_funcs)
-    if prefiltered is not None:
-        logger.info("prefiltered %s: %d -> %d candidates", taint_name, len(all_funcs), len(prefiltered))
-
-    # 查候选 (用预筛结果或全库)
-    candidates = _find_refs_in_db(source_root, taint_name, store,
-                                  exclude_func_id=func.func_id,
-                                  prefiltered=prefiltered)
-    if not candidates:
-        return []
-
-    # Layer 3+4: LLM 分批判断 (传路径+命中行, 不传函数体)
-    fork_session = sessions_dir / f"d{depth:02d}-{safe_name(func.name)}-track-{safe_name(taint_name)}.jsonl"
+    fork_session = sessions_dir / f"d{depth:02d}-{safe_name(func.name)}-track-{safe_name(prop.escape_kind or prop.carrier or 'escape')}.jsonl"
     v2_system = build_v2_system_prompt(custom="tracker")
     system_prompt = (v2_system + "\n\n" if v2_system else "") + (
-        "你是数据流污点分析中的非局部变量使用点追踪器。\n"
-        "目标: 从候选函数列表中判断哪些是外部变量的真实下游使用点。\n"
-        "每个候选只提供函数名、文件路径和引用命中行。用 v2_db lookup <函数名> 按需读取函数体。\n"
-        "可以 read 验证 (如 g_1=g_2 链)。\n"
-        '输出 JSON: {"confirmed": [{"function": "...", "reason": "..."}, ...]}\n'
+        "你是数据流污点分析中的外部逃逸下游读者追踪器。\n"
+        "目标: 给定一条从源函数逃逸出的污点 propagation, 找出会读取到该污点的下游函数。\n"
+        "策略:\n"
+        "1. 用 v2_db lookup <源函数名> 读源函数体, 搞清逃逸涉及的类型\n"
+        "   (如某入参的结构体类型 struct X, 载体挂入了它的哪个字段/容器)。\n"
+        "2. 用 v2_db 按该结构体类型查所有接收它的函数 (如形参为 struct X* 的函数),\n"
+        "   也可按字段名/容器名查访问者。\n"
+        "3. 对每个候选用 v2_db lookup 读体, 判断是否真的读取了承载污点的容器/字段\n"
+        "   (遍历链表/查哈希表/访问字段/迭代器, 形式多样, 靠语义判断, 不靠宏名)。\n"
+        "4. 容器读取可能是 list_for_each_entry/裸 for/范围 for/索引访问/自定义迭代,\n"
+        "   不依赖固定宏名清单。\n"
+        "5. 只报真正会读到这条逃逸污点的函数; 不确定的不报。\n"
+        '输出 JSON: {"confirmed": [{"function": "...", "taint_param": "...", "reason": "..."}]}\n'
+        "  * function: 读者函数名 (须是 v2_db 里存在的真实函数; 找不到可 grep 搜索源码后报)\n"
+        "  * taint_param: 读者接收污点的入参名 (供下游 LLM 理解污点来源, 如 http_head)\n"
+        "  * reason: 为何认为该函数读到逃逸污点\n"
     )
     v2_env = {"DVS_V2_DB_DIR": str(store.run_dir),
               "DVS_SOURCE_ROOT": source_root}
 
-    confirmed_names = set()
-    total_batches = (len(candidates) + BATCH_SIZE - 1) // BATCH_SIZE
-    for batch_idx in range(total_batches):
-        batch_start = batch_idx * BATCH_SIZE
-        batch = candidates[batch_start:batch_start + BATCH_SIZE]
-        # 只传路径+命中行, 不传函数体
-        cand_info = []
-        for i, c in enumerate(batch):
-            cand_info.append(
-                f"### 候选 {batch_start+i+1}/{len(candidates)}: {c['function']}\n"
-                f"文件: {c['file']}\n"
-                f"引用命中: `{c['line']}`\n"
-                f"(用 `v2_db lookup {c['function']}` 读取函数体)"
-            )
-        prompt = (
-            f"## 父函数: {func.file}::{func.name}\n"
-            f"外部变量: `{taint_name}` ({taint_description})\n\n"
-            f"## 候选函数 (本批 {len(batch)} 个, 共 {len(candidates)} 个, 第 {batch_idx+1}/{total_batches} 批):\n\n"
-            + "\n\n".join(cand_info) + "\n\n"
-            f"从候选中找出 `{taint_name}` 的真实下游污点使用点。"
-            f"用 v2_db lookup 读取需要的函数体后判断。"
-        )
-        output = run_agent(
-            prompt=prompt, model=acfg.model, tools=acfg.tools or cfg.workers.default_tools,
-            cwd=source_root, session_file=str(fork_session), system_prompt=system_prompt,
-            cancel_event=cancel_event, run_timeout_seconds=min(cfg.agent_run_timeout_seconds, 600),
-            timeout_retry_enabled=cfg.agent_timeout_retry_enabled,
-            timeout_max_retries=cfg.agent_timeout_max_retries,
-            pi_max_retries=cfg.pi_max_retries, pi_retry_delay=cfg.pi_retry_delay,
-            env=v2_env,
-            task_context={"task_id": "", "task_root": "", "task_run_root": "",
-                          "task_pi_dir": "", "agent_role": "workers"},
-        )
-        parsed = _extract_json_object(output.output, "confirmed") or {}
-        for item in parsed.get("confirmed") or []:
-            if isinstance(item, dict):
-                fn = str(item.get("function") or "").strip()
-                if fn:
-                    confirmed_names.add(fn)
-
-    confirmed = []
-    for name in confirmed_names:
-        rec = store.find_function(name)
-        if rec:
-            confirmed.append((rec, TaintParamInfo(positions=[], signature="", names=[taint_name])))
-
+    prompt = (
+        f"## 源函数\n{func.file}::{func.name}\n\n"
+        f"## 逃逸 propagation\n"
+        f"- escape_kind: {prop.escape_kind or '(未指定)'}\n"
+        f"- carrier: {prop.carrier or '(无)'}\n"
+        f"- escape_via: {prop.escape_via or '(无)'}\n"
+        f"- target_taint: {prop.target_taint_name or '(无)'}\n"
+        f"- source_taint: {prop.source_taint_name or '(无)'}\n"
+        f"- description: {prop.description or '(无)'}\n\n"
+        f"请按系统提示词策略, 用 v2_db 查找读取这条逃逸污点的下游函数。\n"
+    )
+    output = run_agent(
+        prompt=prompt, model=acfg.model, tools=acfg.tools or cfg.workers.default_tools,
+        cwd=source_root, session_file=str(fork_session), system_prompt=system_prompt,
+        cancel_event=cancel_event, run_timeout_seconds=min(cfg.agent_run_timeout_seconds, 600),
+        timeout_retry_enabled=cfg.agent_timeout_retry_enabled,
+        timeout_max_retries=cfg.agent_timeout_max_retries,
+        pi_max_retries=cfg.pi_max_retries, pi_retry_delay=cfg.pi_retry_delay,
+        env=v2_env,
+        task_context={"task_id": "", "task_root": "", "task_run_root": "",
+                      "task_pi_dir": "", "agent_role": "workers"},
+    )
+    parsed = _extract_json_object(output.output, "confirmed") or {}
+    confirmed: list[tuple[FunctionRecord, TaintParamInfo]] = []
+    for item in parsed.get("confirmed") or []:
+        if not isinstance(item, dict):
+            continue
+        fn = str(item.get("function") or "").strip()
+        if not fn:
+            continue
+        taint_param = str(item.get("taint_param") or "").strip()
+        rec = store.find_function(fn)
+        if rec is None:
+            # 没索引则 grep 搜源码树 + 建库 (复用现有增量索引)
+            from .function_extractor import find_func_in_source
+            found = find_func_in_source(fn, Path(source_root))
+            if found:
+                rel_def_file, _ = found
+                try:
+                    ensure_file_indexed(source_root, rel_def_file, store)
+                except Exception:
+                    logger.debug("track ensure_file_indexed failed for %s", rel_def_file, exc_info=True)
+                rec = store.find_function(fn)
+        if rec is None:
+            continue
+        confirmed.append((rec, TaintParamInfo(
+            positions=[],
+            signature=taint_param or fn,
+            names=[taint_param or prop.target_taint_name or prop.carrier or fn],
+        )))
     if on_event:
-        on_event("v2_external_tracked", function=func.name, var=taint_name,
-                 candidates=len(candidates), confirmed=len(confirmed),
-                 prefilters=len(prefiltered) if prefiltered else 0)
+        on_event("v2_external_tracked", function=func.name,
+                 escape_kind=prop.escape_kind or "", carrier=prop.carrier or "",
+                 confirmed=len(confirmed))
     return confirmed
 
 

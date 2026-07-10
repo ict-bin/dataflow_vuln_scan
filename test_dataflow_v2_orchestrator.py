@@ -88,6 +88,28 @@ class TestPathBuilding(unittest.TestCase):
         paths = self._paths([p])
         self.assertEqual(paths, [])
 
+    def test_escape_container_forks_reader(self):
+        # 容器逃逸 propagation (is_external=true, escape_kind=container, target_function 是插入调用)
+        # → resolve_external_propagation 返回读者 → fork 子路径跟入读者 (list_add_tail 不当 callee 跟入)
+        reader = _func(self.store, "Reader")
+        class _ReaderCbs(AnalysisCallbacks):
+            def resolve_external_propagation(self, store, func, prop, ctx):
+                if prop.escape_kind == "container":
+                    return [(reader, TaintParamInfo(positions=[0], signature="head", names=["head"]))]
+                return []
+        orch = DfsOrchestrator(self.store, _ReaderCbs())
+        ctx = PathContext(path_id="p0")
+        p = PropagationRecord(
+            source_func_id=self.A.func_id, source_taint_name="msg", source_taint_signature="msg_t*",
+            target_taint_name="params", target_taint_signature="params",
+            target_function="list_add_tail", call_line=20,
+            is_external=True, escape_kind="container", carrier="params",
+            escape_via="list_add_tail")
+        paths = orch._build_paths([p], self.A, ctx, 0, ["msg"])
+        self.assertEqual(len(paths), 1, paths)
+        self.assertEqual(paths[0][0].func.name, "Reader")
+        self.assertEqual(paths[0][0].taint_params.names, ["head"])
+
 
 class TestDedupAndFeedback(unittest.TestCase):
     def test_dedup_validations(self):

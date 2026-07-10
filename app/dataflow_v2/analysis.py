@@ -135,40 +135,26 @@ def _extract_local_scope(func: FunctionRecord, body: str) -> set[str]:
 def _validate_is_external(target_taint: str, target_function: str,
                           local_scope: set[str],
                           params: set[str] | None = None,
-                          locals_: set[str] | None = None) -> tuple[bool, str]:
-    """脚本校验 is_external, 区分局部变量 vs 参数。
+                          locals_: set[str] | None = None,
+                          *, escape_kind: str = "") -> tuple[bool, str]:
+    """轻量结构一致性校验 (不覆盖 LLM 的逃逸语义判定)。
 
-    规则:
-    1. target_function 非空 → false (callee 参数传播)
-    2. target_taint 含“返回”/“return”/“retval” → false (返回值)
-    3. X->Y 或 X.Y:
-       - base 在局部变量集合 → false (局部 struct, DFS 跟踪)
-       - base 在参数集合 (含 this) → 保留 true (外部对象, 其他函数可读)
-    4. 简单名在局部作用域 → false
+    设计原则: 逃逸语义 (是否逃逸到外部可达对象) 由 LLM 判断, 脚本不做语义覆盖。
+    这里只做纯结构一致性归位:
+      1. escape_kind 非空 (LLM 显式报了 container/global/field_alias) → 一定保留 true
+      2. target_function 非空且非逃逸 → false (callee 参数传播)
+      3. target_taint 含返回值语义 → false (走 return_taints)
+    历史上 "base 在 locals_ → false" / "简单名在局部作用域 → false" 的规则已删除:
+    它们会误杀 "局部 alloc 载体经容器插入逃逸" 这类真实逃逸 (carrier 是局部变量,
+    但其字段随载体挂入入参容器而逃逸)。逃逸判定交还 LLM, 由 tracker 复核读者。
     """
-    if params is None:
-        params = set()
-    if locals_ is None:
-        locals_ = set()
+    if escape_kind:
+        return True, f"LLM 报 escape_kind={escape_kind}, 尊重判定, 交 tracker 复核读者"
     if target_function:
         return False, "target_function 非空, 是 callee 参数传播不是外部变量"
     if target_taint and any(kw in target_taint.lower() for kw in ("返回", "return", "retval")):
         return False, "target_taint 含返回值语义, 不是外部变量"
-    if target_taint:
-        base = None
-        if "->" in target_taint:
-            base = target_taint.split("->")[0].strip()
-        elif "." in target_taint:
-            base = target_taint.split(".")[0].strip()
-        if base:
-            if base in locals_:
-                return False, f"base 指针 '{base}' 是本函数局部变量, struct 字段不是外部变量"
-            # base 在参数集合 (含 this) → 保留 true (外部对象)
-            # base 不在任一集合 → 可能是全局, 保留 true
-    if target_taint and not any(c in target_taint for c in ("->", ".", "(", "[")):
-        if target_taint.strip() in local_scope:
-            return False, f"'{target_taint}' 是本函数参数/局部变量, 不是外部变量"
-    return True if target_taint else False, ""
+    return bool(target_taint), ""
 
 
 class TaintAnalysisCallbacks(AnalysisCallbacks):
@@ -360,7 +346,7 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
 
         # propagations: LLM 只输出语义字段; 结构字段 (call_line/condition/is_indirect/signature)
         # 由 clang/脚本提供。is_indirect_call 由 target_function 表达式模式检测 (脚本)。
-        # 脚本校验 is_external: 挡住 LLM 误标 (如 ctx->buf 不是外部变量)
+        # 脚本不覆盖逃逸语义: is_external 尊重 LLM 判定 (container/global/field_alias)
         local_scope = _extract_local_scope(func, body)
         params_set = _extract_params(func)
         locals_set = _extract_local_vars(body)
@@ -376,11 +362,15 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
             target_fn = str(p.get("target_function") or "").strip()
             is_ext = bool(p.get("is_external", False))
             target_taint = str(p.get("target_taint") or "")
-            # 脚本校验 is_external
+            escape_kind = str(p.get("escape_kind") or "").strip()
+            carrier = str(p.get("carrier") or "").strip()
+            escape_via = str(p.get("escape_via") or "").strip()
+            # 轻量一致性校验 (escape_kind 一定保留 true; 其余只做结构归位)
             llm_said_external = is_ext
             if is_ext:
                 is_ext, override_reason = _validate_is_external(
-                    target_taint, target_fn, local_scope, params_set, locals_set)
+                    target_taint, target_fn, local_scope, params_set, locals_set,
+                    escape_kind=escape_kind)
                 if override_reason:
                     self.on_event("v2_is_external_overridden",
                                   function=func.name,
@@ -405,6 +395,9 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                 is_external=is_ext,
                 is_indirect_call=is_indirect,
                 dispatch_kind=dispatch_kind,
+                escape_kind=escape_kind,
+                carrier=carrier,
+                escape_via=escape_via,
                 _llm_said_external=llm_said_external,
                 validations=[Validation(str(v.get("condition") or ""), str(v.get("content") or ""))
                              for v in (p.get("validations") or []) if isinstance(v, dict)],
@@ -705,12 +698,10 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
     # ── 外部变量跟踪 (item 1) ────────────────────────────────────────────────
     def resolve_external_propagation(self, store: DataflowStore, func: FunctionRecord,
                                      prop: PropagationRecord, ctx: PathContext) -> list[tuple[FunctionRecord, TaintParamInfo]]:
-        """外部变量下游追踪: 脚本查 DB + LLM 语义判断 (fresh session)"""
+        """外部逃逸下游追踪: LLM fork 用 v2_db 按逃逸语义查读者 (不靠字符串 pattern)"""
         from .trackers import resolve_external
         return resolve_external(self.cfg, self.source_root, self.sessions_dir, store,
-                               func, prop.target_taint_name or prop.source_taint_name,
-                               prop.description or "",
-                               self.cancel_event, self.on_event, ctx.depth)
+                               func, prop, self.cancel_event, self.on_event, ctx.depth)
 
     # ── 漏洞挖掘 (item 2) ────────────────────────────────────────────────────
     def mine_vulns(self, store: DataflowStore, func: FunctionRecord,
