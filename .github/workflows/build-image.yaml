@@ -1,0 +1,112 @@
+name: build-image
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+env:
+  IMAGE_NAME: ghcr.io/gaiasecw/secflow-app-dataflow-vuln-scan
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      date_tag: ${{ steps.date.outputs.date_tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Generate date tag
+        id: date
+        env:
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          SHORT_SHA="${COMMIT_SHA::7}"
+          COMMIT_TS="$(git show -s --format=%ct "${COMMIT_SHA}")"
+          DATE_TAG="$(TZ=Asia/Shanghai date -d "@${COMMIT_TS}" +'%Y%m%d-%H%M%S')-${SHORT_SHA}"
+          echo "date_tag=${DATE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "Generated tag: ${DATE_TAG}"
+
+  build-amd64:
+    needs: prepare
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Login to GitHub Container Registry (push)
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.repository_owner }}" --password-stdin
+
+      - name: Login for private base image (pull)
+        run: echo "${{ secrets.PULL_BASE_IMAGE_PAT }}" | docker login ghcr.io -u runshine --password-stdin
+        continue-on-error: true
+
+      - name: Build amd64 image
+        run: |
+          docker build \
+            --build-arg SECFLOW_BUILD_VERSION=${{ needs.prepare.outputs.date_tag }} \
+            --tag ${{ env.IMAGE_NAME }}:amd64-latest \
+            --tag ${{ env.IMAGE_NAME }}:amd64-${{ needs.prepare.outputs.date_tag }} \
+            .
+
+      - name: Push amd64 image
+        run: |
+          docker push ${{ env.IMAGE_NAME }}:amd64-latest
+          docker push ${{ env.IMAGE_NAME }}:amd64-${{ needs.prepare.outputs.date_tag }}
+
+  build-arm64:
+    needs: prepare
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Login to GitHub Container Registry (push)
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.repository_owner }}" --password-stdin
+
+      - name: Login for private base image (pull)
+        run: echo "${{ secrets.PULL_BASE_IMAGE_PAT }}" | docker login ghcr.io -u runshine --password-stdin
+        continue-on-error: true
+
+      - name: Build arm64 image
+        run: |
+          docker build \
+            --build-arg SECFLOW_BUILD_VERSION=${{ needs.prepare.outputs.date_tag }} \
+            --tag ${{ env.IMAGE_NAME }}:arm64-latest \
+            --tag ${{ env.IMAGE_NAME }}:arm64-${{ needs.prepare.outputs.date_tag }} \
+            .
+
+      - name: Push arm64 image
+        run: |
+          docker push ${{ env.IMAGE_NAME }}:arm64-latest
+          docker push ${{ env.IMAGE_NAME }}:arm64-${{ needs.prepare.outputs.date_tag }}
+
+  merge-manifest:
+    needs: [prepare, build-amd64, build-arm64]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Login to GitHub Container Registry
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.repository_owner }}" --password-stdin
+
+      - name: Create and push GHCR manifests
+        run: |
+          docker manifest create ${{ env.IMAGE_NAME }}:latest \
+            ${{ env.IMAGE_NAME }}:amd64-latest \
+            ${{ env.IMAGE_NAME }}:arm64-latest
+          docker manifest create ${{ env.IMAGE_NAME }}:${{ needs.prepare.outputs.date_tag }} \
+            ${{ env.IMAGE_NAME }}:amd64-${{ needs.prepare.outputs.date_tag }} \
+            ${{ env.IMAGE_NAME }}:arm64-${{ needs.prepare.outputs.date_tag }}
+          docker manifest push ${{ env.IMAGE_NAME }}:latest
+          docker manifest push ${{ env.IMAGE_NAME }}:${{ needs.prepare.outputs.date_tag }}

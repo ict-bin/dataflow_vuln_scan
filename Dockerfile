@@ -1,78 +1,83 @@
 # ══════════════════════════════════════════════════════════════════════════════
-# dataflow_vuln_scan — 完全自包含 Dockerfile
+# dataflow_vuln_scan — 完全自包含 Dockerfile (参考 secflow-app-system-analyse 构建方案)
 #
-# 不依赖任何私有基础镜像: FROM 公开 python:3.11-slim, 内联 base-python311 +
-# base-pi-agent-runtime 两层 (系统工具 + Node22 + pi-coding-agent), 再接 app 层。
-#
+# FROM 公开 ubuntu:24.04 (daocloud 镜像), 不依赖任何私有基础镜像。
+# APT/npm/pip 全部走国内镜像加速; 基础层即含 kill/ps/strace 等调试工具。
 # 构建: docker build -t dataflow_vuln_scan .
 # ══════════════════════════════════════════════════════════════════════════════
 
+FROM m.daocloud.io/docker.io/library/ubuntu:24.04
+
 ARG SECFLOW_BUILD_VERSION=""
-# 用完整版 (非 slim): 基于 debian bookworm 全量, 自带 procps/util-linux 等,
-# kill/ps/top 等调试工具从基础层即可用, 便于在 Pod 内定位问题
-FROM public.ecr.aws/docker/library/python:3.11
+ARG PI_NPM_PACKAGE=@earendil-works/pi-coding-agent
 
-ENV DEBIAN_FRONTEND=noninteractive \
-    PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
-    TZ=Asia/Shanghai \
-    VIRTUAL_ENV=/opt/venv \
-    PATH="/opt/venv/bin:${PATH}" \
-    PI_CODING_AGENT_DIR=/root/.pi/agent
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+ENV TZ=Asia/Shanghai
+ENV PI_CODING_AGENT_DIR=/root/.pi/agent
 
-WORKDIR /app
+# ═══ APT mirror + 系统工具 (含完整调试能力) ════════════════════════════════
+RUN sed -i \
+    -e 's|http://archive.ubuntu.com/ubuntu/|http://mirrors.aliyun.com/ubuntu/|g' \
+    -e 's|http://security.ubuntu.com/ubuntu/|http://mirrors.aliyun.com/ubuntu/|g' \
+    /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null \
+    || sed -i \
+    -e 's|http://archive.ubuntu.com/ubuntu/|http://mirrors.aliyun.com/ubuntu/|g' \
+    -e 's|http://security.ubuntu.com/ubuntu/|http://mirrors.aliyun.com/ubuntu/|g' \
+    /etc/apt/sources.list 2>/dev/null || true
 
-# ═══ Layer 1: 系统工具 (原 base-python311-runtime, 增强调试能力) ════════════
-# procps(ps/top) psmisc(killall) util-linux(kill) iproute2(ip) 从首层就装上,
-# 保证基础层即可 kill/ps/strace 定位问题, 不依赖后续层
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-        bash ca-certificates curl git ripgrep tini tzdata gnupg \
-        procps psmisc util-linux iproute2 strace ltrace \
+RUN apt-get update && apt-get install -y \
+        bash ca-certificates curl git gnupg ripgrep tini tzdata wget zip unzip xz-utils \
+        jq file tree less vim-tiny findutils coreutils \
+        procps psmisc iproute2 net-tools lsof strace ltrace htop netcat-openbsd \
+        iputils-ping dnsutils \
+        build-essential make cmake pkg-config \
+        clang clang-tools llvm gdb cscope universal-ctags python3-dev \
     && rm -rf /var/lib/apt/lists/* \
     && ln -snf /usr/share/zoneinfo/${TZ} /etc/localtime \
-    && echo "${TZ}" > /etc/timezone \
-    && python -m venv "${VIRTUAL_ENV}"
+    && echo "${TZ}" > /etc/timezone
 
-# ═══ Layer 2: Node.js 22 + pi-coding-agent (原 base-pi-agent-runtime, 内联) ═══
+# ═══ Node.js 22 + pi-coding-agent (npmmirror 加速) ═══════════════════════════
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
-    && apt-get update && apt-get install -y --no-install-recommends nodejs \
+    && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/* \
-    && npm install -g @earendil-works/pi-coding-agent@latest \
+    && npm install -g --registry=https://registry.npmmirror.com "${PI_NPM_PACKAGE}" \
     && command -v pi && pi --version 2>/dev/null || command -v pi \
     && mkdir -p "${PI_CODING_AGENT_DIR}/bin" "${PI_CODING_AGENT_DIR}/skills" \
     && ln -sf "$(command -v rg)" "${PI_CODING_AGENT_DIR}/bin/rg"
 
-# ═══ Layer 3: openai-completions patch (maxTokens fallback, 防 MiniMax 默认 max_tokens 太低 → JSON 截断) ══
-# 非致命: 若 npm 包结构变化导致路径不存在, 告警跳过, 不阻断构建
-RUN JS=$(npm root -g)/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/dist/api/openai-completions.js \
+# ═══ Python 3 + venv ════════════════════════════════════════════════════════
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3 python3-pip python3-venv \
+    && rm -rf /var/lib/apt/lists/* \
+    && python3 -m venv /opt/venv
+
+ENV PATH="/opt/venv/bin:${PATH}"
+
+# ═══ Python deps (阿里云镜像加速) ═══════════════════════════════════════════
+WORKDIR /opt/dataflow_vuln_scan
+COPY requirements.txt ./requirements.txt
+RUN pip install --no-cache-dir \
+    --timeout 300 --retries 10 \
+    -i https://mirrors.aliyun.com/pypi/simple/ \
+    --trusted-host mirrors.aliyun.com \
+    -r requirements.txt \
+    && python3 -c "import tree_sitter, tree_sitter_c, tree_sitter_cpp; print('tree-sitter OK')" \
+    && python3 -c "from pydantic import BaseModel; print('pydantic OK')"
+
+# ═══ pi agent openai-completions patch (maxTokens fallback, 防 MiniMax 默认 max_tokens 太低 → JSON 截断) ══
+# 非致命: 路径/结构变化时告警跳过, 不阻断构建
+RUN JS=$(npm root -g)/${PI_NPM_PACKAGE}/node_modules/@earendil-works/pi-ai/dist/api/openai-completions.js \
     && if [ -f "$JS" ]; then \
-        sed -i 's/if (options?.maxTokens) {/const maxTokens = options?.maxTokens ?? (model.maxTokens > 0 ? model.maxTokens : undefined);\n    if (maxTokens !== undefined) {/' $JS \
-        && sed -i 's/params.max_tokens = options.maxTokens;/params.max_tokens = maxTokens;/' $JS \
-        && sed -i 's/params.max_completion_tokens = options.maxTokens;/params.max_completion_tokens = maxTokens;/' $JS \
-        && echo 'patched openai-completions.js: maxTokens fallback to model.maxTokens' \
-        && grep -n 'maxTokens' $JS | head -5; \
+        sed -i 's/if (options?.maxTokens) {/const maxTokens = options?.maxTokens ?? (model.maxTokens > 0 ? model.maxTokens : undefined);\n    if (maxTokens !== undefined) {/' "$JS" \
+        && sed -i 's/params.max_tokens = options.maxTokens;/params.max_tokens = maxTokens;/' "$JS" \
+        && sed -i 's/params.max_completion_tokens = options.maxTokens;/params.max_completion_tokens = maxTokens;/' "$JS" \
+        && echo 'patched openai-completions.js: maxTokens fallback to model.maxTokens'; \
     else \
         echo "::warning::openai-completions.js not found at $JS, skip patch"; \
     fi
 
-# ═══ Layer 4: 构建/调试工具 (clang/gdb/tree-sitter 编译依赖等) ════════════════
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-        zip unzip xz-utils file jq tree less vim-tiny \
-        findutils coreutils procps psmisc lsof net-tools iproute2 \
-        iputils-ping dnsutils build-essential make cmake pkg-config \
-        clang clang-tools llvm gdb cscope universal-ctags python3-dev \
-    && rm -rf /var/lib/apt/lists/*
-
 # ═══ 项目代码 ═══════════════════════════════════════════════════════════════
-WORKDIR /opt/dataflow_vuln_scan
-COPY requirements.txt ./
-# 容器运行时 PATH 优先 /opt/venv/bin，必须确保 pip 安装到同一个 Python 环境
-RUN /opt/venv/bin/pip install --no-cache-dir -r requirements.txt -q \
-    && /opt/venv/bin/python3 -c "import tree_sitter, tree_sitter_c, tree_sitter_cpp; print('tree-sitter OK')" \
-    && /opt/venv/bin/python3 -c "from pydantic import BaseModel; print('pydantic OK')"
 COPY app/               ./app/
 COPY main.py     ./
 COPY prompts/           ./prompts/
@@ -81,8 +86,11 @@ COPY tools/             ./tools/
 COPY bin/               ./bin/
 COPY skills/            ./skills/
 COPY config.example.json .env.example ./
+
 RUN printf '{"build_version":"%s"}\n' "$SECFLOW_BUILD_VERSION" > /opt/dataflow_vuln_scan/build_meta.json
-RUN find . -name '*.sh' -exec sed -i 's/\r$//' {} + && chmod +x scripts/*.sh 2>/dev/null || true
+RUN find . -name '*.sh' -exec sed -i 's/\r$//' {} + \
+    && chmod +x scripts/*.sh 2>/dev/null || true
+
 # 安装工具：extract_func / gen_dataflow / gen_tainted_list 供 Worker 直接调用
 RUN cp tools/extract_func.py /usr/local/bin/extract_func \
     && chmod +x /usr/local/bin/extract_func \
@@ -91,13 +99,9 @@ RUN cp tools/extract_func.py /usr/local/bin/extract_func \
     && cp tools/gen_tainted_list.py /usr/local/bin/gen_tainted_list \
     && chmod +x /usr/local/bin/gen_tainted_list
 
-# ═══ pi 配置目录 ══════════════════════════════════════════════════════════════
-# pi 的全局配置目录，models.json 放这里才能被 pi 识别
-# 容器启动脚本会将 /data/config/models.json 链接到此处
+# ═══ pi 配置目录 + skills ═══════════════════════════════════════════════════
 COPY config/settings.json /root/.pi/agent/settings.json
 RUN mkdir -p /root/.pi/agent/skills \
-    # 将 write-dataflow skill 安装到 pi 全局发现目录
-    # ~/.pi/agent/skills/ 是 pi 全局 skill 目录，任何 cwd 都能发现
     && ln -sf /opt/dataflow_vuln_scan/skills/write-dataflow /root/.pi/agent/skills/write-dataflow \
     && ln -sf /opt/dataflow_vuln_scan/skills/write-taint-flow /root/.pi/agent/skills/write-taint-flow \
     && ln -sf /opt/dataflow_vuln_scan/skills/write-taint-graph /root/.pi/agent/skills/write-taint-graph \
@@ -116,13 +120,7 @@ RUN ln -sf "$(which rg)" "${PI_CODING_AGENT_DIR}/bin/rg" \
     done
 
 # ═══ 挂载点 ═══════════════════════════════════════════════════════════════════
-#
-# /data/target  — 待分析文件（只读）
-# /data/config  — config.json + models.json + prompts/（只读）
-# /data/output  — 输出目录
-#
 RUN mkdir -p /data/target /data/config /data/output /data/workspace /data/sessions
-# 不声明 VOLUME（避免匿名卷遮盖 bind mount）
 
 ENV PORT=3000
 ENV OUTPUT_DIR=/data/output
@@ -142,11 +140,10 @@ EXPOSE 18080
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
     CMD curl -f http://localhost:18080/healthz || exit 1
 
-# ═══ 入口脚本 ═════════════════════════════════════════════════════════════════
-# 启动前自动链接 models.json（如果挂载了的话）
+# ═══ 入口脚本 (tini 作 PID 1, 信号处理正确) ═══════════════════════════════
 COPY scripts/entrypoint.sh /entrypoint.sh
 RUN sed -i 's/\r$//' /entrypoint.sh && chmod +x /entrypoint.sh
-ENTRYPOINT ["/entrypoint.sh"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/entrypoint.sh"]
 
-# 默认 REST API，覆盖: python3 main.py /data/config/config.json
+# 默认 REST API; worker/scheduler 通过 K8s command/args 覆盖
 CMD ["./scripts/start-with-probe.sh", "python3", "main.py"]
