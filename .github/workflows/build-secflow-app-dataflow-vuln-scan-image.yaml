@@ -63,6 +63,7 @@ jobs:
       - name: Build and push amd64 image
         run: |
           docker buildx build \
+            --progress=plain \
             --platform linux/amd64 \
             --build-arg SECFLOW_BUILD_VERSION=${{ needs.prepare.outputs.date_tag }} \
             --cache-from type=gha,scope=secflow-app-dataflow-vuln-scan-amd64 \
@@ -96,6 +97,7 @@ jobs:
       - name: Build and push arm64 image
         run: |
           docker buildx build \
+            --progress=plain \
             --platform linux/arm64 \
             --build-arg SECFLOW_BUILD_VERSION=${{ needs.prepare.outputs.date_tag }} \
             --cache-from type=gha,scope=secflow-app-dataflow-vuln-scan-arm64 \

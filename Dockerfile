@@ -45,12 +45,17 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && ln -sf "$(command -v rg)" "${PI_CODING_AGENT_DIR}/bin/rg"
 
 # ═══ Layer 3: openai-completions patch (maxTokens fallback, 防 MiniMax 默认 max_tokens 太低 → JSON 截断) ══
+# 非致命: 若 npm 包结构变化导致路径不存在, 告警跳过, 不阻断构建
 RUN JS=$(npm root -g)/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/dist/api/openai-completions.js \
-    && sed -i 's/if (options?.maxTokens) {/const maxTokens = options?.maxTokens ?? (model.maxTokens > 0 ? model.maxTokens : undefined);\n    if (maxTokens !== undefined) {/' $JS \
-    && sed -i 's/params.max_tokens = options.maxTokens;/params.max_tokens = maxTokens;/' $JS \
-    && sed -i 's/params.max_completion_tokens = options.maxTokens;/params.max_completion_tokens = maxTokens;/' $JS \
-    && echo 'patched openai-completions.js: maxTokens fallback to model.maxTokens' \
-    && grep -n 'maxTokens' $JS | head -5
+    && if [ -f "$JS" ]; then \
+        sed -i 's/if (options?.maxTokens) {/const maxTokens = options?.maxTokens ?? (model.maxTokens > 0 ? model.maxTokens : undefined);\n    if (maxTokens !== undefined) {/' $JS \
+        && sed -i 's/params.max_tokens = options.maxTokens;/params.max_tokens = maxTokens;/' $JS \
+        && sed -i 's/params.max_completion_tokens = options.maxTokens;/params.max_completion_tokens = maxTokens;/' $JS \
+        && echo 'patched openai-completions.js: maxTokens fallback to model.maxTokens' \
+        && grep -n 'maxTokens' $JS | head -5; \
+    else \
+        echo "::warning::openai-completions.js not found at $JS, skip patch"; \
+    fi
 
 # ═══ Layer 4: 构建/调试工具 (clang/gdb/tree-sitter 编译依赖等) ════════════════
 RUN apt-get update \
