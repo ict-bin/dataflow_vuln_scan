@@ -28,29 +28,45 @@ except ImportError:
 _LANG_CACHE: dict[str, Any] = {}
 _PARSER_CACHE: dict[str, Any] = {}
 
+# C++ 关键字线索: .h 头文件按内容判 C/C++ (C++ 头含 namespace/template/class/std::)
+_CPP_HINTS = (b"namespace ", b"namespace\n", b"template ", b"template<", b"class ",
+              b"std::", b"::", b"using namespace", b"public:", b"private:",
+              b"protected:", b"virtual ", b"throw(", b"operator ")
 
-def _parser_for(path: Path):
+
+def _parser_for(path: Path, source: bytes | None = None):
+    """按后缀+内容选 parser。.h 头可能是 C 或 C++, 按内容判 (含 namespace/template/class
+    等用 C++ parser, 否则 C)。避免 C parser 解析 C++ 头误提 namespace 为函数/漏模板函数。"""
     ext = path.suffix.lower()
-    if ext not in _LANG_CACHE:
-        if ext in (".c", ".h"):
+    if ext in (".cpp", ".cc", ".cxx", ".hpp"):
+        return _parser_cached("cpp")
+    if ext == ".c":
+        return _parser_cached("c")
+    if ext == ".h":
+        src = source if source is not None else b""
+        if not src and path.is_file():
             try:
-                import tree_sitter_c as _c
-                lang = _ts.Language(_c.language())
-            except ImportError:
-                return None
-        elif ext in (".cpp", ".cc", ".cxx", ".hpp"):
-            try:
+                src = path.read_bytes()
+            except OSError:
+                src = b""
+        is_cpp = any(h in src for h in _CPP_HINTS)
+        return _parser_cached("cpp" if is_cpp else "c")
+    return None
+
+
+def _parser_cached(kind: str):
+    if kind not in _PARSER_CACHE:
+        try:
+            if kind == "cpp":
                 import tree_sitter_cpp as _cpp
                 lang = _ts.Language(_cpp.language())
-            except ImportError:
-                return None
-        else:
+            else:
+                import tree_sitter_c as _c
+                lang = _ts.Language(_c.language())
+        except ImportError:
             return None
-        _LANG_CACHE[ext] = lang
-    lang = _LANG_CACHE[ext]
-    if lang not in _PARSER_CACHE:
-        _PARSER_CACHE[lang] = _ts.Parser(lang)
-    return _PARSER_CACHE[lang]
+        _PARSER_CACHE[kind] = _ts.Parser(lang)
+    return _PARSER_CACHE[kind]
 
 
 def _func_signature(node: Any, source: bytes) -> str:
@@ -86,7 +102,7 @@ def extract_file_functions(source_root: str, rel_file: str, store: DataflowStore
         return []
     source = src_path.read_bytes()
     try:
-        parser = _parser_for(src_path)
+        parser = _parser_for(src_path, source)
         if parser is None:
             return []
         tree = parser.parse(source)
@@ -296,7 +312,7 @@ def _extract_class_info_for_file(source_root: str, rel_file: str, store: Dataflo
         return
     source = path.read_bytes()
     try:
-        parser = _parser_for(path)
+        parser = _parser_for(path, source)
         if parser is None:
             return
         tree = parser.parse(source)
@@ -325,7 +341,7 @@ def _build_class_hierarchy(source_root: str, store: DataflowStore) -> int:
             continue
         source = path.read_bytes()
         try:
-            parser = _parser_for(path)
+            parser = _parser_for(path, source)
             if parser is None:
                 continue
             tree = parser.parse(source)
