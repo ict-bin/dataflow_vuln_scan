@@ -22,6 +22,7 @@ processed_taints 命中 → 跳过重复分析。
 from __future__ import annotations
 
 import hashlib
+import re
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -505,7 +506,38 @@ def _path_id(func_id: str, taint_sig: str, depth: str) -> str:
 
 
 def _validation_sig(validations: list[Validation]) -> str:
-    return "|".join(f"{v.condition}::{v.content}" for v in validations)
+    """前置校验签名: 规范化为 (op, value) 集合, 丢 content 释义 + 游离文本。
+
+    同一逻辑校验不同措辞/拆合 (如 'bio != nullptr' vs 'bio 空指针检查为空返回nullptr')
+    都归一为 (!=, NULL); 'cert->type == CERT_TYPE_DER' -> (==, cert_type_der)。
+    非 code 表达式 (中文描述/无比较运算符) 丢弃。让去重稳定 (见 find_processed_taint 子集去重)。
+    """
+    toks = sorted(set(t for t in (_canon_validation(v.condition) for v in validations) if t))
+    return "|".join(toks)
+
+
+_CV_OP = r"(==|!=|<=|>=|<|>)"
+
+
+def _canon_validation(condition: str) -> str | None:
+    """condition -> (op, value) 规范 token; 非 code 表达式(游离描述)返回 None 丢弃。"""
+    c = (condition or "").strip()
+    if not c:
+        return None
+    work = c.lower().replace("->", ".")  # 消掉 -> 的 > 干扰
+    # 必须以代码标识符开头 (挡中文/游离描述)
+    if not re.match(r"^[a-zA-Z_*][\w.\[\]*]*", work):
+        return None
+    m = re.search(_CV_OP, work)
+    if not m:
+        return None  # 无比较运算符 -> 游离描述, 丢
+    op = m.group(1)
+    val = work[m.end():].strip()
+    # 去掉 value 里的补充说明 (逻辑或/分号/逗号/括号 之后)
+    val = re.split(r"[;,(&|]", val)[0].strip()
+    if re.match(r"^(nullptr|null)\b", val):
+        val = "NULL"
+    return f"({op}, {val})" if val else None
 
 
 def _dedup_validations(validations: list[Validation]) -> list[Validation]:

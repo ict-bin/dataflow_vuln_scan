@@ -339,16 +339,27 @@ class DataflowStore:
 
     def find_processed_taint(self, func_id: str, taint_signature: str,
                              pre_validation_signature: str) -> ProcessedTaint | None:
-        """三重去重: (函数签名→func_id, 污点参数→taint_signature, 前置校验→pre_validation_signature)。
+        """三重去重: (func_id, taint_signature, 前置校验集)。
 
-        返回已处理记录则跳过重复分析。
+        前置校验用 (op,value) 规范 token 集做**子集/超集**匹配: 若已存在记录的校验集
+        是当前的**超集** (已含更全校验, 通常因 LLM 某轮漏报一两个校验) -> 当前视为已覆盖, 跳过。
+        当前为空校验集时仅与空集匹配 (避免 空 ⊆ 非空 的误并)。
         """
         f = self.get_function(func_id)
         if f is None:
             return None
-        ts, ps = _norm_sig(taint_signature), _norm_sig(pre_validation_signature)
+        ts = _norm_sig(taint_signature)
+        cur = set(_norm_sig(p) for p in (pre_validation_signature or "").split("|") if p)
         for pt in f.processed_taints:
-            if _norm_sig(pt.taint_signature) == ts and _norm_sig(pt.pre_validation_signature) == ps:
+            if _norm_sig(pt.taint_signature) != ts:
+                continue
+            existing = set(_norm_sig(p) for p in (pt.pre_validation_signature or "").split("|") if p)
+            if not cur:
+                # 当前无前置校验: 仅当已存在也无校验才命中 (避免 空 ⊆ 非空 误并不同路径)
+                if not existing:
+                    return pt
+                continue
+            if cur <= existing:  # 当前 ⊆ 已存在 (已存在更完整 -> 已覆盖当前)
                 return pt
         return None
 
