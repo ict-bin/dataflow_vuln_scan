@@ -284,19 +284,23 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                 pass
             # 2. 解决错误: 只有 stop=length 才 compact; stop=error 回退到 base_session
             if stop_reason == 'length':
-                # compact: 压缩 session (含截断的 assistant 消息), 保留摘要
-                self.on_event("v2_compact_before_retry", function=func.name,
-                              reason="stopReason=length")
-                try:
-                    from ..runner_helpers import _build_args as _ba
-                    from ..runner import _find_pi_command, _run_pi_compact
-                    _pi_cmd = _find_pi_command()
-                    _cargs = _ba(_pi_cmd, acfg.model, acfg.tools or self.cfg.workers.default_tools, "off", str(fork_session))
-                    _run_pi_compact(args=_cargs, cwd=str(self.run_dir), env=v2_env,
-                                    cancel_event=self.cancel_event,
-                                    timeout_seconds=min(self.cfg.agent_run_timeout_seconds or 300, 300))
-                except Exception as _ce:
-                    logger.warning("v2 compact before retry failed: %s", _ce, exc_info=True)
+                # 输出被 max_token 截断 (输出长度限制, 非上下文窗口溢出):
+                # 让 agent 继续未完成的工作; 若已输出 JSON 则完整重输 (部分 JSON 不可解析)。
+                # 不 compact (compact 是给 context_window 溢出的, 与 max_token 截断不同)。
+                self.on_event("v2_length_continue", function=func.name,
+                              reason="stopReason=length (max_token), continue work")
+                output = _run_taint_agent(
+                    "继续你刚才未完成的工作，只输出剩余部分，不要重复已输出内容。"
+                    "如果你刚才已经输出了 JSON，请重新完整输出该 JSON。")
+                if self.on_event:
+                    emit_agent_runtime_events(self.on_event, result=output,
+                                              stage="taint_analysis_v2_length_continue",
+                                              role="workers", model=acfg.model,
+                                              extra={"function": func.name, "attempt": retry_used})
+                # agent 续工作后完整 JSON 在最后一条 assistant 消息; 标准解析 (output.output 优先, all_texts 兑底)
+                all_texts = _collect_all_texts(output)
+                parsed, parse_warn = _parse_and_check(output.output, all_texts)
+                continue  # 已自处理 (continue + 标准解析), 跳过下方统一重发原始 prompt
             elif stop_reason == 'error':
                 # API 错误 (502/timeout 等): 回退到 base_session, 剥离所有错误消息
                 self.on_event("v2_rollback_before_retry", function=func.name,

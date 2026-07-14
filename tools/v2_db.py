@@ -25,6 +25,13 @@ import sqlite3
 import sys
 from pathlib import Path
 
+# 确保 app 包可导入: v2_db 可能被安装为 /usr/local/bin/v2_db (cp 副本, 非 symlink),
+# 此时 __file__ 解析为 /usr/local/bin → __file__ 相对路径错 (/usr/local 无 app 包)。
+# 用 DVS_APP_DIR (默认 /opt/dataflow_vuln_scan) 显式定位 app 包, 不依赖 __file__。
+_APP_DIR = os.environ.get("DVS_APP_DIR", "/opt/dataflow_vuln_scan")
+if _APP_DIR not in sys.path:
+    sys.path.insert(0, _APP_DIR)
+
 
 def _db_dir() -> Path:
     d = os.environ.get("DVS_V2_DB_DIR", "")
@@ -233,8 +240,7 @@ def cmd_index(file_path: str) -> None:
         conn.close()
         return
 
-    # 动态导入 function_extractor (在容器内 app 包路径)
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    # 动态导入 function_extractor (app 包路径已由顶部 sys.path 确保)
     try:
         from app.dataflow_v2.function_extractor import extract_file_functions
         from app.dataflow_v2.store import DataflowStore
