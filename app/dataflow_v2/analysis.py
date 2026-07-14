@@ -769,7 +769,7 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
         for idx, item in enumerate(parsed.get("findings") or []):
             if not isinstance(item, dict):
                 continue
-            finding_id = f"vuln_{hashlib.sha1((self.run_id+str(idx)+json.dumps(item, ensure_ascii=False)).encode()).hexdigest()[:16]}"
+            finding_id = f"vuln_{hashlib.sha1((ffn + '|' + str(item.get('vuln_type') or 'unknown') + '|' + fline).encode()).hexdigest()[:16]}"
             fdir = self.vuln_root / finding_id; fdir.mkdir(parents=True, exist_ok=True)
             fsrc = str(item.get("source_file") or func.file)
             ffn = str(item.get("function_name") or func.name)

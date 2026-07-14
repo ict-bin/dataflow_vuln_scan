@@ -75,12 +75,20 @@ def _q(db: sqlite3.Connection, sql: str) -> list[dict]:
 
 
 def _load_func_map(v2: Path) -> dict[str, dict]:
-    """func_id → {name, file, signature, start_line, description, processed_taints}"""
+    """func_id → {name, file, signature, start_line, description, processed_taints}。
+    processed_taints 迁移到独立表后, 列已弃用; 这里从 processed_taints 表 COUNT 填充,
+    保持返回 JSON list 字符串 (len=计数, !='[]' 当计数>0) 兼容下游判断。"""
     fc = sqlite3.connect(v2 / "functions.db")
-    rows = _q(fc, "SELECT func_id, file, name, signature, start_line, end_line, "
-                  "description, processed_taints FROM functions")
+    fc.row_factory = sqlite3.Row
+    rows = _q(fc, "SELECT func_id, file, name, signature, start_line, end_line, description FROM functions")
+    func_map = {r["func_id"]: dict(r) for r in rows}
+    for r in func_map.values():
+        r["processed_taints"] = "[]"
+    for r in _q(fc, "SELECT func_id, COUNT(*) as cnt FROM processed_taints GROUP BY func_id"):
+        if r["func_id"] in func_map:
+            func_map[r["func_id"]]["processed_taints"] = json.dumps([{}] * int(r["cnt"]))
     fc.close()
-    return {r["func_id"]: r for r in rows}
+    return func_map
 
 
 def _load_taints_by_func(v2: Path) -> dict[str, list[dict]]:

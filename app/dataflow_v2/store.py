@@ -57,6 +57,15 @@ _DDL = {
         );
         CREATE INDEX IF NOT EXISTS idx_func_name ON functions(name);
         CREATE INDEX IF NOT EXISTS idx_func_file ON functions(file);
+        CREATE TABLE IF NOT EXISTS processed_taints (
+            func_id                  TEXT NOT NULL,
+            taint_signature          TEXT NOT NULL,
+            pre_validation_signature TEXT NOT NULL DEFAULT '',
+            taint_params             TEXT DEFAULT '[]',
+            sessions_path            TEXT DEFAULT '',
+            PRIMARY KEY (func_id, taint_signature, pre_validation_signature)
+        );
+        CREATE INDEX IF NOT EXISTS idx_pt_func ON processed_taints(func_id);
         CREATE TABLE IF NOT EXISTS include_index (
             header TEXT NOT NULL,
             file   TEXT NOT NULL,
@@ -346,38 +355,48 @@ class DataflowStore:
         return [r["name"] for r in rows]
 
     def add_processed_taint(self, func_id: str, pt: ProcessedTaint) -> None:
-        f = self.get_function(func_id)
-        if f is None:
-            return
-        f.processed_taints.append(pt)
-        self._exec("functions", "UPDATE functions SET processed_taints=? WHERE func_id=?",
-                   (json.dumps([p.__dict__ if isinstance(p, ProcessedTaint) else p for p in f.processed_taints],
-                               ensure_ascii=False), func_id))
+        """原子写入 (INSERT OR IGNORE, PRIMARY KEY 去重) — 并发安全。
+
+        旧实现 load-modify-write JSON list: find(_q, 释放锁) → add(_exec, 再取锁) 两次独立锁定,
+        中间 gap 致并发两路径同污点都 find 无→都 add→重复 (taint_sig, pre_val) 存储→dedup 失效→重分析。
+        独立表 + PRIMARY KEY(func_id, taint_signature, pre_validation_signature) 让 DB 层原子去重:
+        并发两线程同 add, INSERT OR IGNORE 只存 1 行, 根治竞争。
+        """
+        ts = _norm_sig(pt.taint_signature or "")
+        pvs = pt.pre_validation_signature or ""
+        self._exec("functions",
+            "INSERT OR IGNORE INTO processed_taints (func_id, taint_signature, pre_validation_signature, taint_params, sessions_path) VALUES (?,?,?,?,?)",
+            (func_id, ts, pvs, json.dumps(pt.taint_params, ensure_ascii=False), pt.sessions_path))
 
     def find_processed_taint(self, func_id: str, taint_signature: str,
                              pre_validation_signature: str) -> ProcessedTaint | None:
         """三重去重: (func_id, taint_signature, 前置校验集)。
 
+        从 processed_taints 独立表查 (单次锁定 _q, 不再 load 全 list)。
         前置校验用 (op,value) 规范 token 集做**子集/超集**匹配: 若已存在记录的校验集
         是当前的**超集** (已含更全校验, 通常因 LLM 某轮漏报一两个校验) -> 当前视为已覆盖, 跳过。
         当前为空校验集时仅与空集匹配 (避免 空 ⊆ 非空 的误并)。
         """
-        f = self.get_function(func_id)
-        if f is None:
-            return None
         ts = _norm_sig(taint_signature)
         cur = set(_norm_sig(p) for p in (pre_validation_signature or "").split("|") if p)
-        for pt in f.processed_taints:
-            if _norm_sig(pt.taint_signature) != ts:
-                continue
-            existing = set(_norm_sig(p) for p in (pt.pre_validation_signature or "").split("|") if p)
+        rows = self._q("functions",
+            "SELECT taint_signature, pre_validation_signature, taint_params, sessions_path FROM processed_taints WHERE func_id=? AND taint_signature=?",
+            (func_id, ts))
+        for r in rows:
+            existing = set(_norm_sig(p) for p in (r["pre_validation_signature"] or "").split("|") if p)
             if not cur:
                 # 当前无前置校验: 仅当已存在也无校验才命中 (避免 空 ⊆ 非空 误并不同路径)
                 if not existing:
-                    return pt
+                    return ProcessedTaint(taint_params=json.loads(r["taint_params"] or "[]"),
+                                           taint_signature=r["taint_signature"], pre_validations=[],
+                                           pre_validation_signature=r["pre_validation_signature"],
+                                           sessions_path=r["sessions_path"])
                 continue
             if cur <= existing:  # 当前 ⊆ 已存在 (已存在更完整 -> 已覆盖当前)
-                return pt
+                return ProcessedTaint(taint_params=json.loads(r["taint_params"] or "[]"),
+                                       taint_signature=r["taint_signature"], pre_validations=[],
+                                       pre_validation_signature=r["pre_validation_signature"],
+                                       sessions_path=r["sessions_path"])
         return None
 
     # ── 污点库 ──────────────────────────────────────────────────────────────
