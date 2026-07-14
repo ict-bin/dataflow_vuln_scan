@@ -218,29 +218,31 @@ class DfsOrchestrator:
     def _process(self, func: FunctionRecord, taint_params: TaintParamInfo,
                  pre_validations: list[Validation], base_session: str,
                  ctx: PathContext, depth: int) -> tuple[list[Validation], list[TaintRecord]]:
-        # 1) 三重去重
+        # 1) 三重去重 (子集匹配: 已有更完整 pre_val 的记录 → 当前视为已覆盖, 跳过)
         pre_val_sig = _validation_sig(pre_validations)
         _nts = _norm_taint_sig(taint_params.signature)
-        _found = self.store.find_processed_taint(func.func_id, _nts, pre_val_sig)
-        if _found:
+        if self.store.find_processed_taint(func.func_id, _nts, pre_val_sig):
             return [], []  # 已分析过, 跳过
-        # DEBUG: find 返回 None 的原因定位
-        try:
-            self.cbs.on_event("v2_find_miss_debug",
-                function=func.name, func_id=func.func_id[:10], file=func.file,
-                taint_sig=_nts, taint_params_sig=taint_params.signature,
-                pre_val_sig=pre_val_sig[:60] if pre_val_sig else "(empty)",
-                pre_val_n=len(pre_validations), depth=depth)
-        except Exception:
-            pass
+        # 1b) 双检锁: analyze 前先占位 (INSERT OR IGNORE), 防并发 N 路径同 (func,taint,pre_val)
+        #     同时 find-None → 全跑 LLM → N 份冗余分析。占位成功→本线程分析; 占位失败→并发 peer 在分析→跳过。
+        _reserve = ProcessedTaint(
+            taint_params=taint_params.names, taint_signature=_nts,
+            pre_validations=[v.to_dict() for v in pre_validations],
+            pre_validation_signature=pre_val_sig, sessions_path=base_session)
+        if not self.store.try_reserve_processed_taint(func.func_id, _reserve):
+            return [], []  # 并发 peer 已占位, 跳过
 
         self.cbs.on_event("trace_start", function=func.name, source_file=func.file,
                           depth=depth, max_depth=self.max_depth)
 
-        # 2) LLM 污点分析 (fork 会话)
+        # 2) LLM 污点分析 (fork 会话); 失败时删占位 (让后续可重试)
         ctx.depth = depth
-        result = self._run_llm(
-            self.cbs.analyze_function, self.store, func, taint_params, pre_validations, base_session, ctx)
+        try:
+            result = self._run_llm(
+                self.cbs.analyze_function, self.store, func, taint_params, pre_validations, base_session, ctx)
+        except BaseException:
+            self.store.delete_processed_taint(func.func_id, _nts, pre_val_sig)
+            raise
         for t in result.taints:
             self.store.upsert_taint(t)
         for p in result.propagations:
@@ -259,11 +261,7 @@ class DfsOrchestrator:
         self_contained = result.self_contained
         chain_session = result.session_path
 
-        # 3) 记录 processed_taint (去重锚点)
-        self.store.add_processed_taint(func.func_id, ProcessedTaint(
-            taint_params=taint_params.names, taint_signature=_norm_taint_sig(taint_params.signature),
-            pre_validations=[v.to_dict() for v in pre_validations],
-            pre_validation_signature=pre_val_sig, sessions_path=base_session))
+        # 3) 占位已在 1b 完成 (双检锁); 此处无需再 add
 
         my_discovered = _dedup_validations(
             [v for p in result.propagations for v in p.validations])

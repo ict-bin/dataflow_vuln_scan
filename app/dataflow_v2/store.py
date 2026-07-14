@@ -355,18 +355,39 @@ class DataflowStore:
         return [r["name"] for r in rows]
 
     def add_processed_taint(self, func_id: str, pt: ProcessedTaint) -> None:
-        """原子写入 (INSERT OR IGNORE, PRIMARY KEY 去重) — 并发安全。
-
-        旧实现 load-modify-write JSON list: find(_q, 释放锁) → add(_exec, 再取锁) 两次独立锁定,
-        中间 gap 致并发两路径同污点都 find 无→都 add→重复 (taint_sig, pre_val) 存储→dedup 失效→重分析。
-        独立表 + PRIMARY KEY(func_id, taint_signature, pre_validation_signature) 让 DB 层原子去重:
-        并发两线程同 add, INSERT OR IGNORE 只存 1 行, 根治竞争。
-        """
+        """写入 processed_taint (INSERT OR IGNORE, PRIMARY KEY 去重)。"""
         ts = _norm_sig(pt.taint_signature or "")
         pvs = pt.pre_validation_signature or ""
         self._exec("functions",
             "INSERT OR IGNORE INTO processed_taints (func_id, taint_signature, pre_validation_signature, taint_params, sessions_path) VALUES (?,?,?,?,?)",
             (func_id, ts, pvs, json.dumps(pt.taint_params, ensure_ascii=False), pt.sessions_path))
+
+    def try_reserve_processed_taint(self, func_id: str, pt: ProcessedTaint) -> bool:
+        """分析前预留占位 (双检锁防并发重复分析)。
+
+        find-then-analyze-then-add 的竞争窗口: 并发 N 路径同 (func, taint, pre_val) 几乎同时 find
+        (rows=0, 谁都没 add) → 全 None → 全跑 4min LLM → N 份冗余 -taint 文件 → add 时
+        INSERT OR IGNORE 只存 1 行 (防重复存储, 但不防重复分析)。
+        修复: analyze 前先 INSERT OR IGNORE 占位; 若本线程插入成功 (rowcount=1) → 占位成功,
+        继续分析; 若 rowcount=0 (已被并发 peer 占位) → 跳过 (peer 正在分析)。analyze 失败时
+        delete 占位 (可重试)。
+        """
+        ts = _norm_sig(pt.taint_signature or "")
+        pvs = pt.pre_validation_signature or ""
+        with self._locks["functions"]:
+            cur = self._conns["functions"].execute(
+                "INSERT OR IGNORE INTO processed_taints (func_id, taint_signature, pre_validation_signature, taint_params, sessions_path) VALUES (?,?,?,?,?)",
+                (func_id, ts, pvs, json.dumps(pt.taint_params, ensure_ascii=False), pt.sessions_path))
+            self._conns["functions"].commit()
+            return cur.rowcount == 1
+
+    def delete_processed_taint(self, func_id: str, taint_signature: str, pre_validation_signature: str) -> None:
+        """删除占位 (analyze 失败时, 让后续可重试)。"""
+        ts = _norm_sig(taint_signature or "")
+        pvs = pre_validation_signature or ""
+        self._exec("functions",
+            "DELETE FROM processed_taints WHERE func_id=? AND taint_signature=? AND pre_validation_signature=?",
+            (func_id, ts, pvs))
 
     def find_processed_taint(self, func_id: str, taint_signature: str,
                              pre_validation_signature: str) -> ProcessedTaint | None:
