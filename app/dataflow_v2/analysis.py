@@ -821,6 +821,29 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
             # 上报 vuln-platform intake — 失败只记日志/事件 + 回写 report_status,
             # 绝不影响任务成败 (mine_vulns 仍返回 finding 数)
             self._report_finding_to_intake(finding_id, rec, fdir)
+        # 实时同步漏洞计数到 MySQL: running 任务在列表也能显示数量 (不再 "-";
+        # vuln_total_count 默认 -1, 之前只在任务完成 _record_terminal_event 时同步)
+        try:
+            with self.graph_store.connect() as _conn:
+                _tot = _conn.execute(
+                    "SELECT count(*) FROM vulnerability_findings WHERE run_id=?", (self.run_id,)).fetchone()[0]
+                _rep = _conn.execute(
+                    "SELECT count(*) FROM vulnerability_findings WHERE run_id=? AND report_status='reported'",
+                    (self.run_id,)).fetchone()[0]
+            from app.db import get_db
+            from app.db.models import AppDvsTask
+            _db = next(get_db())
+            try:
+                _row = _db.query(AppDvsTask).filter_by(task_id=self.task_id).first()
+                if _row is not None and (_row.vuln_total_count != _tot or _row.vuln_reported_count != _rep):
+                    _row.vuln_total_count = _tot
+                    _row.vuln_reported_count = _rep
+                    _row.vuln_unreported_count = _tot - _rep
+                    _db.commit()
+            finally:
+                _db.close()
+        except Exception:
+            pass
         return n
 
     def _report_finding_to_intake(self, finding_id: str, rec: VulnFindingRecord,
