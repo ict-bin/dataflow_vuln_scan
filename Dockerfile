@@ -24,6 +24,11 @@ RUN pip install --no-cache-dir \
     && python3 -c "import tree_sitter, tree_sitter_c, tree_sitter_cpp; print('tree-sitter OK')" \
     && python3 -c "from pydantic import BaseModel; print('pydantic OK')"
 
+# ═══ cache-bust: 每次 commit 改变该层, 强制后续 COPY app/ 代码层重建 ══════
+# (buildx GHA 缓存曾命中旧 app 层致 digest 不变; 此 ARG bust 代码层, pip 层仍缓存)
+ARG CACHEBUST=""
+RUN echo "cachebust=$CACHEBUST" > /opt/cachebust
+
 # ═══ 项目代码 (随代码变更增量重建) ═════════════════════════════════════════
 COPY app/               ./app/
 COPY main.py     ./

@@ -87,6 +87,7 @@ class TaintRecord:
     function: str = ""                  # 函数名 (冗余, 便于查询)
     next_propagations: list[str] = field(default_factory=list)   # prop_id 列表
     description: str = ""               # 污点内容说明
+    entry_line: int = 0                # return_taint 专用: 污点从该行进入 caller (callee 调用点行); 常规污点=0
 
     def __post_init__(self) -> None:
         if not self.taint_id:
@@ -105,11 +106,17 @@ class TaintRecord:
 
 @dataclass
 class Validation:
-    condition: str = ""                 # 校验条件 (如 "msg->length > 0")
-    content: str = ""                   # 校验内容/语义
+    """一条校验记录: 污点为左值, 记录校验类型(运算符)与右值(代码字面量)。
+
+    由 LLM 据本函数代码行输出, 脚本核对 (运算符合法 + 右值为标识符/字面量) 后入链。
+    不允许重述调用链传来的前置校验 — 只报本函数内新执行的校验。"""
+    left: str = ""      # 被校验的污点符号 (左值; 当前跟踪的污点或其字段/成员)
+    op: str = ""        # 校验类型 (运算符): == != <= >= < >
+    right: str = ""     # 右值: 代码字面量 (宏/枚举/nullptr/数值/常量, 可带 ::)
+    line: int = 0       # 校验所在代码行
 
     def to_dict(self) -> dict:
-        return {"condition": self.condition, "content": self.content}
+        return {"left": self.left, "op": self.op, "right": self.right, "line": self.line}
 
 
 @dataclass

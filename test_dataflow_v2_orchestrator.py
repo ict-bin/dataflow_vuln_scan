@@ -114,7 +114,9 @@ class TestPathBuilding(unittest.TestCase):
 class TestDedupAndFeedback(unittest.TestCase):
     def test_dedup_validations(self):
         from app.dataflow_v2.orchestrator import _dedup_validations
-        vs = [Validation("a", "b"), Validation("a", "b"), Validation("c", "d")]
+        vs = [Validation(left="a", op="==", right="b"),
+               Validation(left="a", op="==", right="b"),
+               Validation(left="c", op="==", right="d")]
         out = _dedup_validations(vs)
         self.assertEqual(len(out), 2)
 

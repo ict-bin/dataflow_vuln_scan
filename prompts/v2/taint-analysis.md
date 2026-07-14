@@ -6,9 +6,9 @@
 
 ## 语言要求（最高优先级）
 
-所有文本输出使用简体中文。JSON key 保持英文，`description`/`condition`/`content`/
-`validations.content` 等 value 用中文。`signature`/`target_function`/`target_taint`
-用代码原文标识符（不翻译）。
+所有文本输出使用简体中文。JSON key 保持英文，`description` 等 value 用中文。
+`left`/`right`/`target_function`/`target_taint`/`source_taint`/`signature`
+用代码原文标识符（不翻译）。`op` 用运算符。
 
 ## 输入
 
@@ -43,7 +43,7 @@
       "target_taint": "pkt",
       "target_function": "C",
       "validations": [
-        { "condition": "msg->length>0", "content": "长度已校验" }
+        { "left": "msg->length", "op": ">", "right": "0", "line": 12 }
       ],
       "description": "msg 透传给 C 的 pkt 参数",
       "is_external": false
@@ -80,8 +80,12 @@ target_file —— 这些由服务端 clang/脚本从 AST 精确获取 (行号/�
   ✅ `source_taint="filename"`, `target_taint="filename"` (filename 是 callee 参数, 正确)
 - `target_function`：本函数**真实调用**的 callee 名 (clang 会校验并定位精确 CallExpr)。
   传播到外部/全局变量时留空 + `is_external=true`。
-- `validations`：本传播过程中 (从源污点到调用点) 累积的校验, 每项 `{condition, content}`。
-  包括上游传入的前置校验中**在本函数内仍然生效**的部分, 以及本函数新增加的校验。
+- `validations`：本传播过程中**本函数内新执行的校验**。每项 `{left, op, right, line}`：
+  - `left`：被校验的污点符号（左值）——当前跟踪的污点或其字段/成员（如 `msg->length`、`cert->type`、`fd`）。
+  - `op`：校验类型（运算符）`==` `!=` `<=` `>=` `<` `>`。
+  - `right`：右值——**代码里的字面量**（宏、枚举、`nullptr`/`null`、数值、常量；可带 `::`，如 `Socks5AddrType::IPV4`、`SOCKS5_DO_CONNECT_COUNT_MAX`），不要写中文描述。
+  - `line`：该校验所在代码行号。
+  - **只报本函数自己新执行的校验**；调用链传来的前置校验**不要重述**（脚本已入链，你只见其摘要）。
 - `description`：传播语义 + callee 行为事实 (如"C 返回 PyBytes_AsString 借用指针, 非 xmlMalloc"),
   供下游漏洞挖掘识别跨函数漏洞 (如 double-free)。
 - `is_external`：污点流出本函数作用域为 true。不只“写全局变量”一种，还包括：污点写入某个载体（常是堆分配）后该载体被挂入外部可达容器、或经入参指针字段传出。详见下节「逃逸传播」。污点作为参数传给本函数调用的 callee 且 callee 定义可达时为 false。

@@ -42,7 +42,7 @@ class TestStore(unittest.TestCase):
                               source_taint_signature="msg[0]", target_taint_name="pkt",
                               target_taint_signature="pkt[0]", target_func_id="fid_C",
                               condition="always",
-                              validations=[Validation("msg->length>0", "长度校验")],
+                              validations=[Validation(left="msg->length", op=">", right="0", line=12)],
                               description="msg 透传给 C")
         self.store.upsert_propagation(p)
         self.store.add_propagation_to_taint(t.taint_id, p.prop_id)
@@ -50,7 +50,7 @@ class TestStore(unittest.TestCase):
         self.assertEqual(self.store.get_taint(t.taint_id).next_propagations, [p.prop_id])
         props = self.store.list_propagations_from(f.func_id)
         self.assertEqual(len(props), 1)
-        self.assertEqual(props[0].validations[0].condition, "msg->length>0")
+        self.assertEqual(props[0].validations[0].left, "msg->length")
 
     def test_orchestration_path(self):
         e = OrchestrationEdge(path_id="p1", source_function="A", source_signature="A",

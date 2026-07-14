@@ -35,7 +35,7 @@ from .function_extractor import ensure_file_indexed
 from .models import (
     FunctionRecord, PropagationRecord, TaintParamInfo, TaintRecord, Validation,
 )
-from .orchestrator import AnalysisResult, AnalysisCallbacks, PathContext
+from .orchestrator import AnalysisResult, AnalysisCallbacks, PathContext, _session_path
 from .store import DataflowStore
 
 logger = logging.getLogger("dvs.dataflow_v2")
@@ -189,7 +189,8 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
         body = self._read_body(func)
 
         # 2) fork session (v1 模型: copy base_session → 累积链上下文 A→A+B→A+B+C)
-        fork_session = self.sessions_dir / f"d{ctx.depth:02d}-{_safe_name(func.name)}-taint.jsonl"
+        fork_session = _session_path(self.sessions_dir, ctx.depth, func.name,
+                                       taint_params.names[0] if taint_params.names and taint_params.names != ["auto"] else "")
         try:
             if base_session and Path(base_session).exists():
                 safe_copyfile(base_session, str(fork_session))
@@ -275,7 +276,8 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
             self.on_event("v2_taint_retry_json", function=func.name, attempt=retry_used,
                           reason=parse_warn, stop_reason=stop_reason)
             # 1. 保存错误 session (加 -error{N} 后缀, 保留供后续定位)
-            _err_session = self.sessions_dir / f"d{ctx.depth:02d}-{_safe_name(func.name)}-taint-error{retry_used}.jsonl"
+            _err_session = _session_path(self.sessions_dir, ctx.depth, func.name,
+                                          f"error{retry_used}")
             try:
                 safe_copyfile(str(fork_session), str(_err_session))
             except OSError:
@@ -399,7 +401,11 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                 carrier=carrier,
                 escape_via=escape_via,
                 _llm_said_external=llm_said_external,
-                validations=[Validation(str(v.get("condition") or ""), str(v.get("content") or ""))
+                validations=[Validation(
+                                 left=str(v.get("left") or v.get("condition") or ""),
+                                 op=str(v.get("op") or ""),
+                                 right=str(v.get("right") or v.get("content") or ""),
+                                 line=int(v.get("line") or 0))
                              for v in (p.get("validations") or []) if isinstance(v, dict)],
                 description=str(p.get("description") or ""),
             ))
@@ -501,10 +507,10 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                     # propagation: 参数间传播 (如 memcpy src→dst)
                     if inf.get("propagation"):
                         prop.is_external_callee = False
-                    # validation: 校验描述
+                    # validation: 校验描述 (外部函数推断, 弱信号; op 留空, 不入去重签名)
                     if inf.get("validation"):
                         prop.validations.append(
-                            Validation(str(inf.get("validation")), ""))
+                            Validation(left=prop.source_taint_name, op="", right=str(inf.get("validation"))))
                     self.on_event("v2_external_callee_inferred",
                                   function=prop.target_function,
                                   caller=func.name,
@@ -673,7 +679,7 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
         else:
             taint_desc = (f"位置 {taint_params.positions} 签名 {taint_params.signature} "
                           f"名字 {taint_params.names}")
-        pre_val_text = "\n".join(f"- {v.condition}: {v.content}" for v in pre_validations) or "(无)"
+        pre_val_text = "\n".join(f"- {v.left} {v.op} {v.right} (行 {v.line})" for v in pre_validations if v.left and v.op) or "(无)"
         return (
             f"# 阶段：单函数污点传播分析 Fork\n\n"
             f"目标函数: `{func.file}::{func.name}` (行 {func.start_line}-{func.end_line})\n"
@@ -712,7 +718,7 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
         acfg = self.cfg.workers.agents[0] if self.cfg.workers.agents else None
         if acfg is None:
             return 0
-        fork_session = self.sessions_dir / f"d{ctx.depth:02d}-{_safe_name(func.name)}-vuln.jsonl"
+        fork_session = _session_path(self.sessions_dir, ctx.depth, func.name, "", kind="vuln")
         try:
             if base_session and Path(base_session).exists():
                 safe_copyfile(base_session, str(fork_session))
@@ -896,7 +902,7 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                               props: list[PropagationRecord],
                               store: DataflowStore | None = None) -> str:
         from .function_extractor import read_function_body
-        pre_val = "\n".join(f"- {v.condition}: {v.content}" for v in ctx.pre_validations) or "(无)"
+        pre_val = "\n".join(f"- {v.left} {v.op} {v.right} (行 {v.line})" for v in ctx.pre_validations if v.left and v.op) or "(无)"
         func_body = read_function_body(self.source_root, func, max_lines=500)
         lines = [f"## 函数: {func.file}::{func.name} (行 {func.start_line}-{func.end_line})",
                  f"功能: {func.description or '(待分析)'}",

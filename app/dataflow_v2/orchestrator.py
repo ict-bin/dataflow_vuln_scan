@@ -61,7 +61,7 @@ class PathContext:
         self.depth: int = 0
 
     def validation_signature(self) -> str:
-        return "|".join(f"{v.condition}::{v.content}" for v in self.pre_validations)
+        return "|".join(t for t in (_canon_validation(v) for v in self.pre_validations) if t)
 
     def fork(self, new_path_id: str) -> "PathContext":
         c = PathContext(new_path_id)
@@ -200,12 +200,11 @@ class DfsOrchestrator:
                               return_taints=[rt.name for rt in return_taints])
         for caller in callers:
             for rt in return_taints:
-                rt_sig = rt.signature or rt.name
+                rt_sig = _norm_taint_sig(rt.signature or rt.name)
                 if self.store.find_processed_taint(caller.func_id, rt_sig, _validation_sig([])):
                     continue
                 new_tp = TaintParamInfo(positions=[], signature=rt_sig, names=[rt.name])
-                from pathlib import Path as _P
-                new_session = str(_P(base_session).parent / f"dm01-{_safe_name(caller.name)}-taint-{_safe_name(rt.name)}.jsonl") if base_session else ""
+                new_session = str(_session_path(self.cbs.sessions_dir, -1, caller.name, rt.name, kind="taint")) if base_session else ""
                 if base_session:
                     from ..copy_utils import safe_copyfile
                     try:
@@ -221,7 +220,7 @@ class DfsOrchestrator:
                  ctx: PathContext, depth: int) -> tuple[list[Validation], list[TaintRecord]]:
         # 1) 三重去重
         pre_val_sig = _validation_sig(pre_validations)
-        if self.store.find_processed_taint(func.func_id, taint_params.signature, pre_val_sig):
+        if self.store.find_processed_taint(func.func_id, _norm_taint_sig(taint_params.signature), pre_val_sig):
             return [], []  # 已分析过, 跳过
 
         self.cbs.on_event("trace_start", function=func.name, source_file=func.file,
@@ -251,7 +250,7 @@ class DfsOrchestrator:
 
         # 3) 记录 processed_taint (去重锚点)
         self.store.add_processed_taint(func.func_id, ProcessedTaint(
-            taint_params=taint_params.names, taint_signature=taint_params.signature,
+            taint_params=taint_params.names, taint_signature=_norm_taint_sig(taint_params.signature),
             pre_validations=[v.to_dict() for v in pre_validations],
             pre_validation_signature=pre_val_sig, sessions_path=base_session))
 
@@ -325,13 +324,22 @@ class DfsOrchestrator:
             self._run_llm(self.cbs.mine_vulns, self.store, func, taint_params, ctx, chain_session)
 
         # 7) return_taints 回传: 对每个 callee 返回的新污点, 在当前函数启动新分析分支
+        # #11: return_taint 带 entry_line (callee 调用点行); 若该污点本函数已持有 (escape 源头)
+        #    则不回传重分析 — 否则形成冗余循环 (源头早有该污点, reader 回传=重复)
+        # #13: taint_sig 归一 (去 this->/尾 ()) 让 proxyBindAddr_ / this->proxyBindAddr_ 去重命中
+        my_taint_sigs = {_norm_taint_sig(t.name) for t in result.taints} | {_norm_taint_sig(n) for n in taint_params.names}
         for rt in all_callee_return_taints:
-            rt_sig = rt.signature or rt.name
+            rt_sig = _norm_taint_sig(rt.signature or rt.name)
             if self.store.find_processed_taint(func.func_id, rt_sig, pre_val_sig):
                 continue  # 已分析过此污点, 跳过
-            # 新 fork session (从父链重新 fork, taint 不同)
-            from pathlib import Path as _P
-            new_session = str(_P(chain_session).parent / f"d{depth:02d}-{_safe_name(func.name)}-taint-{_safe_name(rt.name)}.jsonl") if chain_session else ""
+            if rt_sig in my_taint_sigs:
+                # 本函数已持有该污点 (escape 源头场景): reader 回传=冗余, 跳过, 终止循环
+                self.cbs.on_event("v2_return_taint_skipped_redundant",
+                                  function=func.name, taint=rt.name, entry_line=rt.entry_line,
+                                  reason="func already holds this taint (escape source)")
+                continue
+            # 新 fork session (从父链重新 fork, taint 不同); #10: 不覆盖, NN 自增
+            new_session = str(_session_path(self.cbs.sessions_dir, depth, func.name, rt.name)) if chain_session else ""
             if chain_session:
                 from ..copy_utils import safe_copyfile
                 try:
@@ -363,6 +371,8 @@ class DfsOrchestrator:
             child_fb, child_rts = self._process(step.func, step.taint_params, incoming,
                                                  base_session, sub_ctx, depth + 1)
             accumulated.extend(child_fb)
+            for _rt in child_rts:
+                _rt.entry_line = step.call_line  # #11: return_taint 进入 caller 的行 (callee 调用点)
             all_return_taints.extend(child_rts)
         return accumulated, all_return_taints
 
@@ -533,46 +543,95 @@ def _path_id(func_id: str, taint_sig: str, depth: str) -> str:
     return hashlib.sha1(f"{func_id}\x1f{taint_sig}\x1f{depth}".encode()).hexdigest()[:16]
 
 
-def _validation_sig(validations: list[Validation]) -> str:
-    """前置校验签名: 规范化为 (op, value) 集合, 丢 content 释义 + 游离文本。
+def _session_path(sessions_dir: Path, depth: int, func_name: str, taint_name: str,
+                  kind: str = "taint") -> Path:
+    """会话文件路径: d{depth}-{func}-{kind}-{taint}-{NN}.jsonl, NN 自增不撞名 (#10)。
 
-    同一逻辑校验不同措辞/拆合 (如 'bio != nullptr' vs 'bio 空指针检查为空返回nullptr')
-    都归一为 (!=, NULL); 'cert->type == CERT_TYPE_DER' -> (==, cert_type_der)。
-    非 code 表达式 (中文描述/无比较运算符) 丢弃。让去重稳定 (见 find_processed_taint 子集去重)。
+    含污点名; 同 (深度,函数,污点) 的重分析取 -01/-02... 不覆盖, 便于回溯。
     """
-    toks = sorted(set(t for t in (_canon_validation(v.condition) for v in validations) if t))
+    base = f"d{depth:02d}-{_safe_name(func_name)}-{kind}"
+    if taint_name:
+        base += f"-{_safe_name(taint_name)}"
+    p = sessions_dir / f"{base}-00.jsonl"
+    n = 0
+    while p.exists():
+        n += 1
+        p = sessions_dir / f"{base}-{n:02d}.jsonl"
+    return p
+
+
+def _validation_sig(validations: list[Validation]) -> str:
+    """前置校验签名: 规范化为 (left|op|right) token 集合。
+
+    校验由 LLM 据代码行输出 (left=污点, op=运算符, right=代码字面量), 脚本核对后入链。
+    同一校验逐轮稳定 (值来自代码字面量, 不再漂移)。非合规 (运算符非法/右值非字面量) 丢弃。
+    """
+    toks = sorted(set(t for t in (_canon_validation(v) for v in validations) if t))
     return "|".join(toks)
 
 
-_CV_OP = r"(==|!=|<=|>=|<|>)"
+_VALID_OPS = {"==", "!=", "<=", ">=", "<", ">"}
 
 
-def _canon_validation(condition: str) -> str | None:
-    """condition -> (op, value) 规范 token; 非 code 表达式(游离描述)返回 None 丢弃。"""
-    c = (condition or "").strip()
-    if not c:
+def _canon_validation(v: Validation) -> str | None:
+    """Validation -> (left|op|right) 规范 token; 非合规 (运算符非法/左值或右值非字面量) 丢弃。
+
+    left/right 取代码标识符 token (允许 :: / . / -> / 下划线/数字), 丢弃中文/游离描述。
+    nullptr/null 统一为 NULL。
+    """
+    op = (v.op or "").strip()
+    if op not in _VALID_OPS:
         return None
-    work = c.lower().replace("->", ".")  # 消掉 -> 的 > 干扰
-    # 必须以代码标识符开头 (挡中文/游离描述)
-    if not re.match(r"^[a-zA-Z_*][\w.\[\]*]*", work):
+    left = _norm_ident(v.left)
+    right = _norm_ident(v.right)
+    if not left or not right:
         return None
-    m = re.search(_CV_OP, work)
-    if not m:
-        return None  # 无比较运算符 -> 游离描述, 丢
-    op = m.group(1)
-    val = work[m.end():].strip()
-    # 去掉 value 里的补充说明 (逻辑或/分号/逗号/括号 之后)
-    val = re.split(r"[;,(&|]", val)[0].strip()
-    if re.match(r"^(nullptr|null)\b", val):
-        val = "NULL"
-    return f"({op}, {val})" if val else None
+    return f"({left}|{op}|{right})"
+
+
+_IDENT_RE = re.compile(r"^[A-Za-z_][\w:.<>\[\]*]*$")
+
+
+def _norm_ident(s: str) -> str:
+    """标识符 token 归一: 去首尾空白/括号, 校验为合法代码字面量 (宏/枚举/nullptr/数值/常量, 可带 :: . ->)。"""
+    if s is None:
+        return ""
+    t = str(s).strip().strip("()")
+    # 取第一个连续 token (遇空格/中文即截)
+    m = re.match(r"[A-Za-z_][\w:.<>\[\]*]*", t)
+    if m:
+        t = m.group(0)
+    elif re.match(r"^-?\d+(\.\d+)?$", t):
+        pass  # 数值字面量
+    else:
+        return ""
+    if not _IDENT_RE.match(t) and not re.match(r"^-?\d+(\.\d+)?$", t):
+        return ""
+    low = t.lower()
+    if low in ("nullptr", "null"):
+        return "NULL"
+    return t
+
+
+def _norm_taint_sig(name: str) -> str:
+    """污点签名归一 (#13): 去隐式 this->/self-> 限定 + 尾部 (), 让 proxyBindAddr_ / this->proxyBindAddr_
+    归一为同一污点 (方法上下文隐式 this), 供 find_processed_taint 去重命中, 终止 return_taint 循环。"""
+    if not name:
+        return ""
+    t = str(name).strip()
+    for prefix in ("this->", "this.", "self->", "self."):
+        if t.startswith(prefix):
+            t = t[len(prefix):]
+            break
+    t = t.rstrip("()")
+    return t
 
 
 def _dedup_validations(validations: list[Validation]) -> list[Validation]:
     seen: set[str] = set()
     out: list[Validation] = []
     for v in validations:
-        k = f"{v.condition}::{v.content}"
+        k = _canon_validation(v) or f"{v.left}::{v.op}::{v.right}::{v.line}"
         if k not in seen:
             seen.add(k)
             out.append(v)

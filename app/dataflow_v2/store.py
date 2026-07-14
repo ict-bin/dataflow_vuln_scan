@@ -27,6 +27,20 @@ from .models import (
     TaintParamInfo, TaintRecord, Validation, _norm_sig, _sha,
 )
 
+
+def _validation_from_dict(v: dict) -> Validation:
+    """从 dict 重建 Validation, 兼容旧格式 {condition, content} 与新格式 {left, op, right, line}。"""
+    if not isinstance(v, dict):
+        return Validation()
+    if any(k in v for k in ("left", "op", "right")):
+        return Validation(
+            left=str(v.get("left") or ""),
+            op=str(v.get("op") or ""),
+            right=str(v.get("right") or ""),
+            line=int(v.get("line") or 0))
+    # 旧格式 {condition, content}: 退化为弱记录 (op 留空, 不入去重签名)
+    return Validation(left=str(v.get("condition") or ""), op="", right=str(v.get("content") or ""))
+
 _DDL = {
     "functions": """
         CREATE TABLE IF NOT EXISTS functions (
@@ -493,7 +507,7 @@ def _row_to_propagation(row: sqlite3.Row) -> PropagationRecord:
         branch_path=json.loads(row["branch_path"] or "[]"),
         mutex_siblings=json.loads(row["mutex_siblings"] or "[]"),
         actual_args=json.loads(row["actual_args"] or "[]"),
-        validations=[Validation(**v) for v in vals if isinstance(v, dict)],
+        validations=[_validation_from_dict(v) for v in vals if isinstance(v, dict)],
         description=row["description"])
 
 
