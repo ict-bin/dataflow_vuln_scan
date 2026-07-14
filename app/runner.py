@@ -945,8 +945,10 @@ def _process_line(
                 if result_lock:
                     with result_lock:
                         result.error = err_msg
+                        result.stop_reason = "error"
                 else:
                     result.error = err_msg
+                    result.stop_reason = "error"
 
             # RPC mode: when LLM completes (stop/end_turn/length/error), signal stdout
             # reader to close stdin so pi detects EOF and sends agent_end.

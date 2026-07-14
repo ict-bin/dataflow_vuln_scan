@@ -76,6 +76,9 @@ class AgentResult:
         self.runtime_dir: str | None = None
         self.context_window: int = 0
         self.proxy_reserved_tokens: int = 0
+        # 模型侧 stopReason (pi RPC 透传); "error" = 模型内部错误 (overloaded/internal),
+        # 多为瞬时, 源码分析无内容过滤风险 → _is_retryable_api_error 当可重试
+        self.stop_reason: str = ""
         self.compaction_requested: bool = False
         self.compaction_completed: bool = False
         self.context_budget_exceeded_preflight: bool = False
@@ -515,6 +518,10 @@ def _is_fatal_error(result: AgentResult) -> bool:
 def _is_retryable_api_error(result: AgentResult) -> bool:
     if result.fatal:
         return False
+    # 模型侧 stopReason=error (overloaded/internal/瞬时 API 错误): 当可重试。
+    # 源码污点分析输入是代码, 无内容过滤风险; 瞬时错误退避重试即可恢复。
+    if getattr(result, "stop_reason", "") == "error":
+        return True
     error_text = (result.error or "").lower()
     if not error_text:
         return False

@@ -444,10 +444,38 @@ class DfsOrchestrator:
         return [p for p in paths if p]  # 剔除空链
 
     def _prop_to_step(self, p: PropagationRecord) -> ChainStep | None:
-        """callee 传播 → ChainStep (解析 target_func_id 拿 FunctionRecord, 由 actual_args 位置)。"""
-        if not p.target_func_id:
-            return None
-        rec = self.store.get_function(p.target_func_id)
+        """callee 传播 → ChainStep (解析 target_func_id 拿 FunctionRecord, 由 actual_args 位置)。
+
+        三级回退解析 callee 定义, 让 DFS 能跟入跨 TU 的 callee:
+          1) target_func_id 直查 (最快)
+          2) 按名+后缀(::method) 回查 (修 LLM 未填 func_id 但函数已索引)
+          3) on-demand: find_func_in_source 在源码树定位定义文件 → ensure_file_indexed
+             增量索引 → 再查 (修跨 TU 未索引, 根因 1)
+        仍找不到 → None (真外部/libc, 如 recv/BIO_*)。
+        """
+        rec = None
+        if p.target_func_id:
+            rec = self.store.get_function(p.target_func_id)
+        if rec is None and p.target_function:
+            # 按名 (+ Class::method 后缀) 回查 — 覆盖 func_id 未填但已索引的情况
+            rec = self.store.find_function(p.target_function)
+        if rec is None and p.target_function:
+            # on-demand: 在源码树定位 callee 定义文件并增量索引
+            try:
+                from .function_extractor import find_func_in_source, ensure_file_indexed
+                src_root = getattr(self.cbs, "source_root", "") or getattr(self.cbs.cfg, "source_root", "")
+                if src_root:
+                    found = find_func_in_source(p.target_function, src_root)
+                    if found:
+                        ensure_file_indexed(src_root, found[0], self.store)
+                        rec = self.store.find_function(p.target_function)
+                        if rec:
+                            self.cbs.on_event("v2_callee_indexed_ondemand",
+                                              function=p.target_function,
+                                              callee=p.target_function,
+                                              indexed_file=found[0])
+            except Exception:
+                pass
         if rec is None:
             return None
         positions = _derive_positions(p.actual_args, p.target_taint_name, p.source_taint_name)
