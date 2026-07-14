@@ -189,7 +189,7 @@ class DfsOrchestrator:
                 continue
             # 快速过滤: 函数体包含 fname(
             try:
-                body = read_function_body(self.source_root, f, max_lines=500)
+                body = read_function_body(self.cbs.source_root, f, max_lines=500)
                 if body and (fname + "(" in body or fname + " (" in body):
                     callers.append(f)
             except Exception:
