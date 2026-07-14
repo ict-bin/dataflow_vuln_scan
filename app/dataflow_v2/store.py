@@ -205,6 +205,9 @@ class DataflowStore:
     # ── 函数库 ──────────────────────────────────────────────────────────────
     def upsert_function(self, rec: FunctionRecord) -> None:
         r = rec.to_row()
+        # 注意: ON CONFLICT 不更新 processed_taints — 该字段由 add_processed_taint 唯一管理。
+        # 若此处写 excluded.processed_taints (rec 是旧对象, processed_taints 为旧值/空),
+        # 会覆盖 DB 已累积的去重锚点 -> find_processed_taint 看不到 -> return_taint 重分析循环。
         self._exec("functions", """
             INSERT INTO functions (func_id,file,name,signature,start_line,end_line,
                 body_path,func_hash,description,processed_taints)
@@ -214,7 +217,7 @@ class DataflowStore:
                 file=excluded.file, name=excluded.name, signature=excluded.signature,
                 start_line=excluded.start_line, end_line=excluded.end_line,
                 body_path=excluded.body_path, func_hash=excluded.func_hash,
-                description=excluded.description, processed_taints=excluded.processed_taints
+                description=excluded.description
         """, r)
 
     def get_function(self, func_id: str) -> FunctionRecord | None:
