@@ -382,22 +382,33 @@ class DataflowStore:
         rows = self._q("functions",
             "SELECT taint_signature, pre_validation_signature, taint_params, sessions_path FROM processed_taints WHERE func_id=? AND taint_signature=?",
             (func_id, ts))
+        result = None
         for r in rows:
             existing = set(_norm_sig(p) for p in (r["pre_validation_signature"] or "").split("|") if p)
             if not cur:
                 # 当前无前置校验: 仅当已存在也无校验才命中 (避免 空 ⊆ 非空 误并不同路径)
                 if not existing:
-                    return ProcessedTaint(taint_params=json.loads(r["taint_params"] or "[]"),
+                    result = ProcessedTaint(taint_params=json.loads(r["taint_params"] or "[]"),
                                            taint_signature=r["taint_signature"], pre_validations=[],
                                            pre_validation_signature=r["pre_validation_signature"],
                                            sessions_path=r["sessions_path"])
+                    break
                 continue
             if cur <= existing:  # 当前 ⊆ 已存在 (已存在更完整 -> 已覆盖当前)
-                return ProcessedTaint(taint_params=json.loads(r["taint_params"] or "[]"),
+                result = ProcessedTaint(taint_params=json.loads(r["taint_params"] or "[]"),
                                        taint_signature=r["taint_signature"], pre_validations=[],
                                        pre_validation_signature=r["pre_validation_signature"],
                                        sessions_path=r["sessions_path"])
-        return None
+                break
+        # DEBUG: find 原因定位
+        try:
+            import sys as _sys
+            _sys.stderr.write(f"FINDDBG fid={func_id[:8]} ts={ts!r} cur={cur} rows={len(rows)} "
+                              f"existing={[r['pre_validation_signature'][:30] for r in rows]} matched={result is not None}\n")
+            _sys.stderr.flush()
+        except Exception:
+            pass
+        return result
 
     # ── 污点库 ──────────────────────────────────────────────────────────────
     def upsert_taint(self, rec: TaintRecord) -> None:

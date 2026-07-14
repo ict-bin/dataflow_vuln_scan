@@ -220,8 +220,19 @@ class DfsOrchestrator:
                  ctx: PathContext, depth: int) -> tuple[list[Validation], list[TaintRecord]]:
         # 1) 三重去重
         pre_val_sig = _validation_sig(pre_validations)
-        if self.store.find_processed_taint(func.func_id, _norm_taint_sig(taint_params.signature), pre_val_sig):
+        _nts = _norm_taint_sig(taint_params.signature)
+        _found = self.store.find_processed_taint(func.func_id, _nts, pre_val_sig)
+        if _found:
             return [], []  # 已分析过, 跳过
+        # DEBUG: find 返回 None 的原因定位
+        try:
+            self.cbs.on_event("v2_find_miss_debug",
+                function=func.name, func_id=func.func_id[:10], file=func.file,
+                taint_sig=_nts, taint_params_sig=taint_params.signature,
+                pre_val_sig=pre_val_sig[:60] if pre_val_sig else "(empty)",
+                pre_val_n=len(pre_validations), depth=depth)
+        except Exception:
+            pass
 
         self.cbs.on_event("trace_start", function=func.name, source_file=func.file,
                           depth=depth, max_depth=self.max_depth)
@@ -332,6 +343,14 @@ class DfsOrchestrator:
             rt_sig = _norm_taint_sig(rt.signature or rt.name)
             if self.store.find_processed_taint(func.func_id, rt_sig, pre_val_sig):
                 continue  # 已分析过此污点, 跳过
+            try:
+                self.cbs.on_event("v2_step7_find_miss_debug",
+                    function=func.name, func_id=func.func_id[:10],
+                    rt_name=rt.name, rt_sig=rt_sig, rt_raw_sig=rt.signature,
+                    pre_val_sig=pre_val_sig[:60] if pre_val_sig else "(empty)",
+                    n_return_taints=len(all_callee_return_taints))
+            except Exception:
+                pass
             if rt_sig in my_taint_sigs:
                 # 本函数已持有该污点 (escape 源头场景): reader 回传=冗余, 跳过, 终止循环
                 self.cbs.on_event("v2_return_taint_skipped_redundant",
