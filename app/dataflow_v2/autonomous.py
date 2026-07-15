@@ -82,9 +82,9 @@ class AutonomousRunner:
         status = TaskStatus.PASSED
         err_msg = ""
         try:
-            if not cfg.source_file or not cfg.function_name:
+            if not cfg.source_file:
                 return TaskResult(task_id=tid, status=TaskStatus.INVALID_INPUT, task=cfg.task,
-                                  error="autonomous: source_file/function_name 未指定")
+                                  error="autonomous: source_file 未指定")
             store = DataflowStore(v2_run_dir)
             self._emit("v2_indexing_source_tree")
             ensure_file_indexed(source_root, cfg.source_file, store)
@@ -130,14 +130,15 @@ class AutonomousRunner:
             except Exception:
                 system_prompt = sp_path.read_text(encoding="utf-8") if sp_path.exists() else system_prompt
 
-            # 入口提示
+            # 入口提示 (用解析到的 root_func.name, 不靠 cfg.function_name)
             taint_desc = ",".join(cfg.taint_params) if cfg.taint_params else "(自行识别入口污点源)"
+            _desc = ("来源说明: " + cfg.function_description) if cfg.function_description else ""
             entry_prompt = (
                 f"## 入口\n目标函数: `{root_func.file}::{root_func.name}` (行 {root_func.start_line}-{root_func.end_line})\n"
                 f"签名: {root_func.signature}\n"
                 f"入口污点: {taint_desc}\n"
-                f"{('来源说明: ' + cfg.function_description) if cfg.function_description else ''}\n\n"
-                f"开始自主探索。先 `read_function {cfg.function_name}` 读入口, 再跟踪污点、挖漏洞。")
+                f"{_desc}\n\n"
+                f"开始自主探索。先 `read_function {root_func.name}` 读入口, 再跟踪污点、挖漏洞。")
 
             # 续探循环: 每轮一个 agent session, 结束读 checkpoint
             max_rounds = max(1, int(getattr(cfg, "max_rounds", 3) or 3))
