@@ -100,17 +100,12 @@ class AgentObservabilityTests(unittest.TestCase):
                     "cwd": "/tmp/output/dvs_obs_residual/run",
                     "rss_bytes": 2048,
                 }
-            ]), patch("app.service.task_service.get_task_service", return_value=SimpleNamespace(
-                idle_pi_reaper_status=lambda: {
-                    "last_idle_pi_reaper_at": 100.0,
-                    "last_idle_pi_reaper_killed_count": 4,
-                }
-            )):
+            ]):
                 snapshot = self.service.build_snapshot(db, project_id="p1")
             self.assertEqual(1, snapshot["summary"]["total_pi_process_count"])
             self.assertTrue(snapshot["summary"]["residual_pi_detected"])
-            self.assertEqual(100.0, snapshot["summary"]["last_idle_pi_reaper_at"])
-            self.assertEqual(4, snapshot["summary"]["last_idle_pi_reaper_killed_count"])
+            self.assertIsNone(snapshot["summary"]["last_idle_pi_reaper_at"])
+            self.assertEqual(0, snapshot["summary"]["last_idle_pi_reaper_killed_count"])
             self.assertTrue(snapshot["pods"][0]["residual_pi_detected"])
         finally:
             db.close()

@@ -74,6 +74,23 @@ class AppDvsTask(Base):
     is_deleted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
 
+class AppDvsWorkerSlot(Base):
+    """Legacy worker registry row kept for compatibility and fallback read models."""
+
+    __tablename__ = "secflow_app_dvs_worker_slots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    worker_id: Mapped[str] = mapped_column(String(128), nullable=False, unique=True, index=True)
+    pod_name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    pod_ip: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    http_port: Mapped[int] = mapped_column(Integer, nullable=False, default=8080)
+    max_concurrent_tasks: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    last_seen_status: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    last_heartbeat_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=now_local)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=now_local, onupdate=now_local)
+
+
 class AppDvsTaskEvent(Base):
     """Database-backed task timeline event for DVS task execution tracing."""
 

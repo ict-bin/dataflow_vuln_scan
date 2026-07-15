@@ -236,7 +236,7 @@ def _run_with_context_overflow_recovery(
                     model, system_prompt, prompt, post_skill_prompt, "preflight_context_length_exceeded",
                 )
                 return preflight_result
-            compaction_args = _build_args(pi_cmd, model, tools, thinking_level, session_file, extension=extension)
+            compaction_args = _build_args(pi_cmd, model, tools, thinking_level, session_file)
             _run_pi_compact(
                 args=compaction_args,
                 cwd=cwd,
@@ -288,7 +288,7 @@ def _run_with_context_overflow_recovery(
         result.context_overflow_retry_event_due = _should_emit_infinite_retry_event(overflow_attempts)
         if result.context_overflow_retry_event_due:
             _log_warn(f"overflow 无限压缩重试 [{overflow_attempts}], 继续重试: {(result.error or '')[:200]}")
-        compaction_args = _build_args(pi_cmd, model, tools, thinking_level, session_file, extension=extension)
+        compaction_args = _build_args(pi_cmd, model, tools, thinking_level, session_file)
         _run_pi_compact(
             args=compaction_args,
             cwd=cwd,

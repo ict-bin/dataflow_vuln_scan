@@ -33,23 +33,26 @@ class MaxRoundsExceededReviewPolicyTests(unittest.TestCase):
     def test_config_service_defaults_strategy_to_treat_as_passed(self):
         mock_db = mock.MagicMock()
         mock_db.query.return_value.filter_by.return_value.first.return_value = None
-        cfg = get_config_service().get_config(db=mock_db, project_id="p1")
+        with mock.patch("app.service.config_service._load_file_default", return_value={"workers": {}, "judges": {}}):
+            cfg = get_config_service().get_config(db=mock_db)
         self.assertEqual(cfg["max_rounds_exceeded_review_strategy"], "treat_as_passed")
+        self.assertEqual("", cfg["project_id"])
 
     def test_config_service_normalizes_invalid_strategy_on_save(self):
         mock_db = mock.MagicMock()
         mock_query = mock_db.query.return_value
         mock_filter = mock_query.filter_by.return_value
         mock_filter.first.return_value = None
-        saved = get_config_service().save_config(
-            db=mock_db,
-            project_id="p1",
-            config_data={
-                "project_id": "p1",
-                "max_rounds_exceeded_review_strategy": "invalid",
-            },
-        )
+        with mock.patch("app.service.config_service._load_file_default", return_value={"workers": {}, "judges": {}}):
+            saved = get_config_service().save_config(
+                db=mock_db,
+                config_data={
+                    "project_id": "p1",
+                    "max_rounds_exceeded_review_strategy": "invalid",
+                },
+            )
         self.assertEqual(saved["max_rounds_exceeded_review_strategy"], "treat_as_passed")
+        self.assertEqual("", saved["project_id"])
 
 
 if __name__ == "__main__":

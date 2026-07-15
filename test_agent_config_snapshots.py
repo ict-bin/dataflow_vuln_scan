@@ -38,11 +38,10 @@ class DvsAgentConfigSnapshotTests(unittest.TestCase):
             runtime_dir = Path(task_pi_dirs["workers"])
             self.assertTrue((runtime_dir / "models.json").is_file())
             self.assertTrue((runtime_dir / "settings.json").is_file())
-            auth_payload = json.loads((runtime_dir / "auth.json").read_text(encoding="utf-8"))
-            self.assertEqual("atk-1", auth_payload["agent_task_key_id"])
-            self.assertEqual("secret-1", auth_payload["agent_task_key_secret"])
             settings_payload = json.loads((runtime_dir / "settings.json").read_text(encoding="utf-8"))
             self.assertTrue(settings_payload["compaction"]["enabled"])
+            models_payload = json.loads((runtime_dir / "models.json").read_text(encoding="utf-8"))
+            self.assertEqual("secret-1", models_payload["providers"]["p1"]["apiKey"])
 
     def test_materialize_task_pi_runtime_stays_task_scoped_without_key(self):
         with tempfile.TemporaryDirectory() as task_root:
@@ -77,8 +76,6 @@ class DvsAgentConfigSnapshotTests(unittest.TestCase):
             (judge_dir / "models.json").write_text(json.dumps({"providers": {"p2": {"models": [{"id": "judge-model"}]}}}), encoding="utf-8")
             (worker_dir / "settings.json").write_text(json.dumps({"mode": "task"}), encoding="utf-8")
             (judge_dir / "settings.json").write_text(json.dumps({"mode": "task"}), encoding="utf-8")
-            (worker_dir / "auth.json").write_text(json.dumps({"agent_task_key_id": "atk-1"}), encoding="utf-8")
-            (judge_dir / "auth.json").write_text(json.dumps({"agent_task_key_id": "atk-1"}), encoding="utf-8")
             cfg.task_pi_dirs = {"workers": str(worker_dir), "judges": str(judge_dir)}
             cfg.task_pi_dir = cfg.role_pi_dir("workers")
 
@@ -98,12 +95,10 @@ class DvsAgentConfigSnapshotTests(unittest.TestCase):
         self.assertEqual("atk-1", agent_auth_json["agent_task_key_id"])
         self.assertEqual("worker-model", role_config_snapshot["workers"]["default_model"])
         self.assertEqual("judge-model", provider_runtime_summary["judges"]["default_model"])
-        self.assertEqual(str(judge_dir), provider_runtime_summary["judges"]["runtime_dir"])
         self.assertEqual("task_scoped", llm_binding_snapshot["agent_runtime_mode"])
         self.assertIn("workers", llm_binding_snapshot["roles"])
-        self.assertIn("runtime_dir", llm_binding_snapshot["roles"]["workers"])
+        self.assertIn("runtime_files", llm_binding_snapshot["roles"]["workers"])
 
 
 if __name__ == "__main__":
     unittest.main()
-

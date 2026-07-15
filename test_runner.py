@@ -270,6 +270,7 @@ class RunAgentPromptFileTests(unittest.TestCase):
 
     def test_run_agent_triggers_compaction_then_retries_on_context_overflow(self):
         prompts: list[str] = []
+        compact_calls: list[dict] = []
 
         def fake_run_with_pi_retry(**kwargs):
             prompts.append(kwargs["prompt"])
@@ -282,7 +283,9 @@ class RunAgentPromptFileTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as cwd:
             with patch.object(runner, "_find_pi_command", return_value=["/usr/bin/pi"]):
-                with patch.object(runner, "_run_with_pi_retry", side_effect=fake_run_with_pi_retry):
+                with patch.object(runner, "_run_with_pi_retry", side_effect=fake_run_with_pi_retry), patch.object(
+                    runner, "_run_pi_compact", side_effect=lambda **kwargs: compact_calls.append(kwargs) or True
+                ):
                     result = runner.run_agent(
                         "summary",
                         model="MiniMax/MiniMax-M2.5",
@@ -296,10 +299,10 @@ class RunAgentPromptFileTests(unittest.TestCase):
                     )
 
         self.assertEqual(result.output, "ok")
-        self.assertEqual(len(prompts), 3)
+        self.assertEqual(len(prompts), 2)
         self.assertEqual(prompts[0], "summary")
-        self.assertIn("compaction", prompts[1].lower())
-        self.assertEqual(prompts[2], "summary")
+        self.assertEqual(prompts[1], "summary")
+        self.assertEqual(1, len(compact_calls))
         self.assertTrue(result.context_overflow_retrying)
         self.assertEqual(1, result.context_overflow_retry_count)
         self.assertFalse(result.context_overflow_retry_event_due)

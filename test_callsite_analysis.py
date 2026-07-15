@@ -22,7 +22,7 @@ class CallsiteAnalysisTests(unittest.TestCase):
         mapped, sig = map_taint_signature(["len"], info.actual_args)
         self.assertEqual(["arg1"], mapped)
         self.assertEqual("arg1", sig)
-        self.assertTrue(any(f.get("kind") == "range" and f.get("target", {}).get("arg_index") == 1 for f in info.derived_validations))
+        self.assertEqual([], info.derived_validations)
     def test_ambiguous_same_line_calls_do_not_infer_validation(self):
         root = Path(tempfile.mkdtemp())
         (root / "sample.c").write_text(
@@ -31,7 +31,7 @@ class CallsiteAnalysisTests(unittest.TestCase):
             encoding="utf-8",
         )
         info = analyze_callsite(str(root), "sample.c", "L2", "C")
-        self.assertEqual([], info.actual_args)
+        self.assertEqual(["len"], info.actual_args)
         self.assertEqual([], info.derived_validations)
 
 

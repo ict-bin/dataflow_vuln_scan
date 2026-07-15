@@ -52,6 +52,42 @@ def _lease_deadline():
     return now_local() + timedelta(seconds=LEASE_TTL_SECONDS)
 
 
+def _task_cfg_dict(raw: Any) -> dict[str, Any]:
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
+def _with_clean_restart_flag(
+    raw: Any,
+    *,
+    reason: str,
+    previous_owner_id: str | None,
+    previous_epoch: int,
+) -> dict[str, Any]:
+    cfg = _task_cfg_dict(raw)
+    cfg["_force_clean_restart"] = True
+    cfg["_restart_reason"] = reason
+    cfg["_restart_previous_owner_id"] = previous_owner_id
+    cfg["_restart_previous_epoch"] = int(previous_epoch or 0)
+    cfg["_restart_marked_at"] = now_local().isoformat()
+    return cfg
+
+
+def _with_auto_recovery_flag(
+    raw: Any,
+    *,
+    reason: str,
+    previous_owner_id: str | None,
+    previous_epoch: int,
+) -> dict[str, Any]:
+    cfg = _task_cfg_dict(raw)
+    cfg["_auto_recovered_pending"] = True
+    cfg["_auto_recovered_reason"] = reason
+    cfg["_auto_recovered_previous_owner_id"] = previous_owner_id
+    cfg["_auto_recovered_previous_epoch"] = int(previous_epoch or 0)
+    cfg["_auto_recovered_marked_at"] = now_local().isoformat()
+    return cfg
+
+
 def is_parent_orchestrated_binary_security_task(row: AppDvsTask | None) -> bool:
     if row is None:
         return False
@@ -128,8 +164,14 @@ def claim_specific_task(db: Session, owner_id: str, task_id: str) -> ClaimedTask
         AppDvsTask.error: None,
     }
     if expected_status == "running":
-        # 孤儿重抢: 回 pending, begin_execution_if_owner 会再设 running
-        update_fields[AppDvsTask.status] = "pending"
+        if is_parent_orchestrated_binary_security_task(candidate):
+            update_fields[AppDvsTask.status] = "running"
+        else:
+            # 孤儿重抢: 回 pending, begin_execution_if_owner 会再设 running
+            update_fields[AppDvsTask.status] = "pending"
+            update_fields.update(
+                _clean_restart_update_fields(candidate, reason="claim_expired_running")
+            )
     updated = (
         db.query(AppDvsTask)
         .filter(
@@ -150,6 +192,89 @@ def claim_specific_task(db: Session, owner_id: str, task_id: str) -> ClaimedTask
         control_version=int(candidate.control_version or 0),
         dispatch_status="leased",
     )
+
+
+def claim_one_runnable_task(db: Session, owner_id: str) -> ClaimedTask | None:
+    now = now_local()
+    candidates = (
+        db.query(AppDvsTask)
+        .filter(
+            AppDvsTask.is_deleted.is_(False),
+            AppDvsTask.status.in_(["pending", "running"]),
+        )
+        .order_by(AppDvsTask.created_at.asc(), AppDvsTask.id.asc())
+        .all()
+    )
+    for row in candidates:
+        status = str(row.status or "pending")
+        if status == "pending":
+            lease_until = row.execution_lease_until
+            if str(row.execution_owner_id or "").strip() and lease_until is not None and lease_until >= now:
+                continue
+            claimed = claim_specific_task(db, owner_id, str(row.task_id))
+            if claimed is not None:
+                return claimed
+            continue
+        lease_until = row.execution_lease_until
+        if lease_until is None or lease_until < now:
+            claimed = claim_specific_task(db, owner_id, str(row.task_id))
+            if claimed is not None:
+                return claimed
+    return None
+
+
+def reclaim_orphaned_running_tasks(db: Session) -> list[RecoveredRunningTask]:
+    now = now_local()
+    rows = (
+        db.query(AppDvsTask)
+        .filter(
+            AppDvsTask.is_deleted.is_(False),
+            AppDvsTask.status == "running",
+        )
+        .all()
+    )
+    recovered: list[RecoveredRunningTask] = []
+    for row in rows:
+        if is_parent_orchestrated_binary_security_task(row):
+            continue
+        reason = ""
+        if not str(row.execution_owner_id or "").strip():
+            reason = "missing_owner"
+        elif row.execution_lease_until is None or row.execution_lease_until < now:
+            reason = "expired_lease"
+        if not reason:
+            continue
+        updated = (
+            db.query(AppDvsTask)
+            .filter(
+                AppDvsTask.id == row.id,
+                AppDvsTask.is_deleted.is_(False),
+                AppDvsTask.status == "running",
+            )
+            .update(
+                {
+                    AppDvsTask.status: "pending",
+                    AppDvsTask.execution_owner_id: None,
+                    AppDvsTask.execution_lease_until: None,
+                    AppDvsTask.execution_heartbeat_at: None,
+                    AppDvsTask.dispatch_status: "pending",
+                    **_clean_restart_update_fields(row, reason=reason),
+                },
+                synchronize_session=False,
+            )
+        )
+        if updated:
+            recovered.append(
+                RecoveredRunningTask(
+                    task_id=str(row.task_id),
+                    previous_owner_id=row.execution_owner_id,
+                    previous_dispatch_status=row.dispatch_status,
+                    previous_lease_until=row.execution_lease_until,
+                    reason=reason,
+                )
+            )
+    db.commit()
+    return recovered
 
 
 def renew_lease(db: Session, task_id: str, owner_id: str, epoch: int) -> bool:

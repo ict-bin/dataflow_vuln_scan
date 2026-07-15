@@ -8,6 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from app.runtime_context import LEASE_TTL_SECONDS
 from app.time_utils import now_local
 
 
@@ -75,10 +76,10 @@ def build_worker_cluster_snapshot(db, *, project_id: str | None = None):
     db: SQLAlchemy Session (用于查 pending 队列 + celery_task_id→task 映射)
     project_id: 过滤 pending 队列 (worker 活跃任务不过滤, 跨项目)
     """
-    from app.celery_app import app as celery_app
-    from app.db.models import AppDvsTask
+    from app.db.models import AppDvsTask, AppDvsWorkerSlot
 
     try:
+        from app.celery_app import app as celery_app
         inspect = celery_app.control.inspect(timeout=3)
         ping = inspect.ping() or {}
         active = inspect.active() or {}
@@ -139,6 +140,126 @@ def build_worker_cluster_snapshot(db, *, project_id: str | None = None):
             available_slots=max(0, cap - running), source="celery_inspect",
             last_heartbeat_at=now_local(), active_jobs=active_jobs,
         ))
+    if workers:
+        workers.sort(key=lambda w: w.worker_id)
+        return DfaClusterCapacitySnapshot(
+            worker_count=len(workers),
+            healthy_workers=sum(1 for w in workers if w.healthy),
+            stale_workers=sum(1 for w in workers if not w.healthy),
+            total_capacity=total_cap,
+            running_jobs=running_total,
+            queued_jobs=queued_jobs,
+            available_slots=sum(w.available_slots for w in workers),
+            updated_at=now_local(),
+            workers=workers,
+        )
+
+    registry_rows = db.query(AppDvsWorkerSlot).all()
+    owned_rows = (
+        db.query(AppDvsTask)
+        .filter(
+            AppDvsTask.is_deleted.is_(False),
+            AppDvsTask.execution_owner_id.is_not(None),
+            AppDvsTask.status.in_(["pending", "running"]),
+        )
+        .all()
+    )
+    owner_tasks: dict[str, list[AppDvsTask]] = {}
+    for row in owned_rows:
+        owner = str(row.execution_owner_id or "").strip()
+        if not owner:
+            continue
+        owner_tasks.setdefault(owner, []).append(row)
+
+    stale_cutoff_seconds = max(LEASE_TTL_SECONDS * 2, 120)
+    now = now_local()
+    for slot in registry_rows:
+        worker_tasks = list(owner_tasks.pop(str(slot.worker_id), []))
+        running = sum(1 for row in worker_tasks if str(row.status or "") == "running")
+        heartbeat_at = slot.last_heartbeat_at
+        age_seconds = (now - heartbeat_at).total_seconds() if heartbeat_at is not None else float("inf")
+        healthy = age_seconds <= stale_cutoff_seconds
+        error = None if healthy else f"stale heartbeat age={int(age_seconds)}s"
+        workers.append(DfaWorkerSnapshot(
+            worker_id=str(slot.worker_id),
+            host_name=str(slot.pod_name or slot.worker_id),
+            pod_name=str(slot.pod_name or slot.worker_id),
+            pod_ip=slot.pod_ip,
+            http_port=int(slot.http_port or 8080),
+            healthy=healthy,
+            max_concurrent_jobs=max(0, int(slot.max_concurrent_tasks or 0)),
+            running_jobs=running,
+            available_slots=max(0, int(slot.max_concurrent_tasks or 0) - running) if healthy else 0,
+            source="worker_registry",
+            last_heartbeat_at=heartbeat_at,
+            active_jobs=[
+                DfaWorkerActiveJobSnapshot(
+                    task_id=row.task_id,
+                    task_name=row.task_name,
+                    status=str(row.status or "unknown"),
+                    parent_task_id=row.parent_task_id,
+                    parent_task_type=row.parent_task_type,
+                    task_origin_type=row.task_origin_type,
+                    input_path=row.input_path or "",
+                    started_at=row.started_at,
+                    updated_at=row.updated_at,
+                    dispatch_status=row.dispatch_status,
+                    execution_owner_id=row.execution_owner_id,
+                    execution_lease_until=row.execution_lease_until,
+                    execution_heartbeat_at=row.execution_heartbeat_at,
+                    mapped=True,
+                    mapping_reason="worker_registry",
+                )
+                for row in sorted(worker_tasks, key=lambda item: (str(item.status or ""), str(item.task_id or "")))
+            ],
+            error=error,
+        ))
+        total_cap += max(0, int(slot.max_concurrent_tasks or 0))
+        running_total += running
+
+    for owner_id, worker_tasks in owner_tasks.items():
+        if not worker_tasks:
+            continue
+        running = sum(1 for row in worker_tasks if str(row.status or "") == "running")
+        latest_heartbeat = max(
+            (row.execution_heartbeat_at for row in worker_tasks if row.execution_heartbeat_at is not None),
+            default=None,
+        )
+        workers.append(DfaWorkerSnapshot(
+            worker_id=owner_id,
+            host_name=owner_id,
+            pod_name=owner_id,
+            pod_ip=None,
+            http_port=None,
+            healthy=False,
+            max_concurrent_jobs=0,
+            running_jobs=running,
+            available_slots=0,
+            source="stale_owner",
+            last_heartbeat_at=latest_heartbeat,
+            active_jobs=[
+                DfaWorkerActiveJobSnapshot(
+                    task_id=row.task_id,
+                    task_name=row.task_name,
+                    status=str(row.status or "unknown"),
+                    parent_task_id=row.parent_task_id,
+                    parent_task_type=row.parent_task_type,
+                    task_origin_type=row.task_origin_type,
+                    input_path=row.input_path or "",
+                    started_at=row.started_at,
+                    updated_at=row.updated_at,
+                    dispatch_status=row.dispatch_status,
+                    execution_owner_id=row.execution_owner_id,
+                    execution_lease_until=row.execution_lease_until,
+                    execution_heartbeat_at=row.execution_heartbeat_at,
+                    mapped=True,
+                    mapping_reason="stale_owner",
+                )
+                for row in sorted(worker_tasks, key=lambda item: (str(item.status or ""), str(item.task_id or "")))
+            ],
+            error="stale owner without live worker",
+        ))
+        running_total += running
     workers.sort(key=lambda w: w.worker_id)
     return DfaClusterCapacitySnapshot(
         worker_count=len(workers),
