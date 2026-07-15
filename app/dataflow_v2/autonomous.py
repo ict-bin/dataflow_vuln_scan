@@ -169,7 +169,8 @@ class AutonomousRunner:
                                   "task_pi_dir": cfg.role_pi_dir("workers"), "agent_role": "workers"},
                     retry_prompt=("## 续探 (重试)\n刚才你的探索因 pi 崩溃/超时中断。session 历史仍在。"
                                   "请**从上次中断处继续**探索, 不要从头重来。回顾你已读的函数 + 正在追的污点路径,"
-                                  "继续往深挖 + 发现漏洞即 report_finding。结束时 checkpoint。"))
+                                  "继续往深挖 + 发现漏洞即 report_finding。结束时 checkpoint。"),
+                    extension="/opt/dataflow_vuln_scan/extensions/restricted-bash.ts")
                 # 诊断日志: 记录每轮 run_agent 结果 (error/exit/timeout) 供后续判断
                 _err = getattr(result, "error", "") or ""
                 _ec = getattr(result, "exit_code", None)

@@ -431,6 +431,7 @@ def _build_args(
     max_turns: int | None = None,
     no_session: bool = False,
     task_context: dict | None = None,
+    extension: str | None = None,
 ) -> list[str]:
     """Build pi RPC mode launch arguments."""
     args = [*pi_cmd, "--mode", "rpc"]
@@ -451,6 +452,8 @@ def _build_args(
     if task_context:
         context_json = json.dumps(task_context, ensure_ascii=False)
         args.extend(["--task-context", context_json])
+    if extension:
+        args.extend(["--extension", extension])
     return args
 
 
