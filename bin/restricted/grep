@@ -7,7 +7,7 @@ SRC="${DVS_SOURCE_ROOT:-.}"
 args=()
 path_found=false
 for arg in "$@"; do
-    if [ "$path_found" = false ] && echo "$arg" | grep -q '^/' 2>/dev/null; then
+    if [ "$path_found" = false ] && echo "$arg" | /usr/bin/grep -q '^/' 2>/dev/null; then
         case "$arg" in
             "$SRC"*) args+=("$arg") ;;
             *) args+=("-r" "$SRC") ;;  # 替换为 -r $SRC
