@@ -187,7 +187,7 @@ class DagflowPipeline:
             orch = DagflowOrchestrator(
                 store=store, analyze_fn=analyze_fn,
                 func_lookup=func_index.get_by_name, on_event=self.on_event,
-                n_workers=getattr(self.config, "callee_concurrency", 4) or 4,
+                n_workers=min(getattr(self.config, "callee_concurrency", 4), 2),  # dagflow 并发上限 2 (每 agent ~2Gi, 防 OOM)
                 task_id=task_id, cancel_event=self.cancel_event,
                 tracker_dispatcher=dispatcher)
             orch._func_lookup_by_id = func_index.get_by_id
