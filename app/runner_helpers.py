@@ -452,8 +452,11 @@ def _build_args(
     if task_context:
         context_json = json.dumps(task_context, ensure_ascii=False)
         args.extend(["--task-context", context_json])
-    if extension:
-        args.extend(["--extension", extension])
+    # 默认加载 restricted-bash 扩展 (find/grep/cat 限源码目录, 防 find / 全 NFS + OOM)
+    # 完整模式 + 自主模式都加载 (用户要求两者都限制)
+    _ext = extension or "/opt/dataflow_vuln_scan/extensions/restricted-bash.ts"
+    if _ext and os.path.exists(_ext):
+        args.extend(["--extension", _ext])
     return args
 
 
