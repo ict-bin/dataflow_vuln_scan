@@ -26,7 +26,8 @@ class DagflowOrchestrator:
     def __init__(self, *, store: DagflowStore, analyze_fn: Callable,
                  func_lookup: Callable[[str], Any], on_event: Any = None,
                  n_workers: int = 4, task_id: str = "",
-                 cancel_event: threading.Event | None = None) -> None:
+                 cancel_event: threading.Event | None = None,
+                 tracker_dispatcher: Any = None) -> None:
         self.store = store
         self.analyze_fn = analyze_fn
         self.func_lookup = func_lookup
@@ -34,6 +35,7 @@ class DagflowOrchestrator:
         self.n_workers = n_workers
         self.task_id = task_id
         self.cancel_event = cancel_event
+        self.tracker_dispatcher = tracker_dispatcher  # P5: escape/indirect 调度
         self._wq: WorkQueue | None = None
 
     def run(self, root_func, root_taint: str) -> None:
@@ -138,15 +140,38 @@ class DagflowOrchestrator:
                                   origin_node=node.id, origin_edge=f"{node.id}->{e.to_node}"))
 
     def _track_stub(self, item: WorkItem) -> None:
-        """P5 占位: escape/indirect tracker 解析读者/真实函数 -> 回填 DAG + 入队读者。
-        P4: 仅记录, 不解析 (无下游)。"""
-        if self.on_event:
-            try:
-                self.on_event("v2_dagflow_track_pending", kind=item.kind,
-                              origin=item.origin_func, edge=item.origin_edge, task_id=self.task_id,
-                              note="P5 tracker 待实现")
-            except Exception:
-                pass
+        """escape/indirect tracker 项 -> dispatcher 解析 (P5)。
+        dispatcher 找读者/真实函数 -> 回填 DAG + 入队读者。无 dispatcher -> 记录。"""
+        if self.tracker_dispatcher is None:
+            if self.on_event:
+                try:
+                    self.on_event("v2_dagflow_track_pending", kind=item.kind,
+                                  origin=item.origin_func, edge=item.origin_edge, task_id=self.task_id)
+                except Exception:
+                    pass
+            return
+        # origin_taint: 从 item 无直接给 (item 只有 origin_func/node/edge); 需查 origin DAG 的 taint_signature
+        origin_taint = self._origin_taint(item.origin_func, item.origin_node)
+        if origin_taint is None:
+            return
+        if item.kind == "escape_track":
+            self.tracker_dispatcher.handle_escape(
+                origin_func=item.origin_func, origin_taint=origin_taint,
+                origin_node=item.origin_node, origin_edge=item.origin_edge)
+        elif item.kind == "indirect_track":
+            self.tracker_dispatcher.handle_indirect(
+                origin_func=item.origin_func, origin_taint=origin_taint,
+                origin_node=item.origin_node, origin_edge=item.origin_edge)
+
+    def _origin_taint(self, origin_func: str, origin_node: int) -> str | None:
+        """查 origin DAG 的 taint_signature (escape/indirect 项没带 taint, 从 DAG 节点查)。"""
+        # dagflow 一个 func 可有多个 taint DAG; 逐个找含 origin_node 的
+        for fid, ts in self.store.list_analyzed():
+            if fid == origin_func:
+                dag = self.store.load_dag(fid, ts)
+                if dag and any(n.id == origin_node for n in dag.nodes):
+                    return ts
+        return None
 
     def func_lookup_by_id(self, func_id: str):
         """func_id -> FunctionRecord (复用 functions 索引)。dagflow 无独立 func 表, 查 V2 functions.db。"""
