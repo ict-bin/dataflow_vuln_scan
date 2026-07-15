@@ -79,6 +79,13 @@ class DagflowOrchestrator:
             logger.warning("func not found for func_id=%s, release reserve", func_id[:10])
             release_on_failure(self.store, func_id, taint)
             return None
+        # 发标准 trace_start 事件 (dispatcher 卡死检测/前端进度都认这个)
+        if self.on_event:
+            try:
+                self.on_event("trace_start", function=func.name, source_file=getattr(func, "file", ""),
+                              depth=0, max_depth=0, task_id=self.task_id)
+            except Exception:
+                pass
         try:
             dag = self.analyze_fn(func, taint)
         except Exception as e:
@@ -98,10 +105,13 @@ class DagflowOrchestrator:
     def _emit_followups(self, dag: TaintDAG, caller_func_id: str = "") -> None:
         """从 DAG 边发跟入项入队 (callee/return/escape/indirect)。
         return 边回传给 caller (caller_func_id, 非 dag 自己)。"""
+        callees: list[str] = []
         for node in dag.nodes:
             for e in node.children:
                 if e.kind == "callee":
                     self._emit_callee(dag, node, e)
+                    if e.sink_ref and not ("->" in e.sink_ref or e.sink_ref.startswith("(") or "*" in e.sink_ref):
+                        callees.append(e.sink_ref)
                 elif e.kind == "return":
                     self._emit_return(dag, node, e, caller_func_id)
                 elif e.kind in ("extern", "container"):
@@ -109,6 +119,12 @@ class DagflowOrchestrator:
                                           origin_node=node.id,
                                           origin_edge=f"{node.id}->{e.to_node}"))
                 # inside/source 不发跟入项
+        # 发标准 trace_callees 事件 (dispatcher/前端认)
+        if callees and self.on_event:
+            try:
+                self.on_event("trace_callees", function=dag.func_id, callees=callees, depth=0, task_id=self.task_id)
+            except Exception:
+                pass
 
     def _emit_callee(self, dag, node, e) -> None:
         """callee 边 -> 每个被污形参拆一项 (D-2)。taint_sig=callee 形参名归一 (D-1)。"""
