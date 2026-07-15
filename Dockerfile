@@ -42,6 +42,7 @@ COPY config.example.json .env.example ./
 RUN printf '{"build_version":"%s"}\n' "$SECFLOW_BUILD_VERSION" > /opt/dataflow_vuln_scan/build_meta.json
 RUN find . -name '*.sh' -exec sed -i 's/\r$//' {} + \
     && chmod +x scripts/*.sh 2>/dev/null || true \
+    && chmod +x scripts/autonomous/*.py 2>/dev/null || true \
     && chmod +x bin/restricted/find bin/restricted/grep 2>/dev/null || true
 
 # 工具: extract_func / gen_dataflow / gen_tainted_list 供 Worker 调用

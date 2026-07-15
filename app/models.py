@@ -156,6 +156,7 @@ class TaskConfig(BaseModel):
     #   clang_mutex    - clang 互斥分支分析 + 幽灵调用点丢弃 (污点跟踪正确性)
     #   vuln_verifier  - 服务端 finding 结构化核验门 (finding 正确性)
     #   dataflow_v2    - 启用 v2 数据流漏洞挖掘 (四库+路径敏感DFS, 替代 v1)
+    #   autonomous_mode - 自主模式: LLM 长程 agent 自主探索 (替代完整模式 DFS); 微服务只记路径+上报漏洞+索引+续探
     feature_flags: dict[str, bool] = Field(default_factory=dict)
     workers: RoleConfig = Field(default_factory=RoleConfig)
     judges: RoleConfig = Field(default_factory=RoleConfig)

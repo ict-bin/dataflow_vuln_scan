@@ -32,6 +32,7 @@ from ..vuln_report_utils import (EMBEDDED_VULN_MINING_SKILL as _EMBEDDED_VULN_MI
                                   read_prompt as _read_prompt, safe_name as _safe_name)
 from ..vuln_store import VulnFindingRecord, VulnScanStore
 from .function_extractor import ensure_file_indexed
+from .finding_store import persist_finding
 from .models import (
     FunctionRecord, PropagationRecord, TaintParamInfo, TaintRecord, Validation,
 )
@@ -769,58 +770,18 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
         for idx, item in enumerate(parsed.get("findings") or []):
             if not isinstance(item, dict):
                 continue
-            finding_id = f"vuln_{hashlib.sha1((ffn + '|' + str(item.get('vuln_type') or 'unknown') + '|' + fline).encode()).hexdigest()[:16]}"
-            fdir = self.vuln_root / finding_id; fdir.mkdir(parents=True, exist_ok=True)
-            fsrc = str(item.get("source_file") or func.file)
-            ffn = str(item.get("function_name") or func.name)
-            fline = str(item.get("line") or "")
-            (fdir / "vulnerability-report.md").write_text(
-                _format_vuln_report_md(item, finding_id, fsrc, ffn, fline), encoding="utf-8")
-            (fdir / "taint-path-report.md").write_text(dataflow_text, encoding="utf-8")
-            try:
-                safe_copyfile(str(fork_session), str(fdir / "context.jsonl"))
-            except OSError:
-                (fdir / "context.jsonl").write_text("", encoding="utf-8")
-            _exploit = item.get("exploitability")
-            expl_str = json.dumps(_exploit, ensure_ascii=False) if isinstance(_exploit, (dict, list)) else str(_exploit or "")
-            rec = VulnFindingRecord(
-                finding_id=finding_id, run_id=self.run_id, node_id=node,
-                source_file=fsrc, function_name=ffn, line=fline,
-                vuln_type=str(item.get("vuln_type") or "unknown"),
-                severity=str(item.get("severity") or "unknown"),
-                title=str(item.get("title") or finding_id),
-                summary=str(item.get("summary") or ""),
-                evidence=str(item.get("evidence") or ""),
-                exploitability=expl_str,
-                confidence=float(item.get("confidence") or 0),
-                output_dir=str(fdir))
-            # 确保 FK 满足 + 插入 finding (同一 connection, 避免 FK 跨连接不可见)
-            try:
-                data = {'finding_id':finding_id,'run_id':self.run_id,'node_id':node,
-                        'source_file':fsrc,'function_name':ffn,'line':fline,
-                        'vuln_type':str(item.get('vuln_type') or 'unknown'),
-                        'severity':str(item.get('severity') or 'unknown'),
-                        'title':str(item.get('title') or finding_id),
-                        'summary':str(item.get('summary') or ''),
-                        'evidence':str(item.get('evidence') or ''),
-                        'exploitability':expl_str,
-                        'confidence':float(item.get('confidence') or 0),
-                        'output_dir':str(fdir)}
-                cols = list(data)
-                with self.graph_store.connect() as conn:
-                    import time as _time
-                    conn.execute("INSERT OR IGNORE INTO analysis_runs (run_id,task_id,root_file,root_function,source_root,status,started_at) VALUES (?,?,?,?,?,?,?)",
-                                 (self.run_id, self.task_id, func.file, func.name, self.source_root, "completed", _time.time()))
-                    conn.execute("INSERT OR IGNORE INTO taint_nodes (node_id,source_file,function_name,taint_kind,symbol,line,call_expr,description,parent_node_id,depth,context_session,run_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                                 (node, func.file, func.name, "vuln_site", fline, str(fline), "", func.description or "", "", 0, "", self.run_id))
-                    conn.execute(f"INSERT OR REPLACE INTO vulnerability_findings ({','.join(cols)}) VALUES ({','.join('?' for _ in cols)})",
-                                 [data[c] for c in cols])
-            except Exception as _fe:
-                logger.warning("v2 add_finding FK+insert failed: %s", _fe, exc_info=True)
-            n += 1
-            # 上报 vuln-platform intake — 失败只记日志/事件 + 回写 report_status,
-            # 绝不影响任务成败 (mine_vulns 仍返回 finding 数)
-            self._report_finding_to_intake(finding_id, rec, fdir)
+            fid = persist_finding(
+                graph_store=self.graph_store, run_id=self.run_id, task_id=self.task_id,
+                source_root=self.source_root, vuln_root=self.vuln_root,
+                func_file=func.file, func_name=func.name, func_description=func.description or "",
+                item=item, context_text=dataflow_text, context_session_path=str(fork_session),
+                cfg_project_id=self.cfg.project_id, cfg_task_name=self.cfg.task_name,
+                cfg_parent_task_name=self.cfg.parent_task_name,
+                cfg_parent_task_id=self.cfg.parent_task_id,
+                cfg_parent_task_type=self.cfg.parent_task_type,
+                cfg_task_origin_type=self.cfg.task_origin_type, on_event=self.on_event)
+            if fid:
+                n += 1
         # 实时同步漏洞计数到 MySQL: running 任务在列表也能显示数量 (不再 "-";
         # vuln_total_count 默认 -1, 之前只在任务完成 _record_terminal_event 时同步)
         try:
