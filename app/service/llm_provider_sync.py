@@ -60,6 +60,14 @@ def _floor_max_tokens(mt: Any) -> int:
         return _MIN_MAX_TOKENS
 
 
+def _apply_zai_reasoning_compat(entry: dict[str, Any]) -> None:
+    """Keep existing model fields and only add Z.ai thinking compatibility."""
+    entry["reasoning"] = True
+    compat = entry.get("compat") if isinstance(entry.get("compat"), dict) else {}
+    compat["thinkingFormat"] = "zai"
+    entry["compat"] = compat
+
+
 def _model_entries(provider: dict[str, Any]) -> list[dict[str, Any]]:
     model_id = str(provider.get("model") or "").strip()
     extra_config = provider.get("extra_config") if isinstance(provider.get("extra_config"), dict) else {}
@@ -77,7 +85,7 @@ def _model_entries(provider: dict[str, Any]) -> list[dict[str, Any]]:
     ))
     pi_models = extra_config.get("pi_models")
     raw_models = pi_models if isinstance(pi_models, list) else (
-        [{"id": model_id, "reasoning": False}] if model_id else []
+        [{"id": model_id}] if model_id else []
     )
     models: list[dict[str, Any]] = []
     for raw in raw_models:
@@ -92,11 +100,11 @@ def _model_entries(provider: dict[str, Any]) -> list[dict[str, Any]]:
         entry["maxTokens"] = _floor_max_tokens(_existing_mt)
         entry.setdefault("id", model_id)
         entry.setdefault("name", entry.get("id") or model_id)
-        entry.setdefault("reasoning", False)
         entry.setdefault("input", ["text"])
         entry.setdefault("contextWindow", context_window)
         entry.setdefault("contextLength", context_window)
         entry.setdefault("cost", {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0})
+        _apply_zai_reasoning_compat(entry)
         models.append(entry)
     return models
 
@@ -127,13 +135,13 @@ def build_models_json(providers: list[dict[str, Any]], gateway_model_aliases: li
                 alias_models.append({
                     "id": alias_name,
                     "name": alias_name,
-                    "reasoning": False,
                     "input": ["text"],
                     "contextWindow": _floor_context_window(_as_positive_int(a.get("max_tokens_default"), _DEFAULT_CONTEXT_WINDOW)),
                     "contextLength": _floor_context_window(_as_positive_int(a.get("max_tokens_default"), _DEFAULT_CONTEXT_WINDOW)),
                     "maxTokens": _floor_max_tokens(a.get("max_tokens_default")),
                     "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
                 })
+                _apply_zai_reasoning_compat(alias_models[-1])
             if alias_models:
                 models = alias_models
         result["providers"][key] = {
