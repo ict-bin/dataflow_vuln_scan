@@ -164,6 +164,15 @@ class AutonomousRunner:
                     task_context={"task_id": tid, "task_root": str(shared_run_dir.parent),
                                   "task_run_root": str(shared_run_dir),
                                   "task_pi_dir": cfg.role_pi_dir("workers"), "agent_role": "workers"})
+                # 诊断日志: 记录每轮 run_agent 结果 (error/exit/timeout) 供后续判断
+                _err = getattr(result, "error", "") or ""
+                _ec = getattr(result, "exit_code", None)
+                _co = getattr(result, "context_overflow_failed_after_compaction", False)
+                _outlen = len(getattr(result, "output", "") or "")
+                self._emit("v2_autonomous_round_result", round=rnd,
+                           error=str(_err)[:200], exit_code=_ec,
+                           context_overflow=_co, output_len=_outlen,
+                           has_output=_outlen > 0)
                 if self._cancel_event is not None and self._cancel_event.is_set():
                     status, err_msg = TaskStatus.FAILED, "autonomous: cancelled"
                     break

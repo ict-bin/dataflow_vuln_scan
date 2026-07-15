@@ -777,6 +777,13 @@ def _run_with_api_retry(
                     except Exception:
                         pass
 
+        # idle-timeout (read_error=TimeoutError) 必须传播到 run_agent 的 except TimeoutError -> 重试。
+        # 之前被转成 result.error 返回 -> 重试循环拿不到 -> 不重试 (bug: 可重试错误不重试)。
+        # 现在 raise 传播, run_agent 的 timeout_retry_enabled/max_retries 生效。
+        if isinstance(read_error, TimeoutError):
+            _log_warn(f"agent idle timeout after {timeout_seconds:.0f}s, propagating to run_agent retry loop")
+            raise read_error
+
         # Extract output from messages
         for msg in reversed(result.messages):
             if msg.get("role") == "assistant":

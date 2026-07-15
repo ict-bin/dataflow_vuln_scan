@@ -57,9 +57,10 @@ def _resolve(rec_name: str, store):
 
 def main():
     if len(sys.argv) < 2:
-        print("用法: read_function <函数名|file:line>", file=sys.stderr)
+        print("用法: read_function <函数名|file:line> [start-end]", file=sys.stderr)
         sys.exit(2)
     query = sys.argv[1].strip()
+    line_range = sys.argv[2].strip() if len(sys.argv) >= 3 else ""  # 形如 100-120 / 100-
     if not RUN_DIR:
         print("[read_function] DVS_RUN_DIR 未设置", file=sys.stderr)
         sys.exit(1)
@@ -71,15 +72,35 @@ def main():
             sys.exit(1)
         from app.dataflow_v2.function_extractor import read_function_body
         body = read_function_body(SOURCE_ROOT, rec, max_lines=500)
+        # 行范围裁剪 (cat-like 部分读)
+        ranged = False
+        if line_range:
+            try:
+                a, _, b = line_range.partition("-")
+                a_i = int(a) if a else rec.start_line
+                b_i = int(b) if b else rec.end_line
+                a_i = max(a_i, rec.start_line); b_i = min(b_i, rec.end_line)
+                body_lines = body.splitlines()
+                # body 第 1 行 = rec.start_line
+                offset = a_i - rec.start_line
+                body = "\n".join(body_lines[offset: offset + (b_i - a_i + 1)])
+                ranged = True
+                disp_start, disp_end = a_i, b_i
+            except Exception:
+                ranged = False
         # 记 trajectory (流式)
         step = {"ts": time.time(), "func": rec.name, "file": rec.file,
                 "start_line": rec.start_line, "end_line": rec.end_line,
-                "signature": rec.signature, "query": query}
+                "signature": rec.signature, "query": query,
+                "line_range": line_range or None, "via": "read_function"}
         if PATH_LOG:
             with open(PATH_LOG, "a", encoding="utf-8") as f:
                 f.write(json.dumps(step, ensure_ascii=False) + "\n")
         # 输出给 LLM
-        print(f"## {rec.file}::{rec.name} (行 {rec.start_line}-{rec.end_line})")
+        if ranged:
+            print(f"## {rec.file}::{rec.name} 行 {disp_start}-{disp_end} (函数 {rec.start_line}-{rec.end_line})")
+        else:
+            print(f"## {rec.file}::{rec.name} (行 {rec.start_line}-{rec.end_line})")
         print(f"签名: {rec.signature}")
         if rec.description:
             print(f"功能: {rec.description}")

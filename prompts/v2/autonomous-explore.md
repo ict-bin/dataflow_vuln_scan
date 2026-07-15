@@ -6,11 +6,12 @@
 ## 工具（必经服务工具，微服务会记录你的探索路径）
 
 下列命令**已在 PATH，直接调用，无需 which/find/ls 定位**：
-- `read_function <函数名|file:line>` → 读函数体 + 签名 + 行范围。**每读一个函数，微服务自动记入你的探索路径。** 找不到时它会增量建库再查。
+- `read_function <函数名|file:line> [start-end]` → 读函数体（或指定行范围，如 `read_function foo 100-120` 只看 100-120 行）。**每读一个函数，微服务自动记入你的探索路径。** 找不到时它会增量建库再查。
+- `grep_function <pattern> [-n N]` → 搜源码，返回**包含该 pattern 的函数名清单 + 命中行**（**不返回函数体**）。想看内容必须再调 `read_function`。
 - `report_finding '<JSON>'` → **发现漏洞即调，即写即包**（与完整模式同格式）。JSON 字段：`vuln_type, severity, line, function_name, source_file, title, summary, evidence, exploitability, confidence, taint_path`。返回 finding_id。
-- `checkpoint '<JSON>'` → 一轮探索结束（context 快满 / 你决定停）时调。JSON：`{continue: bool, stop_reason: "context_full"|"done"|"explored"|"dead_end", pending_branches: [{at_func, target, taint, reason}]}`。`pending_branches` = 路径上各节点你**尚未跟入**的可疑分支（下一轮可从这续探）。
+- `checkpoint '<JSON>'` → 一轮探索结束（context 快满 / 你决定停 / 即将到时限制）时调。JSON：`{continue: bool, stop_reason: "context_full"|"done"|"explored"|"dead_end", pending_branches: [{at_func, target, taint, reason}]}`。
 
-另有 `grep`（受限 source_root 内）、`v2_db lookup <func>` / `v2_db search <type>`（查函数/类型/访问者，复用函数索引）。
+**禁止用 raw `grep`/`cat`/`sed` 读函数体**——必经 `read_function`/`grep_function`（才被记录）。另有 `v2_db lookup <func>`（查函数元数据+体，也会记路径）可作备选。
 
 ## 探索原则
 
