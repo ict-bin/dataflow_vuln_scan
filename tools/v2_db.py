@@ -113,10 +113,28 @@ def _find_func_in_source_v2db(name: str, src_root: Path) -> tuple[str, str] | No
     return None
 
 
+def _log_trajectory(func: dict, query: str) -> None:
+    """自主模式 (DVS_RUN_DIR 设了): 记 v2_db lookup 到 path.log (服务感知探索路径)。
+    完整模式不设 DVS_RUN_DIR → 不记 (不影响)。"""
+    run_dir = os.environ.get("DVS_RUN_DIR", "").strip()
+    if not run_dir:
+        return
+    import time, json
+    step = {"ts": time.time(), "func": func.get("name", ""), "file": func.get("file", ""),
+            "start_line": func.get("start_line"), "end_line": func.get("end_line"),
+            "signature": func.get("signature", ""), "query": query, "via": "v2_db_lookup"}
+    try:
+        with open(os.path.join(run_dir, "path.log"), "a", encoding="utf-8") as f:
+            f.write(json.dumps(step, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
 def cmd_lookup(name: str) -> None:
     """查函数体: db 查 → 找不到 → grep 找文件 → tree-sitter 索引入库 → 返回。"""
     func = _find_func(name)
     if func:
+        _log_trajectory(func, name)
         body = _read_body(func)
         print(f"function: {func['name']}")
         print(f"file: {func['file']}")
@@ -151,6 +169,7 @@ def cmd_lookup(name: str) -> None:
     # 再查 db
     func = _find_func(name)
     if func:
+        _log_trajectory(func, name)
         body = _read_body(func)
         print(f"function: {func['name']}")
         print(f"file: {func['file']}")

@@ -7,6 +7,7 @@
   v2_db propagations <func_name>          # 查传播库→返回函数的传播路径
   v2_db orchestration <func_name>         # 查编排库→返回调用链
   v2_db index <file_path>                 # 索引新文件到函数库 (查不到时用)
+  v2_db symbol <name>                     # 查宏定义/typedef/struct/enum (grep 全盘 .h/.c)
 
 环境变量:
   DVS_V2_DB_DIR    — dataflow-v2 目录路径 (含 functions.db 等四库)
@@ -16,6 +17,7 @@
   1. LLM 需要函数源码 → v2_db lookup <name>
   2. 查到 → 返回函数体 (从原源文件 start_line~end_line 读取)
   3. 查不到 → 提示用 v2_db index <file> 建库后再查
+  4. 需要宏/typedef/struct 定义 → v2_db symbol <name> (一次 grep 全盘)
 """
 import json
 import os
@@ -23,8 +25,9 @@ import sqlite3
 import sys
 from pathlib import Path
 
-# 确保 app 包可导入: v2_db 可能被安装为 /usr/local/bin/v2_db (cp 副本) 或经 skills 路径调用,
-# __file__ 相对路径在这些位置都解析不到 app 包。用 DVS_APP_DIR 显式定位。
+# 确保 app 包可导入: v2_db 可能被安装为 /usr/local/bin/v2_db (cp 副本, 非 symlink),
+# 此时 __file__ 解析为 /usr/local/bin → __file__ 相对路径错 (/usr/local 无 app 包)。
+# 用 DVS_APP_DIR (默认 /opt/dataflow_vuln_scan) 显式定位 app 包, 不依赖 __file__。
 _APP_DIR = os.environ.get("DVS_APP_DIR", "/opt/dataflow_vuln_scan")
 if _APP_DIR not in sys.path:
     sys.path.insert(0, _APP_DIR)
@@ -85,26 +88,104 @@ def _read_body(func: dict) -> str:
         return f"// 读取失败: {e}"
 
 
-def cmd_lookup(name: str) -> None:
-    func = _find_func(name)
-    if not func:
-        print(f"NOT_FOUND: 函数 '{name}' 不在数据库中。")
-        print(f"提示: 用 `v2_db index <file_path>` 索引该函数所在的源文件, 然后重新 lookup。")
+def _find_func_in_source_v2db(name: str, src_root: Path) -> tuple[str, str] | None:
+    """在源码树中搜索函数定义所在文件 (grep)。
+    返回 (rel_file, matched_name) 或 None。
+    """
+    import subprocess, re
+    # 搜索函数定义模式: name 后跟 ( 且前面有换行/分号/{/空格
+    pattern = rf'\b{re.escape(name)}\s*\('
+    try:
+        r = subprocess.run(
+            ["grep", "-rl", "--include=*.c", "--include=*.cpp", "--include=*.cc",
+             "-E", pattern, str(src_root)],
+            capture_output=True, text=True, timeout=15)
+        for line in r.stdout.strip().split("\n"):
+            if not line:
+                continue
+            try:
+                rel = str(Path(line).relative_to(src_root)).replace("\\", "/")
+                return (rel, name)
+            except ValueError:
+                continue
+    except Exception:
+        pass
+    return None
+
+
+def _log_trajectory(func: dict, query: str) -> None:
+    """自主模式 (DVS_RUN_DIR 设了): 记 v2_db lookup 到 path.log (服务感知探索路径)。
+    完整模式不设 DVS_RUN_DIR → 不记 (不影响)。"""
+    run_dir = os.environ.get("DVS_RUN_DIR", "").strip()
+    if not run_dir:
         return
-    body = _read_body(func)
-    print(f"function: {func['name']}")
-    print(f"file: {func['file']}")
-    print(f"lines: {func['start_line']}-{func['end_line']}")
-    print(f"signature: {func['signature']}")
-    print(f"description: {func.get('description', '')}")
-    print(f"---")
-    print(body)
+    import time, json
+    step = {"ts": time.time(), "func": func.get("name", ""), "file": func.get("file", ""),
+            "start_line": func.get("start_line"), "end_line": func.get("end_line"),
+            "signature": func.get("signature", ""), "query": query, "via": "v2_db_lookup"}
+    try:
+        with open(os.path.join(run_dir, "path.log"), "a", encoding="utf-8") as f:
+            f.write(json.dumps(step, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+def cmd_lookup(name: str) -> None:
+    """查函数体: db 查 → 找不到 → grep 找文件 → tree-sitter 索引入库 → 返回。"""
+    func = _find_func(name)
+    if func:
+        _log_trajectory(func, name)
+        body = _read_body(func)
+        print(f"function: {func['name']}")
+        print(f"file: {func['file']}")
+        print(f"lines: {func['start_line']}-{func['end_line']}")
+        print(f"signature: {func['signature']}")
+        print(f"description: {func.get('description', '')}")
+        print(f"---")
+        print(body)
+        return
+
+    # db 没找到 → 在源码树中搜索函数定义所在文件
+    src_root = Path(_source_root())
+    found = __import__("app.dataflow_v2.function_extractor", fromlist=["find_func_in_source"]).find_func_in_source(name, src_root)
+    if not found:
+        print(f"NOT_FOUND: 函数 '{name}' 在源码树中未找到。该函数可能是外部库函数或系统 API，定义不在当前源码树中，不需要查找其源码。")
+        return
+
+    rel_file, matched_name = found
+    # 用 ensure_file_indexed 索引该文件 (tree-sitter + include + class, 增量)
+    db_dir = _db_dir()
+    sys.path.insert(0, os.environ.get("DVS_APP_DIR", "/opt/dataflow_vuln_scan"))
+    try:
+        from app.dataflow_v2.function_extractor import ensure_file_indexed
+        from app.dataflow_v2.store import DataflowStore
+        store = DataflowStore(db_dir)
+        ensure_file_indexed(str(src_root), rel_file, store)
+        store.close()
+    except Exception as e:
+        print(f"INDEX_ERROR: 索引文件 {rel_file} 失败: {e}")
+        return
+
+    # 再查 db
+    func = _find_func(name)
+    if func:
+        _log_trajectory(func, name)
+        body = _read_body(func)
+        print(f"function: {func['name']}")
+        print(f"file: {func['file']}")
+        print(f"lines: {func['start_line']}-{func['end_line']}")
+        print(f"signature: {func['signature']}")
+        print(f"description: {func.get('description', '')}")
+        print(f"---")
+        print(body)
+    else:
+        print(f"NOT_FOUND: 函数 '{name}' 在文件 {rel_file} 中未找到定义。该函数可能是外部库函数，不需要查找其源码。")
 
 
 def cmd_taints(name: str) -> None:
     func = _find_func(name)
     if not func:
-        print(f"NOT_FOUND: 函数 '{name}' 不在数据库中。")
+        print(f"NOT_FOUND: 函数 '{name}' 不在数据库中。该函数可能是外部库函数或系统 API，定义不在当前源码树中，不需要查找其源码。")
         return
     rows = _query("taints.db", "SELECT * FROM taints WHERE func_id = ?", (func["func_id"],))
     if not rows:
@@ -117,7 +198,7 @@ def cmd_taints(name: str) -> None:
 def cmd_propagations(name: str) -> None:
     func = _find_func(name)
     if not func:
-        print(f"NOT_FOUND: 函数 '{name}' 不在数据库中。")
+        print(f"NOT_FOUND: 函数 '{name}' 不在数据库中。该函数可能是外部库函数或系统 API，定义不在当前源码树中，不需要查找其源码。")
         return
     rows = _query("propagations.db",
                   "SELECT * FROM propagations WHERE source_func_id = ?", (func["func_id"],))
@@ -134,7 +215,7 @@ def cmd_propagations(name: str) -> None:
 def cmd_orchestration(name: str) -> None:
     func = _find_func(name)
     if not func:
-        print(f"NOT_FOUND: 函数 '{name}' 不在数据库中。")
+        print(f"NOT_FOUND: 函数 '{name}' 不在数据库中。该函数可能是外部库函数或系统 API，定义不在当前源码树中，不需要查找其源码。")
         return
     rows = _query("orchestration.db",
                   "SELECT * FROM orchestration WHERE source_func_id = ? ORDER BY path_id, edge_order",
@@ -178,7 +259,6 @@ def cmd_index(file_path: str) -> None:
         conn.close()
         return
 
-    # 动态导入 function_extractor (在容器内 app 包路径)
     # 动态导入 function_extractor (app 包路径已由顶部 sys.path 确保)
     try:
         from app.dataflow_v2.function_extractor import extract_file_functions
@@ -228,6 +308,41 @@ def _simple_index(conn, rel: str, src_file: Path):
     print(f"简化索引 '{rel}': {count} 个函数。")
 
 
+def cmd_symbol(name: str) -> None:
+    """查宏定义/typedef/struct/enum — 一次 grep 全盘 .h/.c 文件。"""
+    import subprocess, os
+    src = os.environ.get("DVS_SOURCE_ROOT", "")
+    if not src:
+        print("ERROR: DVS_SOURCE_ROOT 未设置")
+        return
+    # grep 搜索 #define / typedef / struct / enum 定义
+    patterns = [
+        f"#define\\s+{name}\\b",
+        f"typedef\\s+.*\\b{name}\\b",
+        f"struct\\s+{name}\\b",
+        f"enum\\s+{name}\\b",
+        f"{name}\\s*=.*;".replace(f"{name}\\s*=.*;", f"\\b{name}\\s*="),  # enum member
+    ]
+    results = []
+    for pattern in patterns:
+        try:
+            r = subprocess.run(
+                ["grep", "-rn", "--include=*.h", "--include=*.c", "--include=*.cpp",
+                 "-E", pattern, src],
+                capture_output=True, text=True, timeout=15)
+            for line in r.stdout.strip().split("\n"):
+                if line and line not in results:
+                    results.append(line)
+        except Exception:
+            pass
+    if results:
+        for line in results[:20]:
+            print(line)
+    else:
+        print(f"NOT_FOUND: 符号 '{name}' 在源码中未找到定义。")
+        print(f"提示: 可能是外部库/系统头文件中的符号, 用 grep -rn {name} /usr/include 搜索。")
+
+
 def main():
     if len(sys.argv) < 2:
         print(__doc__)
@@ -243,6 +358,8 @@ def main():
         cmd_orchestration(sys.argv[2])
     elif cmd == "index" and len(sys.argv) >= 3:
         cmd_index(sys.argv[2])
+    elif cmd == "symbol" and len(sys.argv) >= 3:
+        cmd_symbol(sys.argv[2])
     else:
         print(f"未知命令: {cmd}")
         print(__doc__)
