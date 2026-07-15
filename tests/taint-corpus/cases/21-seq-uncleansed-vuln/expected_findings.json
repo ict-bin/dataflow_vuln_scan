@@ -1,0 +1,31 @@
+{
+  "mining_target": {"func": "f", "taint": "msg"},
+  "trigger": "f 传出点 {check, handler} taint DAG 就绪 -> 可挖",
+  "forward_chain": [
+    {"step": 0, "node": "msg 入口", "taint_state": "tainted (外部可控)"},
+    {"step": 1, "callee": "check", "effect": "unchanged (check DAG 无 prune=sanitized, 只有 check{m,!=,0} guard, 未清洗 msg)", "taint_state_after": "tainted"},
+    {"step": 2, "callee": "handler", "sink_candidate": "handler(msg)", "taint_state_at_handler": "tainted", "condition": "check(msg)!=0"}
+  ],
+  "findings": [
+    {
+      "vuln_type": "handler-injection",
+      "severity": "high",
+      "title": "外部可控 msg 经只判空的 check 后传入 handler, 路径无有效清洗",
+      "location": {"function": "f", "line": 2},
+      "dag_path": [
+        {"node": 0, "taint": "msg"},
+        {"edge": "0->1", "callee": "check", "effect": "unchanged"},
+        {"edge": "1->2", "callee": "handler", "condition": "check(msg)!=0", "sink": true}
+      ],
+      "dimensions": {
+        "D1": {"pass": true, "reason": "读 handler DAG/源码确认 handler 是危险 sink"},
+        "D2": {"pass": true, "reason": "msg 入口参数, 攻击者可控"},
+        "D3": {"pass": true, "reason": "正向建链: check 效应=不变 (无 sanitized prune, 只 guard), msg 到 handler 仍污点, 无不可绕清洗"},
+        "D4": {"pass": true, "reason": "handler 危险 sink, 实质后果"}
+      },
+      "confidence": 0.8
+    }
+  ],
+  "discarded": [],
+  "design_note": "顺序依赖(未清洗): 正向建链读 check 效应=不变 -> handler 处 msg 仍污点 -> D3 通过 -> finding. 对比 20 (清洗, 无洞). 关键: 靠正向按序拼 check 效应重建状态, 非反向。"
+}

@@ -1,0 +1,14 @@
+{
+  "taint_signature": "t",
+  "is_auto_source": true,
+  "self_contained": true,
+  "nodes": [
+    {"id":0,"line":1,"taint":"t","parents":[],"checks":[],"prune":null,"is_source":true}
+  ],
+  "edges": [
+    {"from":null,"to":0,"line":1,"taints":["t"],"kind":"source","condition":[],"sink_ref":"get_input","param_taints":null},
+    {"from":0,"to":null,"line":2,"taints":["t"],"kind":"return","condition":[],"sink_ref":null,"param_taints":null}
+  ],
+  "followups": [],
+  "note": "26: f 无参, t 源自 get_input (source 边). return t (return 边). self_contained=true (return 是本函数 sink). 挖掘: return 边漏洞, 本函数挖。"
+}

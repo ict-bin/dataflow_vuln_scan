@@ -1,0 +1,19 @@
+{
+  "taint_signature": "len",
+  "self_contained": true,
+  "description": "污点 len 未校验传 memcpy",
+  "nodes": [
+    { "id": 0, "line": 0, "taint": "len", "parents": [], "checks": [], "prune": null, "is_source": false },
+    { "id": 1, "line": 3, "taint": "len", "parents": [0], "checks": [], "prune": null, "is_source": false }
+  ],
+  "edges": [
+    { "from": 0, "to": 1, "line": 3, "taints": ["len"], "kind": "callee",
+      "condition": [], "sink_ref": "memcpy_dangerous",
+      "param_taints": [{"param": "len", "taint": "len"}],
+      "escape_subkind": null, "carrier": null, "escape_via": null }
+  ],
+  "followups": [
+    { "kind": "callee", "target_func": "memcpy_dangerous", "target_taint": "len", "origin_edge": "0->1" }
+  ],
+  "design_note": "len 是入口污点 (外部可控), 无 check, 直达 memcpy_dangerous (危险 sink). self_contained=true (本函数即 sink 触发点)."
+}

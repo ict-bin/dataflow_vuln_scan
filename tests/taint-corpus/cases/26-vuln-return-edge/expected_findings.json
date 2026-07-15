@@ -1,0 +1,24 @@
+{
+  "mining_target": {"func": "f", "taint": "t"},
+  "forward_chain": [
+    {"step": 0, "source": "get_input() (外部污点)", "taint_state": "tainted"},
+    {"step": 1, "return_edge": "return t", "sink": "return 未净化至信任边界", "taint_state_at_return": "tainted (未净化)"}
+  ],
+  "findings": [
+    {
+      "vuln_type": "information-disclosure",
+      "severity": "medium",
+      "location": {"function": "f", "line": 2},
+      "dag_path": [{"node": 0, "source": "get_input"}, {"edge": "return", "sink": "信任边界"}],
+      "dimensions": {
+        "D1": "return t, t 来自 get_input 未净化",
+        "D2": "get_input 是外部源可控",
+        "D3": "无 sanitizer (t 未清洗就返回)",
+        "D4": "未净化数据返回信任边界, 信息泄露/二次注入"
+      },
+      "confidence": 0.7
+    }
+  ],
+  "discarded": [],
+  "design_note": "return 边漏洞: return 是本函数的 sink 边 (返回未净化到信任边界), 本函数挖 (Q3). 不依赖 caller 挖。"
+}

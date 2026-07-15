@@ -1,0 +1,15 @@
+{
+  "taint_signature": "buf",
+  "is_auto_source": true,
+  "self_contained": true,
+  "nodes": [
+    { "id": 0, "line": 1, "taint": "buf", "parents": [], "checks": [], "prune": null, "is_source": true },
+    { "id": 1, "line": 2, "taint": "buf", "parents": [0], "checks": [], "prune": null, "is_source": false }
+  ],
+  "edges": [
+    { "from": null, "to": 0, "line": 1, "taints": ["buf"], "kind": "source", "condition": [], "sink_ref": "read_proc", "param_taints": [{"param":"buf","taint":"buf"}] },
+    { "from": 0, "to": 1, "line": 2, "taints": ["buf"], "kind": "callee", "condition": [], "sink_ref": "memcpy_dangerous", "param_taints": [{"param":"buf","taint":"buf"}] }
+  ],
+  "followups": [],
+  "note": "23: buf 源自 read_proc (/proc, 内核生成). source 边 sink_ref=read_proc. memcpy 是 sink. 挖掘 D2 判源不可控丢弃。"
+}

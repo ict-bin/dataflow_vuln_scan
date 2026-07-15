@@ -1,0 +1,18 @@
+{
+  "mining_target": {"func": "f", "taint": "msg"},
+  "trigger": "f 传出点 {check, handler} 的 taint DAG 就绪 -> 可挖",
+  "forward_chain": [
+    {"step": 0, "node": "msg 入口", "taint_state": "tainted (外部可控)"},
+    {"step": 1, "callee": "check", "effect": "sanitized (check 的 DAG prune=sanitized on m)", "taint_state_after": "clean"},
+    {"step": 2, "callee": "handler", "sink_candidate": "handler", "taint_state_at_handler": "clean"}
+  ],
+  "findings": [],
+  "discarded": [
+    {
+      "at_node": 2, "candidate_sink": "handler(msg)",
+      "reason": "D3 unmitigated=FAIL: 正向建链读 check 效应=sanitized, msg 在 handler 处已干净, 路径有不可绕有效清洗 -> 丢弃",
+      "evidence": "check DAG node1 prune=sanitized (return cleanse(m)); f L1 msg=check(msg) 赋值回 msg"
+    }
+  ],
+  "design_note": "顺序依赖核心: 正向建链按 call_line 顺序读 check 效应(清洗) -> handler 处 msg 状态=clean -> D3 判防御不可绕(已清洗) -> 丢弃 handler 候选. 验证: 不靠反向, 靠正向按序拼 callee 效应重建污点状态。"
+}

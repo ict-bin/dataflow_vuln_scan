@@ -1,0 +1,19 @@
+{
+  "analyze_f_taint_len": {
+    "taint_signature": "len",
+    "self_contained": true,
+    "nodes": [{"id":0,"line":0,"taint":"len","parents":[],"checks":[],"prune":null,"is_source":false},
+              {"id":1,"line":2,"taint":"len","parents":[0],"checks":[],"prune":null,"is_source":false}],
+    "edges": [{"from":0,"to":1,"line":2,"taints":["len"],"kind":"callee","condition":[],"sink_ref":"safe_copy","param_taints":[{"param":"len","taint":"len"}]}],
+    "followups": []
+  },
+  "analyze_f_taint_user": {
+    "taint_signature": "user",
+    "self_contained": true,
+    "nodes": [{"id":0,"line":0,"taint":"user","parents":[],"checks":[],"prune":null,"is_source":false},
+              {"id":1,"line":2,"taint":"user","parents":[0],"checks":[],"prune":null,"is_source":false}],
+    "edges": [{"from":0,"to":1,"line":2,"taints":["user"],"kind":"callee","condition":[],"sink_ref":"safe_copy","param_taints":[{"param":"user","taint":"user"}]}],
+    "followups": []
+  },
+  "note": "25: f 的 user/len 两污点各独立 DAG, 都到 safe_copy. safe_copy 名字安全但实际无校验 (挖掘读源码确认). 不靠命名预筛。"
+}

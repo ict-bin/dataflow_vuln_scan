@@ -1,0 +1,31 @@
+{
+  "analyze_f_taint_msg": {
+    "taint_signature": "msg",
+    "self_contained": false,
+    "nodes": [
+      { "id": 0, "line": 0, "taint": "msg", "parents": [], "checks": [], "prune": null, "is_source": false },
+      { "id": 1, "line": 1, "taint": "msg", "parents": [0], "checks": [], "prune": null, "is_source": false },
+      { "id": 2, "line": 2, "taint": "msg", "parents": [1], "checks": [], "prune": null, "is_source": false }
+    ],
+    "edges": [
+      { "from": 0, "to": 1, "line": 1, "taints": ["msg"], "kind": "callee",
+        "condition": [], "sink_ref": "check", "param_taints": [{"param": "m", "taint": "msg"}] },
+      { "from": 1, "to": 2, "line": 2, "taints": ["msg"], "kind": "callee",
+        "condition": [{"Atom": {"left": "check(msg)", "op": "!=", "right": "0"}}],
+        "sink_ref": "handler", "param_taints": [{"param": "msg", "taint": "msg"}] }
+    ],
+    "followups": [
+      { "kind": "callee", "target_func": "check", "target_taint": "m", "origin_edge": "0->1" },
+      { "kind": "callee", "target_func": "handler", "target_taint": "msg", "origin_edge": "1->2" }
+    ]
+  },
+  "analyze_check_taint_m": {
+    "taint_signature": "m",
+    "nodes": [
+      { "id": 0, "line": 0, "taint": "m", "parents": [], "checks": [{"left": "m", "op": "!=", "right": "0"}], "prune": null, "is_source": false }
+    ],
+    "edges": [],
+    "note": "check 的 DAG: m 有 check {m,!=,0} 但无 prune (只判空, 不清洗). msg 仍污点. 对比 20: 这里 check 无 sanitized prune."
+  },
+  "design_note": "check 只判空 (guard, 非 clean) -> check DAG 无 prune=sanitized, 有 check. 挖掘正向建链读 check 效应=不变 -> handler 处 msg 仍污点 -> 出 finding。对比 20: 清洗 vs 不清洗。"
+}

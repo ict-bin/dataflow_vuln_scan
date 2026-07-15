@@ -1,0 +1,13 @@
+{
+  "taint_signature": "t",
+  "self_contained": false,
+  "nodes": [
+    { "id": 0, "line": 0, "taint": "t", "parents": [], "checks": [], "prune": null, "is_source": false },
+    { "id": 1, "line": 1, "taint": "t", "parents": [0], "checks": [], "prune": {"reason":"sanitized","detail":"t=cleanse(t) 本函数内清洗"}, "is_source": false }
+  ],
+  "edges": [
+    { "from": 0, "to": 1, "line": 1, "taints": ["t"], "kind": "callee", "condition": [], "sink_ref": "cleanse", "param_taints": [{"param":"t","taint":"t"}] }
+  ],
+  "followups": [],
+  "note": "22 的 f(t): t=cleanse(t) 在本函数内赋值清洗 -> f 的 t-DAG node1 prune=sanitized (本函数视角). use(t) 不在污点 DAG (t 已清洗). 对比 20: 20 的清洗在 callee check 内, f 不知; 22 的清洗在 f 本函数内 (t=cleanse(t) 赋值)."
+}

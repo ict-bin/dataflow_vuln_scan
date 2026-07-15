@@ -1,0 +1,33 @@
+{
+  "mining_order": ["C (无传出点 -> 先挖)", "B (传出点{C}就绪)", "A (传出点{B}就绪)"],
+  "mine_C_taint_p": {
+    "forward_chain": [{"step": 0, "node": "p 入口"}, {"step": 1, "callee": "use", "sink": true, "taint_state": "tainted"}],
+    "findings": [
+      {
+        "vuln_type": "use-sink",
+        "severity": "high",
+        "location": {"function": "C", "line": 0},
+        "dimensions": {
+          "D1": "use 是危险 sink", "D2": "p 入口, 反查 callers (A->B->C) 到 A 的 src 外部可控",
+          "D3": "C->B->A 链无 sanitizer", "D4": "实质后果"
+        },
+        "confidence": 0.8
+      }
+    ]
+  },
+  "mine_B_taint_m": {
+    "forward_chain": [{"step": 0, "node": "m 入口"}, {"step": 1, "callee": "C", "effect": "unchanged"}, {"step": 2, "sink in C": "C 内 use"}],
+    "findings": [],
+    "discarded": [
+      {"at_node": "C(m)", "reason": "跨段去重: sink 在 C, C 段已报同一 sink (C:line0 use), B 段离 sink 远 -> 丢弃 B 的重复 finding"}
+    ]
+  },
+  "mine_A_taint_src": {
+    "forward_chain": [{"step": 0, "source": "src 外部可控"}, {"step": 1, "callee": "B", "effect": "unchanged"}, {"step": 2, "sink in C": "经 B 到 C 的 use"}],
+    "findings": [],
+    "discarded": [
+      {"at_node": "B(src)", "reason": "跨段去重: 同一 sink (C:use) 已由 C 段报, A 段离 sink 远 -> 丢弃"}
+    ]
+  },
+  "design_note": "跨函数: 各段按传出点就绪顺序挖 (C->B->A). C 段含 sink -> 报. B/A 段候选指向同一 sink -> 跨段去重 (sink 近者优先). D2 反查 callers 走到 A 的 src 确认外部可控。"
+}

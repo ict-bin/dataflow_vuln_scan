@@ -1,0 +1,25 @@
+{
+  "analyze_A_taint_src": {
+    "taint_signature": "src",
+    "nodes": [{"id":0,"line":0,"taint":"src","parents":[],"checks":[],"prune":null,"is_source":false},
+              {"id":1,"line":0,"taint":"src","parents":[0],"checks":[],"prune":null,"is_source":false}],
+    "edges": [{"from":0,"to":1,"line":0,"taints":["src"],"kind":"callee","condition":[],"sink_ref":"B","param_taints":[{"param":"m","taint":"src"}]}],
+    "followups": [{"kind":"callee","target_func":"B","target_taint":"m","origin_edge":"0->1"}]
+  },
+  "analyze_B_taint_m": {
+    "taint_signature": "m",
+    "nodes": [{"id":0,"line":0,"taint":"m","parents":[],"checks":[],"prune":null,"is_source":false},
+              {"id":1,"line":0,"taint":"m","parents":[0],"checks":[],"prune":null,"is_source":false}],
+    "edges": [{"from":0,"to":1,"line":0,"taints":["m"],"kind":"callee","condition":[],"sink_ref":"C","param_taints":[{"param":"p","taint":"m"}]}],
+    "followups": [{"kind":"callee","target_func":"C","target_taint":"p","origin_edge":"0->1"}]
+  },
+  "analyze_C_taint_p": {
+    "taint_signature": "p",
+    "self_contained": true,
+    "nodes": [{"id":0,"line":0,"taint":"p","parents":[],"checks":[],"prune":null,"is_source":false},
+              {"id":1,"line":0,"taint":"p","parents":[0],"checks":[],"prune":null,"is_source":false}],
+    "edges": [{"from":0,"to":1,"line":0,"taints":["p"],"kind":"callee","condition":[],"sink_ref":"use","param_taints":[{"param":"norm(use形参)","taint":"p"}]}],
+    "followups": [{"kind":"callee","target_func":"use","target_taint":"norm(use形参名)","origin_edge":"0->1"}]
+  },
+  "note": "24: A->B->C->use. 各函数 DAG. C self_contained (use 外部 sink). 挖掘顺序 C->B->A (传出点就绪). C 段含 sink 报; B/A 跨段去重丢弃。"
+}

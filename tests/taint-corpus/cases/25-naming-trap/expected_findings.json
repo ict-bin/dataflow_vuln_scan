@@ -1,0 +1,21 @@
+{
+  "mining_target": {"func": "f", "taint": "len/user"},
+  "forward_chain": [
+    {"step": 0, "source": "user + len 入口 (外部可控)"},
+    {"step": 1, "callee": "safe_copy", "name_looks_safe": true, "actual": "读源码/DAG 确认无边界校验 -> 危险", "taint_state": "tainted 到 sink"}
+  ],
+  "findings": [
+    {
+      "vuln_type": "buffer-overflow",
+      "severity": "high",
+      "location": {"function": "f", "line": 2},
+      "dimensions": {
+        "D1": "读 safe_copy 源码: 实际无长度校验 (名字 safe 是陷阱), buf 定长 64, len 可控",
+        "D2": "user/len 入口可控", "D3": "无 sanitizer", "D4": "溢出后果"
+      },
+      "confidence": 0.8
+    }
+  ],
+  "discarded": [],
+  "design_note": "命名陷阱: safe_copy 名字像安全, 但不靠命名预筛 (Q3 所有传入都挖), 读源码/DAG 确认实际无校验 -> 仍出 finding. 验证: 不用函数名白名单/黑名单。"
+}

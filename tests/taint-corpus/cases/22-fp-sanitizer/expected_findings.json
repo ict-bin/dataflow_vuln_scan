@@ -1,0 +1,16 @@
+{
+  "mining_target": {"func": "f", "taint": "t"},
+  "forward_chain": [
+    {"step": 0, "node": "t 入口", "taint_state": "tainted"},
+    {"step": 1, "callee": "cleanse (in-function: t=cleanse(t))", "effect": "sanitized", "taint_state_after": "clean"},
+    {"step": 2, "callee": "use", "sink_candidate": "use(t)", "taint_state_at_use": "clean"}
+  ],
+  "findings": [],
+  "discarded": [
+    {
+      "at_node": "use(t) L2", "candidate_sink": "use(t)",
+      "reason": "D3=FAIL: t=cleanse(t) 清洗 (f DAG node 有 prune=sanitized), use 处 t 已干净, 不可绕有效清洗 -> 丢弃"
+    }
+  ],
+  "design_note": "sanitizer 清洗误报: t 被 cleanse 清洗 -> use 候选丢弃. 对比 21 (check 只 guard 不清洗, 有洞)."
+}

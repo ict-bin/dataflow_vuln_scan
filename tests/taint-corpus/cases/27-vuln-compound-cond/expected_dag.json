@@ -1,0 +1,15 @@
+{
+  "taint_signature": "x",
+  "self_contained": true,
+  "nodes": [
+    {"id":0,"line":0,"taint":"x","parents":[],"checks":[],"prune":null,"is_source":false},
+    {"id":1,"line":2,"taint":"x","parents":[0],"checks":[],"prune":null,"is_source":false}
+  ],
+  "edges": [
+    {"from":0,"to":1,"line":2,"taints":["x"],"kind":"callee",
+     "condition":[{"Compound":{"comb":"AND","terms":[{"Atom":{"left":"a->cmd","op":"==","right":"1"}},{"Atom":{"left":"a->flag","op":"!=","right":"0"}}]}}],
+     "sink_ref":"dangerous","param_taints":[{"param":"x","taint":"x"}]}
+  ],
+  "followups": [],
+  "note": "27: x 入口 -> dangerous(x) 在复合条件分支 (Compound AND). sink 在条件边下. 挖掘判条件可达 (攻击者构造 a->cmd=1,a->flag!=0) + D2 -> finding。"
+}

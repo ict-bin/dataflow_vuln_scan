@@ -1,0 +1,22 @@
+{
+  "mining_target": {"func": "f", "taint": "len"},
+  "trigger": "无传出点 callee 目标分析? memcpy_dangerous 是外部库函数 (DAG 无) -> 立即可挖",
+  "findings": [
+    {
+      "vuln_type": "buffer-overflow",
+      "severity": "high",
+      "title": "污点长度 len 未校验传入定长缓冲 memcpy 导致溢出",
+      "location": {"function": "f", "line": 3},
+      "dag_path": [{"node": 0, "taint": "len"}, {"edge": "0->1", "sink": "memcpy_dangerous"}],
+      "dimensions": {
+        "D1": {"pass": true, "reason": "memcpy_dangerous 是危险拷贝, buf 定长 64, len 未限"},
+        "D2": {"pass": true, "reason": "len 是入口参数, 攻击者可控"},
+        "D3": {"pass": true, "reason": "路径无 sanitizer, len 未校验"},
+        "D4": {"pass": true, "reason": "堆栈溢出, 可控代码执行/崩溃"}
+      },
+      "confidence": 0.85
+    }
+  ],
+  "discarded": [],
+  "design_note": "正向建链: len 入口 -> memcpy_dangerous (直接危险 callee, sink). D1-D4 全过 -> finding. memcpy_dangerous 外部库, LLM 按标准库知识判危险。"
+}

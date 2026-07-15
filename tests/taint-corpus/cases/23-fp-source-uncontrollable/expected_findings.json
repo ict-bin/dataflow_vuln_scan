@@ -1,0 +1,15 @@
+{
+  "mining_target": {"func": "f", "taint": "buf"},
+  "forward_chain": [
+    {"step": 0, "source": "read_proc (buf 从 /proc 读)", "taint_state": "tainted BUT source=kernel/proc"},
+    {"step": 1, "sink": "memcpy_dangerous(buf,buf,256)", "taint_state_at_sink": "tainted"}
+  ],
+  "findings": [],
+  "discarded": [
+    {
+      "at_node": "memcpy L2", "candidate_sink": "memcpy_dangerous",
+      "reason": "D2=FAIL: buf 源自 /proc (内核生成), 非攻击者可控外部入口 (威胁模型排除 /proc/sys/硬编码). 即使污点到 sink, 源不可控 -> 丢弃"
+    }
+  ],
+  "design_note": "源不可控误报: 污点能到 sink, 但 source 是内核/proc 不可控 -> D2 丢弃. 验证威胁模型表 (vuln-miners/default.md 的不可控来源)."
+}

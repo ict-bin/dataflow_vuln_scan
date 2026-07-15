@@ -1,0 +1,40 @@
+{
+  "analyze_f_taint_msg": {
+    "taint_signature": "msg",
+    "self_contained": false,
+    "nodes": [
+      { "id": 0, "line": 0, "taint": "msg", "parents": [], "checks": [], "prune": null, "is_source": false },
+      { "id": 1, "line": 1, "taint": "msg", "parents": [0], "checks": [], "prune": null, "is_source": false },
+      { "id": 2, "line": 2, "taint": "msg", "parents": [1], "checks": [], "prune": null, "is_source": false }
+    ],
+    "edges": [
+      { "from": 0, "to": 1, "line": 1, "taints": ["msg"], "kind": "callee",
+        "condition": [], "sink_ref": "check", "param_taints": [{"param": "m", "taint": "msg"}] },
+      { "from": 1, "to": 2, "line": 2, "taints": ["msg"], "kind": "callee",
+        "condition": [], "sink_ref": "handler", "param_taints": [{"param": "msg", "taint": "msg"}] }
+    ],
+    "followups": [
+      { "kind": "callee", "target_func": "check", "target_taint": "m", "origin_edge": "0->1" },
+      { "kind": "callee", "target_func": "handler", "target_taint": "msg", "origin_edge": "1->2" }
+    ],
+    "note": "f 的 msg-DAG 是原始流: msg -> check -> handler (乐观, 不知 check 清洗)"
+  },
+  "analyze_check_taint_m": {
+    "taint_signature": "m",
+    "nodes": [
+      { "id": 0, "line": 0, "taint": "m", "parents": [], "checks": [], "prune": null, "is_source": false },
+      { "id": 1, "line": 0, "taint": "m", "parents": [0], "checks": [],
+        "prune": {"reason": "sanitized", "detail": "return cleanse(m) 清洗"}, "is_source": false }
+    ],
+    "edges": [
+      { "from": 0, "to": 1, "line": 0, "taints": ["m"], "kind": "callee",
+        "condition": [], "sink_ref": "cleanse", "param_taints": [{"param": "m", "taint": "m"}] },
+      { "from": 1, "to": null, "line": 0, "taints": ["m"], "kind": "return",
+        "condition": [], "sink_ref": null, "param_taints": null }
+    ],
+    "note": "check 的 DAG: m -> cleanse -> prune sanitized (清洗) + return cleansed m"
+  },
+  "design_note": "f 的 msg-DAG 乐观流到 handler. check 的 DAG 有 prune=sanitized. 挖掘 f 时正向建链读 check 效应=清洗 -> handler 处 msg 干净 -> 无洞."
+  ,
+  "mining_note": "见 expected_findings.json"
+}

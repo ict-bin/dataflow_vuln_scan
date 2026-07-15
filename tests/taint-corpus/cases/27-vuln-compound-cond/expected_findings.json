@@ -1,0 +1,24 @@
+{
+  "mining_target": {"func": "f", "taint": "x"},
+  "forward_chain": [
+    {"step": 0, "source": "x 入口 (外部可控)", "taint_state": "tainted"},
+    {"step": 1, "sink": "dangerous(x)", "condition": "Compound{AND,[a->cmd==1, a->flag!=0]}", "taint_state_at_sink": "tainted (仅在条件分支)"}
+  ],
+  "findings": [
+    {
+      "vuln_type": "dangerous-sink",
+      "severity": "high",
+      "location": {"function": "f", "line": 2},
+      "dag_path": [{"node": 0, "taint": "x"}, {"edge": "0->sink", "sink": "dangerous", "condition": "Compound{AND,[Atom{a->cmd,==,1}, Atom{a->flag,!=,0}]}"}],
+      "dimensions": {
+        "D1": "dangerous 是危险 sink",
+        "D2": "x 入口可控; 复合条件 a->cmd==1&&a->flag 攻击者可构造满足",
+        "D3": "无 sanitizer",
+        "D4": "实质后果"
+      },
+      "confidence": 0.75
+    }
+  ],
+  "discarded": [],
+  "design_note": "复合条件 sink: DAG 边带 Compound condition, 挖掘判该条件分支可达 (攻击者可构造 a->cmd=1,a->flag!=0) -> finding. 验证 condition 沿链保留 + D2 条件可满足。"
+}
