@@ -56,9 +56,32 @@ class FuncIndex:
             conn.close()
 
     def _ondemand(self, name: str):
-        """按需: 用 function_extractor 全项目搜该函数 (写 functions.db)。P6 stub: 返回 None。"""
-        # 完整 on-demand 搜索较重; P6 先返回 None (callee 未索引则跳过, tracker/挖掘按未知处理)
-        return None
+        """按需: 用 function_extractor 在已知文件里搜该函数 (写 functions.db)。"""
+        if self._v2_store is None:
+            return None
+        from ..dataflow_v2.function_extractor import find_func_in_source, extract_file_functions
+        hit = find_func_in_source(name, self.source_root)
+        if hit is None:
+            return None
+        rel_file, _ = hit
+        try:
+            extract_file_functions(self.source_root, rel_file, self._v2_store)
+        except Exception as e:
+            logger.debug("ondemand extract %s failed: %s", rel_file, e)
+            return None
+        # 再查
+        import sqlite3
+        conn = sqlite3.connect(str(self.db))
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                "SELECT func_id,file,name,signature,start_line,end_line,description "
+                "FROM functions WHERE name=?", (name,)).fetchall()
+            return self._row_to_rec(rows[0]) if rows else None
+        except sqlite3.Error:
+            return None
+        finally:
+            conn.close()
 
     @staticmethod
     def _row_to_rec(r):
@@ -134,11 +157,23 @@ class DagflowPipeline:
                 fill_lines(dag, func, self.source_root)
                 return dag
 
-            # tracker reader_finder/function_resolver: P6 stub (返回 [], 不解析; 后续 LLM+v2_db 填)
+            # tracker reader_finder/function_resolver: LLM+v2_db 找读者/解析间接 (生产实现)
+            from .reader_finder import ReaderFinder
+            from .function_resolver import FunctionResolver
+            v2_db_dir = run_dir / "dataflow-v2"
+            rf = ReaderFinder(config=self.config, source_root=self.source_root,
+                              v2_db_dir=v2_db_dir, sessions_dir=sessions_dir,
+                              task_id=task_id, on_event=self.on_event,
+                              cancel_event=self.cancel_event)
+            fr_ = FunctionResolver(config=self.config, source_root=self.source_root,
+                                   v2_db_dir=v2_db_dir, sessions_dir=sessions_dir,
+                                   task_id=task_id, on_event=self.on_event,
+                                   cancel_event=self.cancel_event)
             dispatcher = TrackerDispatcher(
                 store=store, func_lookup=func_index.get_by_name,
                 on_enqueue=lambda fid, t: orch._wq.put(_make_callee_item(fid, t)),
-                on_event=self.on_event)
+                on_event=self.on_event,
+                reader_finder=rf.find, function_resolver=fr_.resolve)
             # 暴露 orch 给 on_enqueue (run 后可用)
             orch = DagflowOrchestrator(
                 store=store, analyze_fn=analyze_fn,
