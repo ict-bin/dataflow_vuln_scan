@@ -263,6 +263,7 @@ def build_task_config(svc: ServiceConfig, prompt: str, cwd: str = None) -> TaskC
         entry_screen_whitelist=list(getattr(svc, "entry_screen_whitelist", None) or []),
         entry_screen_thinking_level=getattr(svc, "entry_screen_thinking_level", "off"),
         branch_pruning_enabled=getattr(svc, "branch_pruning_enabled", False),
+        vuln_mining_thinking_level=getattr(svc, "vuln_mining_thinking_level", "high"),
         workers=svc.workers.model_copy(deep=True),
         judges=svc.judges.model_copy(deep=True),
         output_dir=svc.output_dir,

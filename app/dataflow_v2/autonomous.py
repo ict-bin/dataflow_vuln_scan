@@ -160,6 +160,7 @@ class AutonomousRunner:
                     prompt=prompt, model=acfg.model, tools=acfg.tools or cfg.workers.default_tools,
                     cwd=str(shared_run_dir), session_file=str(round_session), system_prompt=system_prompt,
                     cancel_event=self._cancel_event, env=base_env,
+                    thinking_level="off",
                     run_timeout_seconds=cfg.agent_run_timeout_seconds,
                     timeout_retry_enabled=cfg.agent_timeout_retry_enabled,
                     timeout_max_retries=cfg.agent_timeout_max_retries,

@@ -84,6 +84,7 @@ def resolve_external(
         timeout_max_retries=cfg.agent_timeout_max_retries,
         pi_max_retries=cfg.pi_max_retries, pi_retry_delay=cfg.pi_retry_delay,
         env=v2_env,
+        thinking_level="off",
         task_context={"task_id": "", "task_root": "", "task_run_root": "",
                       "task_pi_dir": "", "agent_role": "workers"},
     )
@@ -202,6 +203,7 @@ def resolve_indirect(
         timeout_max_retries=cfg.agent_timeout_max_retries,
         pi_max_retries=cfg.pi_max_retries, pi_retry_delay=cfg.pi_retry_delay,
         env=v2_env,
+        thinking_level="off",
         task_context={"task_id": "", "task_root": "", "task_run_root": "",
                       "task_pi_dir": "", "agent_role": "workers"},
     )

@@ -49,6 +49,10 @@ class AnalysisResult:
     session_path: str = ""      # 本函数 taint 分析 fork session 路径 (供子函数/mining 继承链)
     return_taints: list[TaintRecord] = field(default_factory=list)  # 本函数 return 语句返回的污点
     taint_failed: bool = False  # taint 分析全失败 (retry 用尽), 跳过 mining
+    # 专注模式: LLM 合并传播+挖掘后, 标记的“最可能产生漏洞的兴趣点”
+    #   [{target_function, taint_param, reason, line}] — 编排器只跟入这些点 (往深挖),
+    #   不做全 callee BFS。完整模式下为空。
+    interest_points: list[dict] = field(default_factory=list)
 
 
 class PathContext:
@@ -111,6 +115,16 @@ class AnalysisCallbacks:
         继承整条链 taint 分析 session (base_session), 再提示分析当前函数内的漏洞。"""
         return 0
 
+    def analyze_and_mine_focus(self, store: DataflowStore, func: FunctionRecord,
+                               taint_params: TaintParamInfo, pre_validations: list[Validation],
+                               base_session: str, ctx: PathContext) -> AnalysisResult:
+        """专注模式: 单函数合并污点传播 + 漏洞挖掘。
+
+        一次 LLM 调用完成传播 (propagations/taints/return_taints) + 挖掘 (findings) +
+        输出“兴趣点” (interest_points: 最可能产生漏洞、值得往深跟的 callee/sink)。
+        编排器只跟入兴趣点 (目标深挖), 不做全 callee BFS。返回 AnalysisResult (含 interest_points)。"""
+        return AnalysisResult()
+
 
 class ChainStep:
     """路径链上一步: 待分析的 callee + 其污点参数 + 截至该步累积的校验。"""
@@ -147,12 +161,14 @@ class DfsOrchestrator:
 
     def __init__(self, store: DataflowStore, cbs: AnalysisCallbacks,
                  n_workers: int = 4, concurrent: bool = False,
-                 max_concurrent_llm: int = 8, max_depth: int = 10) -> None:
+                 max_concurrent_llm: int = 8, max_depth: int = 10,
+                 focus_mode: bool = False) -> None:
         self.store = store
         self.cbs = cbs
         self.n_workers = n_workers
         self.concurrent = concurrent
         self.max_depth = max_depth
+        self.focus_mode = focus_mode
         self._llm_sem = threading.Semaphore(max_concurrent_llm) if concurrent else None
 
     def _run_llm(self, fn: Callable, *args: Any, **kw: Any) -> Any:

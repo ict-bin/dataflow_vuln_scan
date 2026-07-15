@@ -98,6 +98,7 @@ class ServiceConfig(BaseModel):
     entry_screen_whitelist: list[str] = Field(default_factory=lambda: list(DEFAULT_ENTRY_WHITELIST), description="入口白名单关键字（小写子串），函数名命中任一即直接判为入口、跳过 agent 判断")
     entry_screen_thinking_level: str = Field(default="off", description="入口筛查 agent 思考等级，默认 off 以省 token")
     branch_pruning_enabled: bool = Field(default=False, description="分支剪枝开关（智能模式）：开启后在污点分析完成后 fork 会话，由 LLM 判断每个 followup 是否值得跟入。关闭=全面模式，所有 followup 全部追踪")
+    vuln_mining_thinking_level: str = Field(default="high", description="漏洞挖掘 agent 思考等级。完整模式下仅 vuln mining 使用思考，其余 LLM 调用强制 off")
 
     workers: RoleConfig = Field(default_factory=RoleConfig)
     judges: RoleConfig = Field(default_factory=RoleConfig)
@@ -151,6 +152,7 @@ class TaskConfig(BaseModel):
     entry_screen_whitelist: list[str] = Field(default_factory=lambda: list(DEFAULT_ENTRY_WHITELIST))
     entry_screen_thinking_level: str = Field(default="off")
     branch_pruning_enabled: bool = Field(default=False)
+    vuln_mining_thinking_level: str = Field(default="high")
     # 任务级 debug 特性开关 (单任务独立启停, 默认全关 = 主线行为)。
     # 已注册键:
     #   clang_mutex    - clang 互斥分支分析 + 幽灵调用点丢弃 (污点跟踪正确性)

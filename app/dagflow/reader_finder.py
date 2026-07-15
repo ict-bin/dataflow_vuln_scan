@@ -66,6 +66,7 @@ class ReaderFinder:
             tools=self._acfg.tools or self.config.workers.default_tools,
             cwd=str(self.source_root), env=env, session_file=sp,
             system_prompt=_SYSTEM, cancel_event=self.cancel_event,
+            thinking_level="off",
             run_timeout_seconds=min(getattr(self.config, "agent_run_timeout_seconds", 900), 1600),
             timeout_retry_enabled=getattr(self.config, "agent_timeout_retry_enabled", True),
             timeout_max_retries=getattr(self.config, "agent_timeout_max_retries", 20),
