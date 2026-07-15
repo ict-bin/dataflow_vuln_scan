@@ -1,0 +1,17 @@
+{
+  "taint_signature": "t",
+  "nodes": [
+    { "id": 0, "line": 0, "taint": "t", "parents": [], "checks": [], "prune": null, "is_source": false },
+    { "id": 1, "line": 1, "taint": "t", "parents": [0], "checks": [], "prune": null, "is_source": false }
+  ],
+  "edges": [
+    { "from": 0, "to": 1, "line": 1, "taints": ["t"], "kind": "callee",
+      "condition": [], "sink_ref": "A::handle",
+      "param_taints": [{"param": "x", "taint": "t"}],
+      "note": "sink_ref=限定名 A::handle (含类). tree-sitter 据 a 的类型 A 补全限定, 区别于 B::handle" }
+  ],
+  "followups": [
+    { "kind": "callee", "target_func": "A::handle", "target_taint": "x", "origin_edge": "0->1" }
+  ],
+  "design_note": "GAP-4: a->handle(t), a 类型=A -> callee=A::handle (限定名). func_id 用 name (含 A::) 区分 A::handle/B::handle. LLM 输出限定名 + tree-sitter 从 a 类型补全双保险。"
+}

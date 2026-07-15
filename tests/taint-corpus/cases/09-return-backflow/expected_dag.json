@@ -1,0 +1,53 @@
+{
+  "analyze_B_taint_x": {
+    "taint_signature": "x",
+    "nodes": [
+      { "id": 0, "line": 0, "taint": "x", "parents": [], "checks": [], "prune": null, "is_source": false }
+    ],
+    "edges": [
+      { "from": 0, "to": null, "line": 0, "taints": ["x"], "kind": "return",
+        "condition": [], "sink_ref": null, "param_taints": null,
+        "escape_subkind": null, "carrier": null, "escape_via": null,
+        "note": "return 边: B 返回 x -> 产出 return_taint 跟入项给 caller A" }
+    ],
+    "followups": [
+      { "kind": "return_taint", "target_func": "A", "target_taint": "r",
+        "origin_edge": "0->null",
+        "note": "回传项 (A, r): A 已持有 t 轮, r 是新污点签名 -> 触发 A 的新分析 (不同 key)" }
+    ]
+  },
+  "analyze_A_taint_t": {
+    "taint_signature": "t",
+    "nodes": [
+      { "id": 0, "line": 0, "taint": "t", "parents": [], "checks": [], "prune": null, "is_source": false },
+      { "id": 1, "line": 1, "taint": "t", "parents": [0], "checks": [], "prune": null, "is_source": false }
+    ],
+    "edges": [
+      { "from": 0, "to": 1, "line": 1, "taints": ["t"], "kind": "callee",
+        "condition": [], "sink_ref": "B", "param_taints": [{"param": "x", "taint": "t"}] }
+    ],
+    "followups": [
+      { "kind": "callee", "target_func": "B", "target_taint": "x", "origin_edge": "0->1" }
+    ],
+    "note": "A 的 t 轮: 只知 t->B, 不预测 r (r 由 B 回传后才在 A 的 r 轮出现)"
+  },
+  "analyze_A_taint_r": {
+    "taint_signature": "r",
+    "nodes": [
+      { "id": 0, "line": 1, "taint": "r", "parents": [], "checks": [], "prune": null, "is_source": true },
+      { "id": 1, "line": 2, "taint": "r", "parents": [0], "checks": [], "prune": null, "is_source": false }
+    ],
+    "edges": [
+      { "from": null, "to": 0, "line": 1, "taints": ["r"], "kind": "source",
+        "condition": [], "sink_ref": "B", "param_taints": null,
+        "note": "r 是 B 回传的派生污点 -> 在 A 的 r 轮作为 source 节点 (is_source)" },
+      { "from": 0, "to": 1, "line": 2, "taints": ["r"], "kind": "callee",
+        "condition": [], "sink_ref": "use", "param_taints": [{"param": "norm(use形参)", "taint": "r"}] }
+    ],
+    "followups": [
+      { "kind": "callee", "target_func": "use", "target_taint": "norm(use形参名)", "origin_edge": "0->1" }
+    ],
+    "note": "A 的 r 轮由 B 回传触发; r 作为 source 节点 (派生自 B return)"
+  },
+  "design_note": "回传: B 的 return 边 -> (A, r) 跟入项 -> A 以 r 起新分析 (key 不同, 不冲突)。r 在 A 的 r 轮是 source 节点 (派生污点)。A 的 t 轮不预测 r (不臆断 callee 返回)。"
+}

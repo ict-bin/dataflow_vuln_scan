@@ -1,0 +1,21 @@
+{
+  "taint_signature": "t",
+  "nodes": [
+    { "id": 0, "line": 0, "taint": "t", "parents": [], "checks": [], "prune": null },
+    { "id": 1, "line": 1, "taint": "t", "parents": [0], "checks": [], "prune": null },
+    { "id": 2, "line": 2, "taint": "t", "parents": [0], "checks": [], "prune": null }
+  ],
+  "edges": [
+    { "from": 0, "to": 1, "line": 1, "taint": "t", "kind": "extern",
+      "condition": [], "sink_ref": "g_cache", "carrier": null, "escape_via": null, "escape_subkind": "global" },
+    { "from": 0, "to": 2, "line": 2, "taint": "t", "kind": "callee",
+      "condition": [], "sink_ref": "use" }
+  ],
+  "followups": [
+    { "kind": "escape_track", "target_func": null, "target_taint": null, "origin_edge": "0->1",
+      "note": "extern 边 -> escape tracker 找 g_cache 的读者; tracker 回填一条 callee 边 + 入队读者" },
+    { "kind": "callee", "target_func": "use", "target_taint": "norm(use形参名)", "origin_edge": "0->2" }
+  ],
+  "design_note": "GAP-2: TaintEdge 需 escape_subkind(global/field_alias) + carrier + escape_via 字段 (当前 schema 只有 sink_ref)。escape 不清洗 -> use(t) 仍传播。",
+  "gap": "GAP-2"
+}

@@ -1,0 +1,23 @@
+{
+  "taint_signature": "t",
+  "self_contained": false,
+  "description": "r 在两臂均被 t 污染, use(r) 汇合",
+  "nodes": [
+    { "id": 0, "line": 0, "taint": "t", "parents": [], "checks": [], "prune": null },
+    { "id": 1, "line": 2, "taint": "r", "parents": [0], "checks": [], "prune": null },
+    { "id": 2, "line": 4, "taint": "r", "parents": [0], "checks": [], "prune": null },
+    { "id": 3, "line": 6, "taint": "r", "parents": [1, 2], "checks": [], "prune": null }
+  ],
+  "edges": [
+    { "from": 0, "to": 1, "line": 2, "taint": "r", "kind": "inside",
+      "condition": [{"Atom": {"left": "t", "op": ">", "right": "0"}}], "sink_ref": null },
+    { "from": 0, "to": 2, "line": 4, "taint": "r", "kind": "inside",
+      "condition": [{"Atom": {"left": "t", "op": "<=", "right": "0"}}], "sink_ref": null },
+    { "from": 1, "to": 3, "line": 6, "taint": "r", "kind": "callee", "condition": [], "sink_ref": "use" },
+    { "from": 2, "to": 3, "line": 6, "taint": "r", "kind": "callee", "condition": [], "sink_ref": "use" }
+  ],
+  "followups": [
+    { "kind": "callee", "target_func": "use", "target_taint": "norm(use形参名)", "origin_edge": "1->3" }
+  ],
+  "design_note": "node3 parents=[1,2] 验证 DAG 多 parent (非树)。use(r) 一条调用, 两臂各有一条边指向 node3 (同 callee/line, 不同源节点) —— 验证 merge。"
+}

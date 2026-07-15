@@ -1,0 +1,22 @@
+{
+  "taint_signature": "buf",
+  "is_auto_source": true,
+  "self_contained": false,
+  "description": "read 经 out-param 写入 buf, buf 被动成污点源",
+  "nodes": [
+    { "id": 0, "line": 2, "taint": "buf", "parents": [], "checks": [], "prune": null, "is_source": true },
+    { "id": 1, "line": 3, "taint": "buf", "parents": [0], "checks": [], "prune": null, "is_source": false }
+  ],
+  "edges": [
+    { "from": null, "to": 0, "line": 2, "taints": ["buf"], "kind": "source",
+      "condition": [], "sink_ref": "read", "param_taints": [{"param": "buf", "taint": "buf"}],
+      "escape_subkind": null, "carrier": null, "escape_via": null,
+      "note": "source 边: read 的 out-param buf 被写 -> 节点0(buf) 污点源. 区别于17: 不是返回值, 是 out-param 写入" },
+    { "from": 0, "to": 1, "line": 3, "taints": ["buf"], "kind": "callee",
+      "condition": [], "sink_ref": "use", "param_taints": [{"param": "norm(use形参)", "taint": "buf"}] }
+  ],
+  "followups": [
+    { "kind": "callee", "target_func": "use", "target_taint": "norm(use形参名)", "origin_edge": "0->1" }
+  ],
+  "design_note": "被动输入: read(fd,buf,n) 写 buf. buf 是 read 的 out-param (不是返回值). source 边 sink_ref=read, param_taints 指明 out-param=buf. taint_sig=buf. 若 fd 也污点, fd 是另一条独立 (f, fd) 分析 — 单污点独立。"
+}

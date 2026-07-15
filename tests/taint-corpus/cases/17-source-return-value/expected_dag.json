@@ -1,0 +1,22 @@
+{
+  "taint_signature": "t",
+  "is_auto_source": true,
+  "self_contained": false,
+  "description": "getenv 返回值生成污点 t",
+  "nodes": [
+    { "id": 0, "line": 1, "taint": "t", "parents": [], "checks": [], "prune": null, "is_source": true },
+    { "id": 1, "line": 2, "taint": "t", "parents": [0], "checks": [], "prune": null, "is_source": false }
+  ],
+  "edges": [
+    { "from": null, "to": 0, "line": 1, "taints": ["t"], "kind": "source",
+      "condition": [], "sink_ref": "getenv", "param_taints": null,
+      "escape_subkind": null, "carrier": null, "escape_via": null,
+      "note": "source 边: getenv 返回值 -> 节点0(t). taint_sig = t (变量名归一)" },
+    { "from": 0, "to": 1, "line": 2, "taints": ["t"], "kind": "callee",
+      "condition": [], "sink_ref": "use", "param_taints": [{"param": "norm(use形参)", "taint": "t"}] }
+  ],
+  "followups": [
+    { "kind": "callee", "target_func": "use", "target_taint": "norm(use形参名)", "origin_edge": "0->1" }
+  ],
+  "design_note": "无入口污点参数。taint 源 = getenv() 返回值。source 边 from=null (源无父), 节点0 is_source=true。taint_sig 用变量名 t 归一。auto 模式: LLM 识别 getenv 为外部输入源。"
+}

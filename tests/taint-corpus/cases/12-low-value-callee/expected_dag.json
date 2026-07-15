@@ -1,0 +1,23 @@
+{
+  "taint_signature": "t",
+  "self_contained": false,
+  "description": "log_debug 低价值剪枝, use 正常跟入",
+  "nodes": [
+    { "id": 0, "line": 0, "taint": "t", "parents": [], "checks": [], "prune": null, "is_source": false },
+    { "id": 1, "line": 1, "taint": "t", "parents": [0], "checks": [],
+      "prune": { "reason": "low_value_callee", "detail": "log_debug 是日志打印, 无安全跟踪价值" },
+      "is_source": false },
+    { "id": 2, "line": 2, "taint": "t", "parents": [0], "checks": [], "prune": null, "is_source": false }
+  ],
+  "edges": [
+    { "from": 0, "to": 1, "line": 1, "taints": ["t"], "kind": "callee",
+      "condition": [], "sink_ref": "log_debug", "param_taints": [{"param": "norm(log_debug形参)", "taint": "t"}] },
+    { "from": 0, "to": 2, "line": 2, "taints": ["t"], "kind": "callee",
+      "condition": [], "sink_ref": "use", "param_taints": [{"param": "norm(use形参)", "taint": "t"}] }
+  ],
+  "followups": [
+    { "kind": "callee", "target_func": "use", "target_taint": "norm(use形参名)", "origin_edge": "0->2",
+      "note": "只跟入 use; log_debug 因 prune=low_value_callee 不产 followup" }
+  ],
+  "design_note": "log_debug 节点 prune=low_value_callee -> 无 followup (不跟入日志函数). t 仍传播到 use (剪枝只挡该 callee 边, 不清洗 t). LLM 语义判 log_debug 低价值, 无白名单。"
+}

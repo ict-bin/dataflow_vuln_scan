@@ -1,0 +1,25 @@
+{
+  "scenario": "多调用者到达同一 (B, x), B 只分析一次, 下游从已存 DAG 重放",
+  "analyze_B_taint_x": {
+    "taint_signature": "x",
+    "analyzed_once": true,
+    "nodes": [
+      { "id": 0, "line": 0, "taint": "x", "parents": [], "checks": [], "prune": null, "is_source": false },
+      { "id": 1, "line": 0, "taint": "x", "parents": [0], "checks": [], "prune": null, "is_source": false }
+    ],
+    "edges": [
+      { "from": 0, "to": 1, "line": 0, "taints": ["x"], "kind": "callee",
+        "condition": [], "sink_ref": "use", "param_taints": [{"param": "norm(use形参)", "taint": "x"}] }
+    ],
+    "downstream_to_replay": [
+      { "kind": "callee", "target_func": "use", "target_taint": "norm(use形参名)", "origin_edge": "0->1" }
+    ]
+  },
+  "flow": [
+    "A1(t) -> (B, x) 队列项 -> B 未分析 -> try_reserve 成功 -> analyze B -> 存 B DAG -> 重放 B 下游 (use, x) 入队",
+    "A2(t) -> (B, x) 队列项 -> find 命中 (B 已分析) -> 不重分析 -> 加载已存 B DAG -> 重放 B 下游 (use, x) 入队 (拼接后续传播图)",
+    "(use, x) 队列项 -> use 未分析 -> analyze use; 若已分析 -> 重放 use 下游",
+    "终止: 队列空 + worker idle"
+  ],
+  "design_note": "D-3 核心: (func, taint) 只 analyze 一次. 多调用者到达同一 (B,x) -> 第二次起从已存 DAG 重放下游项 (不重分析). 下游项 (use,x) 自身也 try_reserve 去重. 本质是跨函数污点传播图 BFS, 每节点分析一次。"
+}

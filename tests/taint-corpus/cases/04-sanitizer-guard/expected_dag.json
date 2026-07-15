@@ -1,0 +1,17 @@
+{
+  "taint_signature": "len",
+  "self_contained": false,
+  "description": "超长截断, use 仅在受限路径",
+  "nodes": [
+    { "id": 0, "line": 0, "taint": "len", "parents": [], "checks": [{"left": "len", "op": ">", "right": "100"}], "prune": null },
+    { "id": 1, "line": 2, "taint": "len", "parents": [0], "checks": [], "prune": null }
+  ],
+  "edges": [
+    { "from": 0, "to": 1, "line": 2, "taint": "len", "kind": "callee",
+      "condition": [{"Atom": {"left": "len", "op": "<=", "right": "100"}}], "sink_ref": "use" }
+  ],
+  "followups": [
+    { "kind": "callee", "target_func": "use", "target_taint": "norm(use形参名)", "origin_edge": "0->1" }
+  ],
+  "design_note": "len>100 是对污点本身的约束 -> 进 check (node0)。超长路径 return = 无出边 (终止, 非 prune)。use 在 len<=100 路径 -> 边 condition。区分: 这是 guard (截断+约束), 不是 clean (03 的 sanitized)。taint 仍污点, 只是受限路径才传播。"
+}

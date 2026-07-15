@@ -1,0 +1,21 @@
+{
+  "analyze_A_taint_t": {
+    "taint_signature": "t",
+    "nodes": [
+      { "id": 0, "line": 0, "taint": "t", "parents": [], "checks": [], "prune": null, "is_source": false },
+      { "id": 1, "line": 1, "taint": "t", "parents": [0], "checks": [], "prune": null, "is_source": false }
+    ],
+    "edges": [
+      { "from": 0, "to": 1, "line": 1, "taints": ["t"], "kind": "callee",
+        "condition": [], "sink_ref": "foo",
+        "param_taints": [{"param": "x", "taint": "t"}],
+        "resolved_overload": "foo(int)",
+        "note": "LLM 按 arg 类型 (t=int) 选 overload foo(int). func_id 用签名区分 -> foo(int) 与 foo(char*) 不合并" }
+    ],
+    "followups": [
+      { "kind": "callee", "target_func": "foo(int)", "target_taint": "x", "origin_edge": "0->1",
+        "note": "target_func=foo(int) (func_id 含签名), 不混 foo(char*)" }
+    ]
+  },
+  "design_note": "GAP-3: 无编译, overload 解析靠 LLM 按 arg 类型选. func_id=sha(file,name,signature) 含参数签名 -> foo(int)/foo(char*) 不同 func_id, 去重不合并. test 验证 LLM 选对。"
+}

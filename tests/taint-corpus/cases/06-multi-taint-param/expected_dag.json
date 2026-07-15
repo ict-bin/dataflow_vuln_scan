@@ -1,0 +1,20 @@
+{
+  "analyze_A": {
+    "taint_signature": "t",
+    "nodes": [
+      { "id": 0, "line": 0, "taint": "t", "parents": [], "checks": [], "prune": null }
+    ],
+    "edges": [
+      { "from": 0, "to": 0, "line": 1, "taint": ["t", "t"], "kind": "callee",
+        "condition": [], "sink_ref": "B", "param_taints": ["x=t", "y=t"] }
+    ],
+    "followups": [
+      { "kind": "callee", "target_func": "B", "target_taint": "x", "origin_edge": "0->0",
+        "note": "拆项1: (B, norm(x))" },
+      { "kind": "callee", "target_func": "B", "target_taint": "y", "origin_edge": "0->0",
+        "note": "拆项2: (B, norm(y)), 与项1独立并行" }
+    ]
+  },
+  "design_note": "GAP-1: 一条 callee 调用传 2 个污点参数。当前 TaintEdge.taint:str 无法表达。本 golden 用 taint:list + param_taints 映射, 一边一调用, followup 按参数拆。待定: 改 taint 为 list? 还是每参数一条边(同 callee/line)?",
+  "gap": "GAP-1"
+}

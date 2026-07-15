@@ -1,0 +1,30 @@
+{
+  "analyze_A": {
+    "taint_signature": "t",
+    "nodes": [
+      { "id": 0, "line": 0, "taint": "t", "parents": [], "checks": [], "prune": null },
+      { "id": 1, "line": 1, "taint": "t", "parents": [0], "checks": [], "prune": null }
+    ],
+    "edges": [
+      { "from": 0, "to": 1, "line": 1, "taint": "t", "kind": "callee", "condition": [], "sink_ref": "B" }
+    ],
+    "followups": [
+      { "kind": "callee", "target_func": "B", "target_taint": "pkt", "origin_edge": "0->1",
+        "note": "target_taint = B 形参名归一 (D-1), 非 caller 侧 t" }
+    ]
+  },
+  "analyze_B": {
+    "taint_signature": "pkt",
+    "nodes": [
+      { "id": 0, "line": 0, "taint": "pkt", "parents": [], "checks": [], "prune": null },
+      { "id": 1, "line": 0, "taint": "pkt", "parents": [0], "checks": [], "prune": null }
+    ],
+    "edges": [
+      { "from": 0, "to": 1, "line": 0, "taint": "pkt", "kind": "callee", "condition": [], "sink_ref": "use" }
+    ],
+    "followups": [
+      { "kind": "callee", "target_func": "use", "target_taint": "norm(use形参名)", "origin_edge": "0->1" }
+    ]
+  },
+  "design_note": "队列项 taint_sig = callee 形参名归一 (pkt), 不是 caller 的 t。B 独立会话从 pkt 起。"
+}

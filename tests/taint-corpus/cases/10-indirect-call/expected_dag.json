@@ -1,0 +1,26 @@
+{
+  "taint_signature": "t",
+  "self_contained": false,
+  "description": "经函数指针调用, tracker 解析真实函数",
+  "nodes": [
+    { "id": 0, "line": 0, "taint": "t", "parents": [], "checks": [], "prune": null, "is_source": false },
+    { "id": 1, "line": 1, "taint": "t", "parents": [0], "checks": [], "prune": null, "is_source": false },
+    { "id": 2, "line": 2, "taint": "t", "parents": [0], "checks": [], "prune": null, "is_source": false }
+  ],
+  "edges": [
+    { "from": 0, "to": 1, "line": 1, "taints": ["t"], "kind": "callee",
+      "condition": [], "sink_ref": "fp",
+      "param_taints": [{"param": "(间接, 待解析)", "taint": "t"}],
+      "escape_subkind": null, "carrier": null, "escape_via": null,
+      "is_indirect": true,
+      "note": "sink_ref=指针表达式 fp (非限定函数名). 触发 indirect_track 项" },
+    { "from": 0, "to": 2, "line": 2, "taints": ["t"], "kind": "callee",
+      "condition": [], "sink_ref": "use", "param_taints": [{"param": "norm(use形参)", "taint": "t"}] }
+  ],
+  "followups": [
+    { "kind": "indirect_track", "target_func": null, "target_taint": null, "origin_edge": "0->1",
+      "note": "indirect tracker 解析 fp 注册点 -> real_handler; 回填边 sink_ref=real_handler + 产出 (real_handler, t) 队列项" },
+    { "kind": "callee", "target_func": "use", "target_taint": "norm(use形参名)", "origin_edge": "0->2" }
+  ],
+  "design_note": "间接调用: callee 边 sink_ref=指针表达式 (fp/ctxt->sax->fn). indirect_track 项触发 tracker 解析真实函数, 回填 sink_ref 为限定名 + 入队真实函数。t 不被间接调用清洗 -> use(t) 仍传播。"
+}

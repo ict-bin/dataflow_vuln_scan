@@ -1,0 +1,34 @@
+{
+  "taint_signature": "t",
+  "self_contained": false,
+  "description": "复合条件独立记录 (Compound CondTerm)",
+  "nodes": [
+    { "id": 0, "line": 0, "taint": "t", "parents": [], "checks": [], "prune": null, "is_source": false },
+    { "id": 1, "line": 2, "taint": "t", "parents": [0], "checks": [], "prune": null, "is_source": false },
+    { "id": 2, "line": 3, "taint": "t", "parents": [0], "checks": [], "prune": null, "is_source": false }
+  ],
+  "edges": [
+    { "from": 0, "to": 1, "line": 2, "taints": ["t"], "kind": "callee",
+      "condition": [
+        { "Compound": { "comb": "AND",
+          "terms": [
+            { "Atom": { "left": "a->cmd", "op": "==", "right": "1" } },
+            { "Atom": { "left": "a->flag", "op": "!=", "right": "0" } }
+          ]
+        }}
+      ],
+      "sink_ref": "proc", "param_taints": [{"param": "norm(proc形参)", "taint": "t"}],
+      "note": "复合条件 a->cmd==1 && a->flag -> Compound{AND,[Atom,Atom]}, 独立记录, 不拍平不拆边" },
+    { "from": 0, "to": 2, "line": 3, "taints": ["t"], "kind": "callee",
+      "condition": [
+        { "Atom": { "left": "a->cmd", "op": "==", "right": "2" } }
+      ],
+      "sink_ref": "alt", "param_taints": [{"param": "norm(alt形参)", "taint": "t"}],
+      "note": "单原子条件 -> [Atom]. proc 与 alt 互斥 (else if)" }
+  ],
+  "followups": [
+    { "kind": "callee", "target_func": "proc", "target_taint": "norm(proc形参名)", "origin_edge": "0->1" },
+    { "kind": "callee", "target_func": "alt", "target_taint": "norm(alt形参名)", "origin_edge": "0->2" }
+  ],
+  "design_note": "复合条件独立记录: Compound{AND,[...]} 保留布尔结构. a->cmd/a->flag 不是对污点 t 的约束 -> 不进 check, 只在边上作 condition (路径条件). proc/alt 互斥 (else if)。"
+}

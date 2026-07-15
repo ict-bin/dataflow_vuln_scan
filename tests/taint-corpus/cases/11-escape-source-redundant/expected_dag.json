@@ -1,0 +1,36 @@
+{
+  "analyze_A_taint_t": {
+    "taint_signature": "t",
+    "nodes": [
+      { "id": 0, "line": 0, "taint": "t", "parents": [], "checks": [], "prune": null, "is_source": false },
+      { "id": 1, "line": 1, "taint": "t", "parents": [0], "checks": [], "prune": null, "is_source": false,
+        "note": "中继点 g_cache (escape 目标)" }
+    ],
+    "edges": [
+      { "from": 0, "to": 1, "line": 1, "taints": ["t"], "kind": "extern",
+        "condition": [], "sink_ref": "g_cache", "param_taints": null,
+        "escape_subkind": "global", "carrier": null, "escape_via": null }
+    ],
+    "followups": [
+      { "kind": "escape_track", "target_func": null, "target_taint": null, "origin_edge": "0->1",
+        "note": "escape tracker 找 g_cache 读者 -> B (B 读 g_cache). 中继点 g_cache 出 callee 边到 B + (B, g_cache) 入队" }
+    ]
+  },
+  "analyze_B_taint_g_cache": {
+    "taint_signature": "g_cache",
+    "is_auto_source": true,
+    "nodes": [
+      { "id": 0, "line": 0, "taint": "g_cache", "parents": [], "checks": [], "prune": null, "is_source": true }
+    ],
+    "edges": [
+      { "from": 0, "to": null, "line": 0, "taints": ["g_cache"], "kind": "return",
+        "condition": [], "sink_ref": null, "param_taints": null,
+        "note": "B return g_cache -> 回传 (A, g_cache)" }
+    ],
+    "followups": [
+      { "kind": "return_taint", "target_func": "A", "target_taint": "g_cache", "origin_edge": "0->null",
+        "note": "回传项 (A, g_cache). 但 A 已持有 g_cache (escape 源头, 在 A 的 DAG 节点1) -> #11 SKIP" }
+    ]
+  },
+  "design_note": "#11 escape-source skip: 回传污点 (g_cache) 在 caller A 的已有 DAG 里 (A 是 escape 源头写过 g_cache) -> 跳过, 不触发 A 新分析, 终止冗余循环。验证: A 不被重复分析, g_cache 路径已记录在 A 的 DAG。"
+}

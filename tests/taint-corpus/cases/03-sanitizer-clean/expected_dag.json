@@ -1,0 +1,16 @@
+{
+  "taint_signature": "t",
+  "self_contained": true,
+  "description": "cleanse 清洗污点, 后续 use 不触达",
+  "nodes": [
+    { "id": 0, "line": 0, "taint": "t", "parents": [], "checks": [], "prune": null },
+    { "id": 1, "line": 1, "taint": "t", "parents": [0], "checks": [],
+      "prune": { "reason": "sanitized", "detail": "cleanse(t) 清洗, t 不再为污点" } }
+  ],
+  "edges": [
+    { "from": 0, "to": 1, "line": 1, "taint": "t", "kind": "callee",
+      "condition": [], "sink_ref": "cleanse" }
+  ],
+  "followups": [],
+  "design_note": "node1 prune=sanitized -> 无出边 -> use(t) 不在污点 DAG。依赖 LLM 语义判 cleanse 是 sanitizer (无白名单)。区分: 清洗≠路径守护(04)。"
+}

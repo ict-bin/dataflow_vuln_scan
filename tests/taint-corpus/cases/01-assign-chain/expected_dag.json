@@ -1,0 +1,19 @@
+{
+  "taint_signature": "t",
+  "self_contained": false,
+  "description": "赋值链透传到 use",
+  "nodes": [
+    { "id": 0, "line": 0, "taint": "t", "parents": [], "checks": [], "prune": null },
+    { "id": 1, "line": 1, "taint": "a", "parents": [0], "checks": [], "prune": null },
+    { "id": 2, "line": 2, "taint": "b", "parents": [1], "checks": [], "prune": null },
+    { "id": 3, "line": 3, "taint": "b", "parents": [2], "checks": [], "prune": null }
+  ],
+  "edges": [
+    { "from": 0, "to": 1, "line": 1, "taint": "a", "kind": "inside", "condition": [], "sink_ref": null },
+    { "from": 1, "to": 2, "line": 2, "taint": "b", "kind": "inside", "condition": [], "sink_ref": null },
+    { "from": 2, "to": 3, "line": 3, "taint": "b", "kind": "callee", "condition": [], "sink_ref": "use" }
+  ],
+  "followups": [
+    { "kind": "callee", "target_func": "use", "target_taint": "norm(use形参名)", "origin_edge": "2->3" }
+  ]
+}
