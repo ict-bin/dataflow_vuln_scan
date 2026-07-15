@@ -155,7 +155,7 @@ class AutonomousRunner:
                 base_env["DVS_CONTEXT_SESSION"] = str(round_session)
                 result = run_agent(
                     prompt=prompt, model=acfg.model, tools=acfg.tools or cfg.workers.default_tools,
-                    cwd=source_root, session_file=str(round_session), system_prompt=system_prompt,
+                    cwd=str(shared_run_dir), session_file=str(round_session), system_prompt=system_prompt,
                     cancel_event=self._cancel_event, env=base_env,
                     run_timeout_seconds=cfg.agent_run_timeout_seconds,
                     timeout_retry_enabled=cfg.agent_timeout_retry_enabled,
@@ -163,7 +163,10 @@ class AutonomousRunner:
                     pi_max_retries=cfg.pi_max_retries, pi_retry_delay=cfg.pi_retry_delay,
                     task_context={"task_id": tid, "task_root": str(shared_run_dir.parent),
                                   "task_run_root": str(shared_run_dir),
-                                  "task_pi_dir": cfg.role_pi_dir("workers"), "agent_role": "workers"})
+                                  "task_pi_dir": cfg.role_pi_dir("workers"), "agent_role": "workers"},
+                    retry_prompt=("## 续探 (重试)\n刚才你的探索因 pi 崩溃/超时中断。session 历史仍在。"
+                                  "请**从上次中断处继续**探索, 不要从头重来。回顾你已读的函数 + 正在追的污点路径,"
+                                  "继续往深挖 + 发现漏洞即 report_finding。结束时 checkpoint。"))
                 # 诊断日志: 记录每轮 run_agent 结果 (error/exit/timeout) 供后续判断
                 _err = getattr(result, "error", "") or ""
                 _ec = getattr(result, "exit_code", None)

@@ -203,6 +203,7 @@ def _run_with_context_overflow_recovery(
     timeout_seconds: float | None = None,
     agent_role: str | None = None,
     runtime_dir: str | None = None,
+    retry_prompt: str | None = None,
 ) -> AgentResult:
     context_window = _model_context_window(model)
     overflow_attempts = 0
@@ -258,6 +259,7 @@ def _run_with_context_overflow_recovery(
             pi_max_retries=pi_max_retries,
             pi_retry_delay=pi_retry_delay,
             timeout_seconds=timeout_seconds,
+            retry_prompt=retry_prompt,
         )
         result.agent_role = agent_role
         result.runtime_dir = runtime_dir
@@ -320,8 +322,12 @@ def run_agent(
     pi_max_retries: int = -1,
     pi_retry_delay: float = 10.0,
     task_context: dict[str, object] | None = None,
+    retry_prompt: str | None = None,
 ) -> AgentResult:
-    """Run a single pi Agent subprocess (double-layer retry + fatal error detection)."""
+    """Run a single pi Agent subprocess (double-layer retry + fatal error detection).
+
+    retry_prompt: 重试时 (pi 崩溃/idle-timeout) 发的提示, 替代原始 prompt。
+    自主模式用 '继续从上次中断处探索' 而非重发 entry (避免 agent 重新从头)。"""
     # DRYRUN mode
     if os.environ.get('DRYRUN') == '1':
         from .dryrun import run_agent_dryrun as _dr
@@ -361,11 +367,15 @@ def run_agent(
 
     timeout_seconds = _normalize_timeout_seconds(run_timeout_seconds)
     timeout_failures = 0
+    _attempt = 0
 
     while True:
+        _attempt += 1
+        # 重试 (attempt>1) 用 retry_prompt 而非原始 prompt (自主模式: 续探而非重发 entry)
+        _eff_prompt = (retry_prompt or prompt) if _attempt > 1 else prompt
         try:
             return _run_with_context_overflow_recovery(
-                pi_cmd=pi_cmd, args=args, prompt=prompt,
+                pi_cmd=pi_cmd, args=args, prompt=_eff_prompt,
                 system_prompt=system_prompt, post_skill_prompt=post_skill_prompt,
                 model=model, tools=tools, thinking_level=thinking_level,
                 session_file=session_file, cwd=cwd, env=env,
@@ -375,6 +385,7 @@ def run_agent(
                 timeout_seconds=timeout_seconds,
                 agent_role=str(task_context.get("agent_role") or "").strip() or None,
                 runtime_dir=str(task_context.get("task_pi_dir") or "").strip() or None,
+                retry_prompt=retry_prompt,
             )
         except TimeoutError:
             timeout_failures += 1
@@ -416,6 +427,7 @@ def _run_with_pi_retry(
     pi_max_retries: int,
     pi_retry_delay: float,
     timeout_seconds: float | None = None,
+    retry_prompt: str | None = None,
 ) -> AgentResult:
     """Outer loop: handle pi process launch failures, crashes, fatal errors."""
     if not os.path.isdir(cwd):
@@ -428,16 +440,20 @@ def _run_with_pi_retry(
 
     pi_attempt = 0
     fatal_retry_count = 0
+    _pi_round = 0
 
     while True:
+        _pi_round += 1
         if cancel_event and cancel_event.is_set():
             r = AgentResult()
             r.error = "cancelled"
             return r
 
+        # 重试 (_pi_round>1) 用 retry_prompt 而非原始 prompt (自主模式续探)
+        _eff_prompt = (retry_prompt or prompt) if _pi_round > 1 else prompt
         try:
             result = _run_with_api_retry(
-                args=args, cwd=cwd, env=env, prompt=prompt,
+                args=args, cwd=cwd, env=env, prompt=_eff_prompt,
                 post_skill_prompt=post_skill_prompt,
                 cancel_event=cancel_event, on_stream=on_stream,
                 max_retries=max_retries, retry_delay=retry_delay,
