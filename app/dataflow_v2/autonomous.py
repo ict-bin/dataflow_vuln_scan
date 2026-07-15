@@ -103,6 +103,7 @@ class AutonomousRunner:
 
             # 服务工具脚本路径 (agent 经 bash 调)
             script_dir = Path("/opt/dataflow_vuln_scan/scripts/autonomous")
+            wrapper_dir = "/opt/dataflow_vuln_scan/bin/restricted"  # find/grep/cat 限源码目录
             # 环境变量: 让脚本能找到 run_dir/v2_db/source_root + intake 元数据
             base_env = {
                 "DVS_RUN_DIR": str(shared_run_dir),
@@ -116,7 +117,9 @@ class AutonomousRunner:
                 "DVS_PARENT_TASK_NAME": cfg.parent_task_name,
                 "DVS_PARENT_TASK_TYPE": cfg.parent_task_type,
                 "DVS_TASK_ORIGIN_TYPE": cfg.task_origin_type,
-                "PATH": os.environ.get("PATH", "") + os.pathsep + str(script_dir) + os.pathsep + "/opt/venv/bin",
+                # 显式把 restricted wrapper 放 PATH 最前 (find/grep/cat 只能在 source_root 内),
+                # 双保险 (_build_agent_env 也会 prepend, 这里再保一次防 pi bash 工具 env 差异)
+                "PATH": wrapper_dir + os.pathsep + os.environ.get("PATH", "") + os.pathsep + str(script_dir) + os.pathsep + "/opt/venv/bin",
             }
 
             acfg = cfg.workers.agents[0] if cfg.workers.agents else None

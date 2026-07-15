@@ -43,7 +43,7 @@ RUN printf '{"build_version":"%s"}\n' "$SECFLOW_BUILD_VERSION" > /opt/dataflow_v
 RUN find . -name '*.sh' -exec sed -i 's/\r$//' {} + \
     && chmod +x scripts/*.sh 2>/dev/null || true \
     && chmod +x scripts/autonomous/*.py 2>/dev/null || true \
-    && chmod +x bin/restricted/find bin/restricted/grep 2>/dev/null || true \
+    && chmod +x bin/restricted/find bin/restricted/grep bin/restricted/cat 2>/dev/null || true \
     && ln -sf /opt/dataflow_vuln_scan/scripts/autonomous/read_function.py /usr/local/bin/read_function \
     && ln -sf /opt/dataflow_vuln_scan/scripts/autonomous/report_finding.py /usr/local/bin/report_finding \
     && ln -sf /opt/dataflow_vuln_scan/scripts/autonomous/checkpoint.py /usr/local/bin/checkpoint \

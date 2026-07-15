@@ -1,0 +1,26 @@
+#!/bin/bash
+# Restricted cat: 只允许读 $DVS_SOURCE_ROOT 内的文件
+# 路径不在 SRC 内 -> 拒绝 (防止 cat /etc/passwd 等读 NFS/系统文件)
+REAL_CAT="/bin/cat"
+SRC="${DVS_SOURCE_ROOT:-}"
+if [ -z "$SRC" ]; then
+    echo "[restricted-cat] DVS_SOURCE_ROOT 未设置, 拒绝" >&2
+    exit 1
+fi
+
+# 解析每个参数: 选项(-*)直通, 文件路径必须在 SRC 内
+args=()
+for arg in "$@"; do
+    case "$arg" in
+        -*) args+=("$arg"); continue ;;  # cat 选项直通
+    esac
+    # 解析绝对路径 (含 ./ ../ 等)
+    abs=$(readlink -f "$arg" 2>/dev/null || echo "$arg")
+    src_abs=$(readlink -f "$SRC" 2>/dev/null || echo "$SRC")
+    case "$abs" in
+        "$src_abs"*) args+=("$arg") ;;  # 在 SRC 内, 允许
+        *) echo "[restricted-cat] 拒绝读源码目录外: $arg" >&2; exit 1 ;;
+    esac
+done
+
+exec "$REAL_CAT" "${args[@]}"
