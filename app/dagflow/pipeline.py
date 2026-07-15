@@ -106,6 +106,15 @@ class DagflowPipeline:
         self.source_root = getattr(config, "cwd", "") or getattr(config, "source_root", "")
         self.cancel_event = None
 
+    def _emit(self, event_type: str, **kw) -> None:
+        """安全发事件 (兼容现有 event 映射)。"""
+        if self.on_event is None:
+            return
+        try:
+            self.on_event(event_type, **kw)
+        except Exception:
+            pass
+
     def execute_recursive(self, task_id: str, *, _root_out_dir: str | None = None,
                           _root_output_dir: str | None = None) -> dict:
         """阶段 1 taint 跟踪 -> 阶段 2 挖掘。"""
