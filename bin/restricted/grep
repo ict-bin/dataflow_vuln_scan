@@ -30,4 +30,4 @@ if [ "$path_found" = false ]; then
     fi
 fi
 
-exec "$REAL_GREP" "${args[@]}"
+exec timeout 30 "$REAL_GREP" "${args[@]}"
