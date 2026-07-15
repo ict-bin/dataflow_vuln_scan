@@ -185,13 +185,24 @@ class TaintDAG:
 
     @staticmethod
     def from_dict(d: dict) -> "TaintDAG":
-        return TaintDAG(
+        dag = TaintDAG(
             func_id=str(d.get("func_id", "")), taint_signature=str(d.get("taint_signature", "")),
             nodes=[TaintNode.from_dict(n) for n in (d.get("nodes") or [])],
             self_contained=bool(d.get("self_contained", False)),
             description=str(d.get("description", "")),
             taint_failed=bool(d.get("taint_failed", False)),
         )
+        # 兼容顶层 edges 数组格式 (golden 文件用 from/to; 分发到 from 节点的 children)
+        top_edges = d.get("edges")
+        if top_edges:
+            by_id = {n.id: n for n in dag.nodes}
+            for er in top_edges:
+                e = TaintEdge.from_dict(er)
+                fr = er.get("from", er.get("from_node"))
+                fn = by_id.get(int(fr) if fr is not None else -1)
+                if fn is not None:
+                    fn.children.append(e)
+        return dag
 
 
 # ── 工作队列项 WorkItem ──────────────────────────────────────────────────

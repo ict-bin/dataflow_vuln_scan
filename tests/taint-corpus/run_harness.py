@@ -90,16 +90,19 @@ def phase_b_line_filler() -> int:
             fill_lines(dag, fr, tmp)
         except Exception as e:
             print(f"  [ERR] {case.name} line_filler: {e}"); continue
-        # 比对: golden 有 line>0 的边, 比对填充结果
+        # 比对: golden 有 line>0 的边, 归一为函数体内相对行 (line_filler 产绝对行, golden 用相对)
+        # 相对 = 绝对 - start_line (body 首行 = start_line+1 -> 相对 1)
         gold_dag = TaintDAG.from_dict(golden)
+        start = fr.start_line or 0
         for gn, n in zip(gold_dag.nodes, dag.nodes):
             for ge, e in zip(gn.children, n.children):
                 if ge.line > 0:
                     total += 1
-                    if e.line == ge.line:
+                    rel = (e.line - start) if e.line > 0 else 0
+                    if rel == ge.line:
                         matched += 1
                     else:
-                        print(f"  [MISMATCH] {case.name} {ge.kind} {ge.sink_ref}: golden L{ge.line} got L{e.line}")
+                        print(f"  [MISMATCH] {case.name} {ge.kind} {ge.sink_ref}: golden rel L{ge.line} got abs L{e.line} (rel {rel})")
     print(f"Phase B line_filler 回归: {matched}/{total} 边行号匹配")
     return matched
 
