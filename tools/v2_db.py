@@ -149,7 +149,8 @@ def cmd_lookup(name: str) -> None:
     src_root = Path(_source_root())
     found = __import__("app.dataflow_v2.function_extractor", fromlist=["find_func_in_source"]).find_func_in_source(name, src_root)
     if not found:
-        print(f"NOT_FOUND: 函数 '{name}' 在源码树中未找到。该函数可能是外部库函数或系统 API，定义不在当前源码树中，不需要查找其源码。")
+        # 精确源码搜未中 → 前缀候选 (LLM 截断名场景)
+        _print_prefix_candidates(name, src_root)
         return
 
     rel_file, matched_name = found
@@ -178,8 +179,57 @@ def cmd_lookup(name: str) -> None:
         print(f"description: {func.get('description', '')}")
         print(f"---")
         print(body)
+        return
+    # 精确未找到 → 前缀/模糊匹配候选 (LLM 常传截断的长 C 函数名, 精确匹配会漏)
+    _print_prefix_candidates(name, src_root)
+
+
+def _print_prefix_candidates(name: str, src_root) -> None:
+    """精确未找到时: 按前缀/包含查候选函数名, 返回给 LLM 用全名再查。
+
+    修: LLM 常传截断名 (如 _dns_server_resolve_callback_reply_p 缺 assthrough),
+    精确匹配 (grep \bname\s*\( + SQL name=?) 漏 → NOT_FOUND, LLM 又得改用 raw grep 找。
+    现在前缀匹配: SQL name LIKE 'name%' + 源码 grep \bname (不需 \s*\() 索引候选 →
+    返回候选函数名清单, LLM 用全名再 lookup。不再直接 NOT_FOUND。
+    """
+    import subprocess, re as _re
+    db_dir = _db_dir()
+    # 1) db 前缀/包含匹配
+    cands = _query("functions.db", "SELECT name, file, start_line, end_line FROM functions WHERE name LIKE ? OR name LIKE ? ORDER BY length(name) LIMIT 20",
+                   (f"{name}%", f"%{name}%"))
+    # 2) db 无候选 → 源码前缀 grep (\bname 不需 \s*\(, 拓宽) + 增量索引
+    if not cands:
+        try:
+            pat = _re.escape(name)
+            r = subprocess.run(
+                ["grep", "-rl", "-E", rf"\b{pat}",
+                 "--include=*.c", "--include=*.cpp", "--include=*.cc", "--include=*.cxx",
+                 "--include=*.h", "--include=*.hpp", "--include=*.hxx", str(src_root)],
+                capture_output=True, text=True, timeout=20)
+            sys.path.insert(0, os.environ.get("DVS_APP_DIR", "/opt/dataflow_vuln_scan"))
+            from app.dataflow_v2.function_extractor import ensure_file_indexed
+            from app.dataflow_v2.store import DataflowStore
+            indexed = []
+            for line in r.stdout.strip().split("\n")[:8]:
+                if not line: continue
+                try: rel = str(Path(line).relative_to(src_root)).replace("\\", "/")
+                except ValueError: continue
+                if rel in indexed: continue
+                try:
+                    store = DataflowStore(db_dir); ensure_file_indexed(str(src_root), rel, store); store.close()
+                    indexed.append(rel)
+                except Exception: pass
+            if indexed:
+                cands = _query("functions.db", "SELECT name, file, start_line, end_line FROM functions WHERE name LIKE ? OR name LIKE ? ORDER BY length(name) LIMIT 20",
+                               (f"{name}%", f"%{name}%"))
+        except Exception:
+            pass
+    if cands:
+        print(f"NOT_FOUND_EXACT: 未精确找到 '{name}'。以下 {len(cands)} 个相似函数 (用全名再查 read_function/v2_db lookup):")
+        for c in cands:
+            print(f"  - {c['name']} ({c['file']} 行 {c['start_line']}-{c['end_line']})")
     else:
-        print(f"NOT_FOUND: 函数 '{name}' 在文件 {rel_file} 中未找到定义。该函数可能是外部库函数，不需要查找其源码。")
+        print(f"NOT_FOUND: 函数 '{name}' 在源码树中未找到。该函数可能是外部库函数或系统 API，定义不在当前源码树中，不需要查找其源码。")
 
 
 def cmd_taints(name: str) -> None:

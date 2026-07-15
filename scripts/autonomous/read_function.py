@@ -52,6 +52,20 @@ def _resolve(rec_name: str, store):
         rec = store.find_function(rec_name) or store.find_function("", rel_file)
         if rec:
             return rec
+    # 4) 前缀/模糊匹配 (LLM 截断名场景): 返回候选名, 不直接 NOT_FOUND
+    return _prefix_candidates(rec_name, store)
+
+
+def _prefix_candidates(name: str, store):
+    """精确未找到 → 前缀/包含匹配, 返回候选函数名清单 (用 [rec, ...] 形式, 
+    main 里会识别并打印候选)。返回特殊标记让 main 打印候选而非 NOT_FOUND。"""
+    import sqlite3
+    db = sqlite3.connect(os.path.join(V2_DB_DIR, "functions.db")); db.row_factory = sqlite3.Row
+    rows = db.execute("SELECT name, file, start_line, end_line FROM functions WHERE name LIKE ? OR name LIKE ? ORDER BY length(name) LIMIT 15",
+                      (f"{name}%", f"%{name}%")).fetchall()
+    db.close()
+    if rows:
+        return ("_PREFIX_CANDIDATES_", [dict(r) for r in rows])
     return None
 
 
@@ -70,6 +84,12 @@ def main():
         if rec is None:
             print(f"[read_function] 未找到函数: {query}", file=sys.stderr)
             sys.exit(1)
+        if isinstance(rec, tuple) and rec and rec[0] == "_PREFIX_CANDIDATES_":
+            cands = rec[1]
+            print(f"NOT_FOUND_EXACT: 未精确找到 '{query}'。以下 {len(cands)} 个相似函数 (用全名再查):")
+            for c in cands:
+                print(f"  - {c['name']} ({c['file']} 行 {c['start_line']}-{c['end_line']})")
+            sys.exit(0)
         from app.dataflow_v2.function_extractor import read_function_body
         body = read_function_body(SOURCE_ROOT, rec, max_lines=500)
         # 行范围裁剪 (cat-like 部分读)
