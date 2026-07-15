@@ -2253,7 +2253,10 @@ class TaskService:
             entry_context = _build_entry_analysis_context(tcfg)
             if entry_context:
                 cfg.context = ((cfg.context or "").rstrip() + "\n\n" + entry_context).strip()
-            if cfg.feature_flags.get("autonomous_mode"):
+            if cfg.feature_flags.get("dagflow_mode"):
+                from app.dagflow.pipeline import DagflowPipeline
+                orch = DagflowPipeline(config=cfg, on_event=on_event, task_id=task_id)
+            elif cfg.feature_flags.get("autonomous_mode"):
                 from app.dataflow_v2.autonomous import AutonomousRunner
                 orch = AutonomousRunner(config=cfg, on_event=on_event, task_id=task_id)
             else:
