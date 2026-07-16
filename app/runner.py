@@ -909,6 +909,8 @@ def _run_with_api_retry(
                     continue
             _log_warn(f"pi exit code {result.exit_code} (has output, not retrying): {result.error[:200]}")
 
+        return result
+
 
 # ─── JSON Lines parsing ───────────────────────────────────────────────────────────────
 
