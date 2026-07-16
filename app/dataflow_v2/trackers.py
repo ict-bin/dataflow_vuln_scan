@@ -103,11 +103,11 @@ def resolve_external(
             from .function_extractor import find_func_in_source
             found = find_func_in_source(fn, Path(source_root))
             if found:
-                rel_def_file, _ = found
-                try:
-                    ensure_file_indexed(source_root, rel_def_file, store)
-                except Exception:
-                    logger.debug("track ensure_file_indexed failed for %s", rel_def_file, exc_info=True)
+                for rel_def_file, _ in found:
+                    try:
+                        ensure_file_indexed(source_root, rel_def_file, store)
+                    except Exception:
+                        logger.debug("track ensure_file_indexed failed for %s", rel_def_file, exc_info=True)
                 rec = store.find_function(fn)
         if rec is None:
             continue

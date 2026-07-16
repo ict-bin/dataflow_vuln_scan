@@ -60,14 +60,14 @@ class FuncIndex:
         if self._v2_store is None:
             return None
         from ..dataflow_v2.function_extractor import find_func_in_source, extract_file_functions
-        hit = find_func_in_source(name, self.source_root)
-        if hit is None:
+        hits = find_func_in_source(name, self.source_root)
+        if not hits:
             return None
-        rel_file, _ = hit
-        try:
-            extract_file_functions(self.source_root, rel_file, self._v2_store)
-        except Exception as e:
-            logger.debug("ondemand extract %s failed: %s", rel_file, e)
+        for rel_file, _ in hits:
+            try:
+                extract_file_functions(self.source_root, rel_file, self._v2_store)
+            except Exception as e:
+                logger.debug("ondemand extract %s failed: %s", rel_file, e)
             return None
         # 再查
         import sqlite3

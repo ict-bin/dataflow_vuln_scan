@@ -63,7 +63,8 @@ class TaintAnalyzer:
         from ..parsers import _extract_json_object
         body = read_function_body(self.source_root, func, max_lines=0)  # 全函数体 (不截断, 防 LLM read 补读)
         prompt, sp = self._build_prompt(func, body, taint_sig, is_auto)
-        v2_env = {"DVS_SOURCE_ROOT": str(self.source_root)}
+        v2_env = {"DVS_SOURCE_ROOT": str(self.source_root),
+                  "DVS_V2_DB_DIR": str(self.sessions_dir.parent / "dataflow-v2")}
         output = run_agent(
             prompt=prompt, model=self._acfg.model,
             tools=self._acfg.tools or self._default_tools or [],

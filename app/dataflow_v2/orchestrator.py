@@ -510,7 +510,8 @@ class DfsOrchestrator:
                 if src_root:
                     found = find_func_in_source(p.target_function, src_root)
                     if found:
-                        ensure_file_indexed(src_root, found[0], self.store)
+                        for rel_file, _ in found:
+                            ensure_file_indexed(src_root, rel_file, self.store)
                         rec = self.store.find_function(p.target_function)
                         if rec:
                             self.cbs.on_event("v2_callee_indexed_ondemand",

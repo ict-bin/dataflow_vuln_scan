@@ -7,7 +7,7 @@
 
 - **函数体已在上方 prompt 提供，不要用 `read` 重读本函数**（重读会爆 session 内存）。
 - **禁止 `grep`/`find` 搜索源码树**（密源码树返回巨量结果 → 内存爆炸 OOM）。
-- 查 callee 签名/宏定义/符号 → 走 `v2_db lookup <函数名>` / `v2_db symbol <符号>`（已索引，快且 bounded）。
+- 查 callee 签名/宏定义/符号 → 走 `python3 /opt/dataflow_vuln_scan/tools/v2_db.py lookup <函数名>` / `... symbol <符号>`（全路径，已索引，快且 bounded）。
 - **不需要额外搜索**：本函数体 + v2_db 足够产出 DAG。只在 callee 是用户函数且需确认其签名时查 v2_db。
 
 ## 入口污点定位（必做）
@@ -72,7 +72,7 @@
 - `to`：目标节点 id。return/source 边 `to`=-1（虚拟目标）。
 - `kind`：
   - `inside`：函数内赋值/数据流（a=t）。
-  - `callee`：传入直接调用。`sink_ref`=callee **限定名**（含类/命名空间，如 `A::handle`；间接调用填指针表达式如 `fp`/`ctxt->sax->fn`）。`param_taints`=[`{param: callee形参名, taint: caller污点}`]；多污点参数多填。单污点 `taints` 长 1。**`param` 必须是 callee 真实形参名**（据调用点实参对应 callee 签名形参，可用 `v2_db lookup <callee名>` 查其签名）；不要臆造形参名（如 callee 无 `fd` 参数就不要填 `fd`）。
+  - `callee`：传入直接调用。`sink_ref`=callee **限定名**（含类/命名空间，如 `A::handle`；间接调用填指针表达式如 `fp`/`ctxt->sax->fn`）。`param_taints`=[`{param: callee形参名, taint: caller污点}`]；多污点参数多填。单污点 `taints` 长 1。**`param` 必须是 callee 真实形参名**（据调用点实参对应 callee 签名形参，可用 `python3 /opt/dataflow_vuln_scan/tools/v2_db.py lookup <callee名>` 查其签名）；不要臆造形参名（如 callee 无 `fd` 参数就不要填 `fd`）。
   - `extern`：流入外部变量/类成员。`escape_subkind`=`global`|`field_alias`；`sink_ref`=外部对象符号（`g_cache`/`ctx->out`）；`field_alias` 填 `carrier`（载体）。
   - `container`：流入队列/堆容器。`escape_subkind`=`container`；`carrier`=载体变量（常 alloc 产物）；`escape_via`=插入调用名（`enqueue`/`list_add`）；`sink_ref`=外部容器符号。
   - `return`：经 return 流出。`to`=-1。

@@ -93,7 +93,8 @@ class AutonomousRunner:
             if root_func is None:
                 found = find_func_in_source(cfg.function_name, Path(source_root))
                 if found:
-                    ensure_file_indexed(source_root, found[0], store)
+                    for rel_file, _ in found:
+                        ensure_file_indexed(source_root, rel_file, store)
                     root_func = store.find_function(cfg.function_name, found[0]) \
                         or store.find_function(cfg.function_name)
             if root_func is None:

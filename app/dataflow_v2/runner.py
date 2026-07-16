@@ -109,8 +109,8 @@ class DataflowV2Runner:
                 src = Path(source_root)
                 found = find_func_in_source(cfg.function_name, src)
                 if found:
-                    rel_def_file, _ = found
-                    _ensure(source_root, rel_def_file, store)
+                    for rel_def_file, _ in found:
+                        _ensure(source_root, rel_def_file, store)
                     root_func = store.find_function(cfg.function_name, rel_def_file) \
                         or store.find_function(cfg.function_name)
             if root_func is None:

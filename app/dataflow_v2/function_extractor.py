@@ -386,7 +386,7 @@ def index_source_tree(source_root: str, store: DataflowStore) -> int:
     return count
 
 
-def find_func_in_source(name: str, src_root) -> tuple[str, str] | None:
+def find_func_in_source(name: str, src_root) -> list[tuple[str, str]]:
     """在源码树中搜索函数定义所在文件 (grep)。
     返回 (rel_file, matched_name) 或 None。
     用于 callee 不在 functions.db 时, on-demand 定位其定义文件并增量索引。
@@ -403,14 +403,16 @@ def find_func_in_source(name: str, src_root) -> tuple[str, str] | None:
              "--include=*.h", "--include=*.hpp", "--include=*.hxx",
              "-E", pattern, str(src_root)],
             capture_output=True, text=True, timeout=15)
+        results: list[tuple[str, str]] = []
         for line in r.stdout.strip().split("\n"):
             if not line:
                 continue
             try:
                 rel = str(Path(line).relative_to(src_root)).replace("\\", "/")
-                return (rel, name)
+                results.append((rel, name))
             except ValueError:
                 continue
+        return results
     except Exception:
         pass
-    return None
+    return []
