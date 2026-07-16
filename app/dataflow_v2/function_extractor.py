@@ -195,17 +195,17 @@ def find_function_in_file(source_root: str, rel_file: str, name: str) -> tuple[i
     from pathlib import Path
     src_path = Path(source_root) / rel_file
     if not src_path.is_file():
-        logger.warning("find_function_in_file: file not found %s/%s", source_root, rel_file)
+        import sys; print(f"[v2db-ffi] file not found {rel_file}", file=sys.stderr, flush=True)
         return None
     source = src_path.read_bytes()
     parser = _parser_for(src_path, source)
     if parser is None:
-        logger.warning("find_function_in_file: parser is None for %s", rel_file)
+        import sys; print(f"[v2db-ffi] parser None {rel_file}", file=sys.stderr, flush=True)
         return None
     try:
         tree = parser.parse(source)
     except Exception as e:
-        logger.warning("find_function_in_file: parse failed for %s: %s", rel_file, e)
+        import sys; print(f"[v2db-ffi] parse failed {rel_file}: {e}", file=sys.stderr, flush=True)
         return None
 
     func_count = [0]
@@ -234,7 +234,7 @@ def find_function_in_file(source_root: str, rel_file: str, name: str) -> tuple[i
                 return
 
     walk(tree.root_node)
-    logger.info("find_function_in_file: %s found %d functions, match=%s", rel_file, func_count[0], matched[0] is not None)
+    import sys; print(f"[v2db-ffi] {rel_file} found {func_count[0]} funcs match={matched[0] is not None}", file=sys.stderr, flush=True)
     return matched[0]
 
 # ── include 索引 (C 作用域) ──────────────────────────────────────────────
