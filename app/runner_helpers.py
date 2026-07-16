@@ -15,7 +15,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from .agent_process import AgentProcessHandle, find_pi_command, process_group_id
 from .models import TokenUsage
@@ -103,16 +103,16 @@ class TaskCancelledError(Exception):
 
 # ─── Logging helpers ──────────────────────────────────────────────────────────
 
-def _log_error(msg: str) -> None:
-    logger.error(msg)
+def _log_error(msg: str, *args: Any) -> None:
+    logger.error(msg, *args)
 
 
-def _log_warn(msg: str) -> None:
-    logger.warning(msg)
+def _log_warn(msg: str, *args: Any) -> None:
+    logger.warning(msg, *args)
 
 
-def _log_info(msg: str) -> None:
-    logger.info(msg)
+def _log_info(msg: str, *args: Any) -> None:
+    logger.info(msg, *args)
 
 
 # ─── Backoff / retry helpers ──────────────────────────────────────────────────
