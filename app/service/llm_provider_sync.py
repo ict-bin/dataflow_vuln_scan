@@ -61,11 +61,8 @@ def _floor_max_tokens(mt: Any) -> int:
 
 
 def _apply_zai_reasoning_compat(entry: dict[str, Any]) -> None:
-    """Keep existing model fields and only add Z.ai thinking compatibility."""
+    """Keep existing model fields and mark reasoning-capable models."""
     entry["reasoning"] = True
-    compat = entry.get("compat") if isinstance(entry.get("compat"), dict) else {}
-    compat["thinkingFormat"] = "zai"
-    entry["compat"] = compat
 
 
 def _model_entries(provider: dict[str, Any]) -> list[dict[str, Any]]:
