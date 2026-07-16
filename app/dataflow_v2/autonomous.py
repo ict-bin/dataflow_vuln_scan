@@ -150,7 +150,9 @@ class AutonomousRunner:
                 f"开始自主探索。先 `read_function {root_func.name}` 读入口, 再跟踪污点、挖漏洞。")
 
             # 续探循环: 每轮一个 agent session, 结束读 checkpoint
-            max_rounds = max(1, int(getattr(cfg, "max_rounds", 3) or 3))
+            # max_rounds: -1 = 无限轮 (服务配置语义), 映射为 999; 0/None=3 默认
+            _mr = int(getattr(cfg, "max_rounds", 3) or 3)
+            max_rounds = 999 if _mr < 0 else max(1, _mr)
             for rnd in range(1, max_rounds + 1):
                 if self._cancel_event is not None and self._cancel_event.is_set():
                     status, err_msg = TaskStatus.FAILED, "autonomous: cancelled"
