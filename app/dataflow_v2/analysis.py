@@ -556,8 +556,8 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
         short = callee_name.rsplit("::", 1)[-1]
         try:
             r = subprocess.run(
-                ["grep", "-rl", "--include=*.c", "--include=*.cpp", "--include=*.cc",
-                 f"\\b{short}\\s*\\(", self.source_root],
+                ["grep", "-rlE", "--include=*.c", "--include=*.cpp", "--include=*.cc",
+                 f"{short}[[:space:]]*\\(", self.source_root],
                 capture_output=True, text=True, timeout=30)
         except Exception:
             return []
