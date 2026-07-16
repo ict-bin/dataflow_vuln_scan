@@ -227,39 +227,34 @@ def cmd_lookup(name: str) -> None:
         return
     log.warning("db MISS (after index) name=%s duration=%.2fs", name, time.time() - _t0)
 
-    # DB 查不到 → 对所有候选文件做 own tree-sitter 提取, 直接搜函数
-    # (不依赖 DB, 避免 upsert 失败导致的 NOT_FOUND)
+    # DB 查不到 → 对所有候选文件用 tree-sitter 直接查找 (不依赖 DB)
     all_candidate_files = list(set([f for f, _ in found] + indexing_files))
-    log.info("trying own tree-sitter extraction for %d files (all candidates)", len(all_candidate_files))
+    log.info("trying tree-sitter direct search for %d files", len(all_candidate_files))
     try:
-        from app.dataflow_v2.function_extractor import extract_file_functions
-        from app.dataflow_v2.store import DataflowStore
-        store2 = DataflowStore(db_dir)
+        from app.dataflow_v2.function_extractor import find_function_in_file
         for rel_file in all_candidate_files:
             try:
-                records = extract_file_functions(str(src_root), rel_file, store2)
-                for rec in records:
-                    if rec.name == name or name in rec.name or rec.name in name:
-                        log.info("found via own extraction: name=%s file=%s lines=%s-%s",
-                                 rec.name, rec.file, rec.start_line, rec.end_line)
-                        src_path = Path(src_root) / rec.file
-                        if src_path.is_file():
-                            lines = src_path.read_text(encoding="utf-8", errors="replace").splitlines()
-                            body = "\n".join(lines[max(0, rec.start_line-1):min(len(lines), rec.end_line)])
-                            print(f"function: {rec.name}")
-                            print(f"file: {rec.file}")
-                            print(f"lines: {rec.start_line}-{rec.end_line}")
-                            print(f"signature: {rec.signature}")
-                            print(f"description: {rec.description or ''}")
-                            print(f"---")
-                            print(body)
-                            store2.close()
-                            return
+                result = find_function_in_file(str(src_root), rel_file, name)
+                if result:
+                    start_line, end_line, sig = result
+                    log.info("found via tree-sitter: name=%s file=%s lines=%s-%s",
+                             name, rel_file, start_line, end_line)
+                    src_path = Path(src_root) / rel_file
+                    if src_path.is_file():
+                        lines = src_path.read_text(encoding="utf-8", errors="replace").splitlines()
+                        body = "\n".join(lines[max(0, start_line-1):min(len(lines), end_line)])
+                        print(f"function: {name}")
+                        print(f"file: {rel_file}")
+                        print(f"lines: {start_line}-{end_line}")
+                        print(f"signature: {sig}")
+                        print(f"description:")
+                        print(f"---")
+                        print(body)
+                        return
             except Exception as e:
-                log.warning("own extraction failed file=%s: %s", rel_file, e)
-        store2.close()
+                log.warning("tree-sitter search failed file=%s: %s", rel_file, e)
     except Exception as e:
-        log.warning("own extraction setup failed: %s", e)
+        log.warning("tree-sitter search setup failed: %s", e)
 
     # 精确未找到 → 前缀/模糊匹配候选
     _print_prefix_candidates(name, src_root)

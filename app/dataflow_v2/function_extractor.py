@@ -186,6 +186,48 @@ def ensure_file_indexed(source_root: str, rel_file: str, store: DataflowStore) -
     return "indexed"
 
 
+def find_function_in_file(source_root: str, rel_file: str, name: str) -> tuple[int, int, str] | None:
+    """在源文件中用 tree-sitter 查找函数定义, 不依赖 DB。
+
+    返回 (start_line, end_line, signature) 或 None。
+    纯读取, 无写入, 无 SQLite, 无并发问题。
+    """
+    from pathlib import Path
+    src_path = Path(source_root) / rel_file
+    if not src_path.is_file():
+        return None
+    source = src_path.read_bytes()
+    parser = _parser_for(src_path, source)
+    if parser is None:
+        return None
+    try:
+        tree = parser.parse(source)
+    except Exception:
+        return None
+
+    def walk(node):
+        if node.type == "function_definition":
+            name_node = node.child_by_field_name("declarator")
+            nm = ""
+            cur = name_node
+            while cur is not None:
+                ct = cur.type
+                if ct in ("identifier", "type_identifier", "scoped_identifier", "qualified_identifier", "namespace_qualified_name"):
+                    nm = cur.text.decode("utf-8", "replace"); break
+                cur = cur.child_by_field_name("declarator") or (cur.children[0] if cur.children else None)
+            if nm == name or name in nm or nm in name:
+                start_line = int(node.start_point[0]) + 1
+                end_line = int(node.end_point[0]) + 1
+                sig = _func_signature(node, source)
+                return (start_line, end_line, sig)
+        for child in node.children:
+            result = walk(child)
+            if result:
+                return result
+        return None
+
+    return walk(tree.root_node)
+
 # ── include 索引 (C 作用域) ──────────────────────────────────────────────
 
 _INCLUDE_RE = re.compile(r'^\s*#\s*include\s+[<"]([^>"]+)[>"]', re.MULTILINE)
