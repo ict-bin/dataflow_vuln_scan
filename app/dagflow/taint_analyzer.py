@@ -37,18 +37,29 @@ class TaintAnalyzer:
         self._acfg = (config.workers.agents[0] if config.workers.agents else None)
         self._default_tools = getattr(config.workers, "default_tools", None)
 
-    def _build_prompt(self, func, body: str, taint_sig: str, is_auto: bool) -> tuple[str, str]:
-        """返回 (prompt, session_path)。"""
+    def _build_prompt(self, func, body: str, taint_sig: str, is_auto: bool,
+                     clang_facts: dict | None = None) -> tuple[str, str]:
+        """返回 (prompt, session_path)。clang_facts 非空时注入结构事实。"""
+        import json as _json
         taint_desc = ("自行分析（未指定具体污点参数）。识别本函数内所有外部输入源（入参/内部调用产物/被动传递），"
                       "每个源作为 source 节点 (is_source=true) 起 DAG。") if is_auto else \
                      f"入口污点签名: {taint_sig}（从该污点起跟踪传播）"
-        prompt = (
-            f"# 阶段：单函数污点传播 DAG 分析\n\n"
-            f"目标函数: `{func.file}::{func.name}` (行 {func.start_line}-{func.end_line})\n"
-            f"{taint_desc}\n\n"
-            f"## 函数体\n```c\n{body}\n```\n\n"
-            f"按系统提示词要求输出 DAG JSON（顶层唯一一个 ```json 块，最后输出，不含 line）。"
-        )
+        parts = [
+            f"# 阶段：单函数污点传播 DAG 分析\n\n",
+            f"目标函数: `{func.file}::{func.name}` (行 {func.start_line}-{func.end_line})\n",
+            f"{taint_desc}\n\n",
+        ]
+        if clang_facts:
+            parts.append("## clang 结构事实（权威，必须使用，不要自己猜）\n")
+            parts.append(f"```json\n{_json.dumps(clang_facts, ensure_ascii=False, indent=2)[:15000]}\n```\n\n")
+            parts.append("- condition: 用 clang 给的调用点 branch 字段\n")
+            parts.append("- checks: 从 clang 给的 checks 里选约束污点的\n")
+            parts.append("- sink_ref: 用 clang 给的调用点 callee 名\n")
+            parts.append("- param_taints: 用 clang 给的调用点 args 映射\n")
+            parts.append("- line: 用 clang 给的调用点 line\n\n")
+        parts.append(f"## 函数体\n```c\n{body}\n```\n\n")
+        parts.append("按系统提示词要求输出 DAG JSON（顶层唯一一个 ```json 块，最后输出，不含 line）。")
+        prompt = "".join(parts)
         from .session_naming import session_path
         sp = str(session_path(self.sessions_dir, func.name, taint_sig or "auto",
                               kind="taint", depth=getattr(self, "_cur_depth", -1)))
@@ -63,8 +74,18 @@ class TaintAnalyzer:
         from ..parsers import _extract_json_object
         import time as _time
         _t0 = _time.time()
-        body = read_function_body(self.source_root, func, max_lines=0)  # 全函数体 (不截断, 防 LLM read 补读)
-        prompt, sp = self._build_prompt(func, body, taint_sig, is_auto)
+        body = read_function_body(self.source_root, func, max_lines=0)
+        # clang 先出事实
+        clang_facts = None
+        try:
+            from .clang_facts import extract_facts
+            clang_facts = extract_facts(self.source_root, func.file, func.name)
+            if clang_facts:
+                logger.info("[dagflow-taint] clang facts: %d callsites, %d checks",
+                            len(clang_facts.get('callsites',[])), len(clang_facts.get('checks',[])))
+        except Exception as e:
+            logger.warning("[dagflow-taint] clang facts failed: %s", e)
+        prompt, sp = self._build_prompt(func, body, taint_sig, is_auto, clang_facts)
         v2_env = {"DVS_SOURCE_ROOT": str(self.source_root),
                   "DVS_V2_DB_DIR": str(self.sessions_dir.parent / "dataflow-v2")}
         logger.info("[dagflow-taint] CALLING run_agent func=%s taint=%s session=%s",
