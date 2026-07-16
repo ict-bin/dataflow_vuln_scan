@@ -56,23 +56,23 @@ class DagflowOrchestrator:
                               origin_edge="(seed)"))
 
     def _process(self, item: WorkItem) -> None:
-        """消费一项: callee/return_taint -> analyze/replay + 发下游; escape/indirect -> stub。"""
+        """消费一项: callee/return_taint -> analyze/replay + 发下游; escape/indirect -> stub。
+        重放(已分析)不发下游 (首次分析已发+去重, 重放重发冗余刷屏)。"""
         if item.kind in ("escape_track", "indirect_track"):
-            self._track_stub(item)  # P5: tracker 解析读者 -> 回填 callee 边 + 入队
+            self._track_stub(item)
             return
-        # callee / return_taint: 目标 (func_id, taint); return 边回传给 caller (item.origin_func)
-        dag = self._analyze_or_replay(item.target_func, item.target_taint, item.depth)
-        if dag is not None:
+        dag, is_fresh = self._analyze_or_replay(item.target_func, item.target_taint, item.depth)
+        if dag is not None and is_fresh:
             self._emit_followups(dag, caller_func_id=item.origin_func, depth=item.depth)
 
-    def _analyze_or_replay(self, func_id: str, taint: str, depth: int = 0) -> TaintDAG | None:
-        """(func, taint): 未分析 -> analyze (产 DAG+存); 已分析 -> 加载已存 DAG (重放)。"""
+    def _analyze_or_replay(self, func_id: str, taint: str, depth: int = 0) -> tuple[TaintDAG | None, bool]:
+        """(func, taint): 未分析 -> analyze (产 DAG+存); 已分析 -> 加载已存 DAG (重放)。返回 (dag, is_fresh)。"""
         if should_skip(self.store, func_id, taint):
             # 已分析: 加载已存 DAG, 重放下游 (不重分析)
-            return self.store.load_dag(func_id, taint)
+            return self.store.load_dag(func_id, taint), False
         if not reserve_or_skip(self.store, func_id, taint):
             # 并发 peer 已占位: 跳过 (peer 会发下游; 本项重复, 不重放避免重复发)
-            return None
+            return None, False
         # 本线程占位成功 -> analyze
         func = self.func_lookup_by_id(func_id)
         if func is None:
@@ -100,7 +100,7 @@ class DagflowOrchestrator:
                               task_id=self.task_id)
             except Exception:
                 pass
-        return dag
+        return dag, True
 
     def _emit_followups(self, dag: TaintDAG, caller_func_id: str = "", depth: int = 0) -> None:
         """从 DAG 边发跟入项入队 (callee/return/escape/indirect)。 callee depth+1。
@@ -119,7 +119,7 @@ class DagflowOrchestrator:
                                           origin_node=node.id, depth=depth,
                                           origin_edge=f"{node.id}->{e.to_node}"))
                 # inside/source 不发跟入项
-        # 发标准 trace_callees 事件 (dispatcher/前端认)
+        # 发标准 trace_callees 事件 (dispatcher/前端认) — 仅首次分析发 (_process 已保证 is_fresh)
         if callees and self.on_event:
             try:
                 self.on_event("trace_callees", function=dag.func_id, callees=callees, depth=depth, task_id=self.task_id)
