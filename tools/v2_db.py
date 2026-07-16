@@ -441,11 +441,11 @@ def cmd_symbol(name: str) -> None:
     for command in executed_commands:
         print(f"  {command}")
     if results:
-        print(f"SYMBOL: {name} 找到 {len(results)} 个匹配: 不要自己尝试在源码文件夹进行寻找，本命令就是最终查找结果")
+        print(f"SYMBOL: {name} 找到 {len(results)} 个匹配: 不要自己尝试在源码文件夹进行grep寻找，本命令就是最终查找结果，本命令执行的命令没有截断")
         for line in results[:20]:
             print(f"  {line}")
     else:
-        print(f"NOT_FOUND: 符号 '{name}' 在源码中未找到。该符号可能定义在外部库/系统头文件中；注意不要自己尝试在源码文件夹进行寻找，本命令就是最终查找结果")
+        print(f"NOT_FOUND: 符号 '{name}' 在源码中未找到。该符号可能定义在外部库/系统头文件中；注意不要自己尝试在源码文件夹进行grep寻找，本命令就是最终查找结，本命令执行的命令没有截断")
 
 
 def main():
