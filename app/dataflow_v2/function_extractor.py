@@ -143,21 +143,38 @@ def extract_file_functions(source_root: str, rel_file: str, store: DataflowStore
     return records
 
 
-def ensure_file_indexed(source_root: str, rel_file: str, store: DataflowStore) -> None:
-    """确保某文件已索引 (增量: tree-sitter 函数 + include + class 继承)。"""
+def ensure_file_indexed(source_root: str, rel_file: str, store: DataflowStore) -> str:
+    """确保某文件已索引。返回值:
+      "indexed"  - 已完成索引 (之前或本次)
+      "indexing"  - 另一进程正在索引此文件 (部分函数可能已入库, 但不完整)
+    """
     existing = [f for f in store.list_functions() if f.file == rel_file]
-    if existing:
-        return  # 已索引
-    # 1) tree-sitter 函数提取
-    extract_file_functions(source_root, rel_file, store)
-    # 2) include 索引 (该文件的直接 include → 入库)
-    incs = _extract_includes(source_root, rel_file)
-    if incs:
-        for header in incs:
-            store.add_include(header, rel_file)
-    # 3) class 继承图 + member (该文件的 class 定义 → 入库)
-    if _TS_AVAILABLE:
-        _extract_class_info_for_file(source_root, rel_file, store)
+    # 检查是否正在被另一进程索引
+    is_indexing = store._q("functions", "SELECT 1 FROM indexing_files WHERE file_path=?", (rel_file,))
+    if is_indexing:
+        # 另一进程正在索引: 不重复索引, 但告知调用方状态
+        return "indexing"
+    if existing and not is_indexing:
+        return "indexed"  # 已完整索引
+    # 标记为正在索引
+    import time
+    store._exec("functions", "INSERT OR REPLACE INTO indexing_files (file_path, started_at) VALUES (?, ?)",
+                (rel_file, time.time()))
+    try:
+        # 1) tree-sitter 函数提取
+        extract_file_functions(source_root, rel_file, store)
+        # 2) include 索引 (该文件的直接 include → 入库)
+        incs = _extract_includes(source_root, rel_file)
+        if incs:
+            for header in incs:
+                store.add_include(header, rel_file)
+        # 3) class 继承图 + member (该文件的 class 定义 → 入库)
+        if _TS_AVAILABLE:
+            _extract_class_info_for_file(source_root, rel_file, store)
+    finally:
+        # 完成后删除标记
+        store._exec("functions", "DELETE FROM indexing_files WHERE file_path=?", (rel_file,))
+    return "indexed"
 
 
 # ── include 索引 (C 作用域) ──────────────────────────────────────────────

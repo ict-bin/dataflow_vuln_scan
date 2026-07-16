@@ -87,6 +87,10 @@ _DDL = {
         );
         CREATE INDEX IF NOT EXISTS idx_member_class ON class_members(class_name);
         CREATE INDEX IF NOT EXISTS idx_member_name ON class_members(member_name);
+        CREATE TABLE IF NOT EXISTS indexing_files (
+            file_path TEXT PRIMARY KEY,
+            started_at REAL DEFAULT 0
+        );
     """,
     "taints": """
         CREATE TABLE IF NOT EXISTS taints (
