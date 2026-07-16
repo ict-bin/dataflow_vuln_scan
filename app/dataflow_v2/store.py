@@ -172,7 +172,7 @@ class DataflowStore:
         self._conns: dict[str, sqlite3.Connection] = {}
         self._locks: dict[str, threading.Lock] = {}
         for name, p in self._paths.items():
-            conn = sqlite3.connect(str(p), check_same_thread=False)
+            conn = sqlite3.connect(str(p), check_same_thread=False, timeout=30)
             conn.row_factory = sqlite3.Row
             conn.executescript(_DDL[name])
             conn.commit()
