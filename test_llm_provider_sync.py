@@ -34,6 +34,7 @@ class LlmProviderSyncTests(unittest.TestCase):
         model_entry = models_json["providers"]["local-glm"]["models"][0]
         self.assertTrue(model_entry["reasoning"])
         self.assertEqual("qwen", model_entry["compat"]["thinkingFormat"])
+        self.assertFalse(model_entry["compat"]["supportsDeveloperRole"])
 
     def test_sync_providers_to_pi_writes_qwen_thinking_format_to_models_json(self):
         provider_payload = {
@@ -62,6 +63,7 @@ class LlmProviderSyncTests(unittest.TestCase):
             model_entry = written["providers"]["local-glm"]["models"][0]
             self.assertTrue(model_entry["reasoning"])
             self.assertEqual("qwen", model_entry["compat"]["thinkingFormat"])
+            self.assertFalse(model_entry["compat"]["supportsDeveloperRole"])
 
 
 if __name__ == "__main__":

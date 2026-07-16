@@ -65,6 +65,7 @@ def _apply_zai_reasoning_compat(entry: dict[str, Any]) -> None:
     entry["reasoning"] = True
     compat = dict(entry.get("compat") or {})
     compat["thinkingFormat"] = "qwen"
+    compat["supportsDeveloperRole"] = False
     entry["compat"] = compat
 
 
