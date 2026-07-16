@@ -219,10 +219,12 @@ class WorkItem:
     origin_func: str = ""             # 溯源: 产出此项的函数
     origin_node: int = -1             # 溯源: 产出节点 id
     origin_edge: str = ""              # 溯源: "from->to" 边引用 (DAG 权威, line/condition 留在 DAG)
+    depth: int = 0                    # 调用深度 (root=0, callee+1; session 命名用)
 
     def to_dict(self) -> dict:
         return {"kind": self.kind, "target_func": self.target_func, "target_taint": self.target_taint,
-                "origin_func": self.origin_func, "origin_node": self.origin_node, "origin_edge": self.origin_edge}
+                "origin_func": self.origin_func, "origin_node": self.origin_node, "origin_edge": self.origin_edge,
+                "depth": self.depth}
 
 
 # ── 挖掘 finding ─────────────────────────────────────────────────────────

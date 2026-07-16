@@ -61,11 +61,11 @@ class DagflowOrchestrator:
             self._track_stub(item)  # P5: tracker 解析读者 -> 回填 callee 边 + 入队
             return
         # callee / return_taint: 目标 (func_id, taint); return 边回传给 caller (item.origin_func)
-        dag = self._analyze_or_replay(item.target_func, item.target_taint)
+        dag = self._analyze_or_replay(item.target_func, item.target_taint, item.depth)
         if dag is not None:
-            self._emit_followups(dag, caller_func_id=item.origin_func)
+            self._emit_followups(dag, caller_func_id=item.origin_func, depth=item.depth)
 
-    def _analyze_or_replay(self, func_id: str, taint: str) -> TaintDAG | None:
+    def _analyze_or_replay(self, func_id: str, taint: str, depth: int = 0) -> TaintDAG | None:
         """(func, taint): 未分析 -> analyze (产 DAG+存); 已分析 -> 加载已存 DAG (重放)。"""
         if should_skip(self.store, func_id, taint):
             # 已分析: 加载已存 DAG, 重放下游 (不重分析)
@@ -83,11 +83,11 @@ class DagflowOrchestrator:
         if self.on_event:
             try:
                 self.on_event("trace_start", function=func.name, source_file=getattr(func, "file", ""),
-                              depth=0, max_depth=0, task_id=self.task_id)
+                              depth=depth, max_depth=0, task_id=self.task_id)
             except Exception:
                 pass
         try:
-            dag = self.analyze_fn(func, taint)
+            dag = self.analyze_fn(func, taint, depth)
         except Exception as e:
             logger.exception("analyze failed func=%s taint=%s: %s", getattr(func, "name", "?"), taint, e)
             release_on_failure(self.store, func_id, taint)
@@ -102,50 +102,59 @@ class DagflowOrchestrator:
                 pass
         return dag
 
-    def _emit_followups(self, dag: TaintDAG, caller_func_id: str = "") -> None:
-        """从 DAG 边发跟入项入队 (callee/return/escape/indirect)。
+    def _emit_followups(self, dag: TaintDAG, caller_func_id: str = "", depth: int = 0) -> None:
+        """从 DAG 边发跟入项入队 (callee/return/escape/indirect)。 callee depth+1。
         return 边回传给 caller (caller_func_id, 非 dag 自己)。"""
         callees: list[str] = []
         for node in dag.nodes:
             for e in node.children:
                 if e.kind == "callee":
-                    self._emit_callee(dag, node, e)
+                    self._emit_callee(dag, node, e, depth)
                     if e.sink_ref and not ("->" in e.sink_ref or e.sink_ref.startswith("(") or "*" in e.sink_ref):
                         callees.append(e.sink_ref)
                 elif e.kind == "return":
-                    self._emit_return(dag, node, e, caller_func_id)
+                    self._emit_return(dag, node, e, caller_func_id, depth)
                 elif e.kind in ("extern", "container"):
                     self._wq.put(WorkItem(kind="escape_track", origin_func=dag.func_id,
-                                          origin_node=node.id,
+                                          origin_node=node.id, depth=depth,
                                           origin_edge=f"{node.id}->{e.to_node}"))
                 # inside/source 不发跟入项
         # 发标准 trace_callees 事件 (dispatcher/前端认)
         if callees and self.on_event:
             try:
-                self.on_event("trace_callees", function=dag.func_id, callees=callees, depth=0, task_id=self.task_id)
+                self.on_event("trace_callees", function=dag.func_id, callees=callees, depth=depth, task_id=self.task_id)
             except Exception:
                 pass
 
-    def _emit_callee(self, dag, node, e) -> None:
-        """callee 边 -> 每个被污形参拆一项 (D-2)。taint_sig=callee 形参名归一 (D-1)。"""
+    def _emit_callee(self, dag, node, e, depth: int = 0) -> None:
+        """callee 边 -> 每个被污形参拆一项 (D-2)。taint_sig=callee 形参名归一 (D-1)。
+        校验 param 是 callee 真实形参 (据签名); 不匹配的跳过 (防 LLM 臆造形参名)。"""
         # sink_ref 可能是限定名/指针表达式 (间接); 间接 -> indirect_track
         if e.sink_ref and ("->" in e.sink_ref or e.sink_ref.startswith("(") or "*" in e.sink_ref):
             self._wq.put(WorkItem(kind="indirect_track", origin_func=dag.func_id,
-                                  origin_node=node.id, origin_edge=f"{node.id}->{e.to_node}"))
+                                  origin_node=node.id, depth=depth,
+                                  origin_edge=f"{node.id}->{e.to_node}"))
             return
         callee = self.func_lookup(e.sink_ref)
         if callee is None:
             logger.debug("callee not indexed: %s (on-demand 待 P5)", e.sink_ref)
             return
+        # 校验 callee 真实形参名 (从 signature 提取)
+        real_params = _extract_params(getattr(callee, "signature", ""))
         for pt in e.param_taints:
             param = str(pt.get("param", "")).strip()
             if not param or param.startswith("("):
                 continue  # 间接/未解析的形参跳过
+            if real_params and param not in real_params:
+                logger.warning("callee %s 形参 %r 不在签名 %r (LLM 臆造? 跳过该项)",
+                               e.sink_ref, param, getattr(callee, "signature", "")[:60])
+                continue
             self._wq.put(WorkItem(kind="callee", target_func=callee.func_id,
                                   target_taint=param, origin_func=dag.func_id,
-                                  origin_node=node.id, origin_edge=f"{node.id}->{e.to_node}"))
+                                  origin_node=node.id, depth=depth + 1,
+                                  origin_edge=f"{node.id}->{e.to_node}"))
 
-    def _emit_return(self, dag, node, e, caller_func_id: str = "") -> None:
+    def _emit_return(self, dag, node, e, caller_func_id: str = "", depth: int = 0) -> None:
         """return 边 -> 回传项 (caller_func_id, return_taint_sig)。
         caller = 触发本 (func,taint) 分析的调用方 (item.origin_func)。根/无 caller 跳过。"""
         if not caller_func_id or caller_func_id == "(root)":
@@ -153,7 +162,8 @@ class DagflowOrchestrator:
         for t in e.taints:
             self._wq.put(WorkItem(kind="return_taint", target_func=caller_func_id,
                                   target_taint=t, origin_func=dag.func_id,
-                                  origin_node=node.id, origin_edge=f"{node.id}->{e.to_node}"))
+                                  origin_node=node.id, depth=depth,
+                                  origin_edge=f"{node.id}->{e.to_node}"))
 
     def _track_stub(self, item: WorkItem) -> None:
         """escape/indirect tracker 项 -> dispatcher 解析 (P5)。
@@ -196,3 +206,32 @@ class DagflowOrchestrator:
         if lookup is not None:
             return lookup(func_id)
         return None
+
+
+def _extract_params(signature: str) -> list[str]:
+    """从 C/C++ 函数签名提取形参名 (校验 callee param_taints 用)。
+
+    e.g. 'void f(int a, char* b, struct s* c)' -> ['a','b','c']。
+    无参数声明 (void f(void)) -> []。失败 -> [] (不阻塞)。"""
+    import re
+    if not signature:
+        return []
+    # 取第一个 ( ... ) 内的参数列表
+    m = re.search(r"\(([^)]*)\)", signature)
+    if not m:
+        return []
+    plist = m.group(1).strip()
+    if not plist or plist == "void":
+        return []
+    out: list[str] = []
+    for part in plist.split(","):
+        part = part.strip()
+        if not part or part == "void" or part == "...":
+            continue
+        # 形参名是末尾标识符 (去 [] / * / & / 默认值)
+        part = re.sub(r"=.*$", "", part).strip()  # 去默认值
+        part = re.sub(r"\[[^\]]*\]", "", part).strip()  # 去数组
+        mm = re.search(r"([A-Za-z_]\w*)\s*$", part)  # 末尾标识符
+        if mm:
+            out.append(mm.group(1))
+    return out

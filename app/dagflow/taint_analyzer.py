@@ -50,7 +50,8 @@ class TaintAnalyzer:
             f"按系统提示词要求输出 DAG JSON（顶层唯一一个 ```json 块，最后输出，不含 line）。"
         )
         from .session_naming import session_path
-        sp = str(session_path(self.sessions_dir, func.name, taint_sig or "auto", kind="taint"))
+        sp = str(session_path(self.sessions_dir, func.name, taint_sig or "auto",
+                              kind="taint", depth=getattr(self, "_cur_depth", -1)))
         return prompt, sp
 
     def analyze(self, func, taint_sig: str, is_auto: bool = False) -> tuple[TaintDAG, str]:
@@ -60,7 +61,7 @@ class TaintAnalyzer:
         from ..dataflow_v2.function_extractor import read_function_body
         from ..runner import run_agent
         from ..parsers import _extract_json_object
-        body = read_function_body(self.source_root, func, max_lines=500)
+        body = read_function_body(self.source_root, func, max_lines=0)  # 全函数体 (不截断, 防 LLM read 补读)
         prompt, sp = self._build_prompt(func, body, taint_sig, is_auto)
         v2_env = {"DVS_SOURCE_ROOT": str(self.source_root)}
         output = run_agent(

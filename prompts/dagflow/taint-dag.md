@@ -3,6 +3,20 @@
 你只分析**当前这一个函数**的一个入口污点，输出函数内污点传播 **DAG**（有向无环图，非树——分支后可在汇合点合并，merge 节点多 parent）。
 **不要跨函数递归**——callee 内部行为不在你上下文，禁止臆断。
 
+## 工具约束（防内存爆炸，必须遵守）
+
+- **函数体已在上方 prompt 提供，不要用 `read` 重读本函数**（重读会爆 session 内存）。
+- **禁止 `grep`/`find` 搜索源码树**（密源码树返回巨量结果 → 内存爆炸 OOM）。
+- 查 callee 签名/宏定义/符号 → 走 `v2_db lookup <函数名>` / `v2_db symbol <符号>`（已索引，快且 bounded）。
+- **不需要额外搜索**：本函数体 + v2_db 足够产出 DAG。只在 callee 是用户函数且需确认其签名时查 v2_db。
+
+## 入口污点定位（必做）
+
+入口污点签名 X（已给）。**先在本函数定位 X 的真实入口**：
+- X 是本函数参数？→ 根节点 line=该参数声明行，is_source=false。
+- X 是本函数内自生（返回值源 `t=getenv()` / 被动输入 `read(fd,X)` 写 out-param）？→ source 边（from=-1）→ X 节点 is_source=true，line=该调用行。
+- **X 不是本函数参数、也不是函数内外部输入源（如局部未初始化变量）？→ `taint_failed=true`，description 说明“X 非有效污点源”，nodes 只放根节点无 children。** 不要为不存在的污点编造传播。
+
 ## 语言要求（最高优先级）
 
 所有文本用简体中文。JSON key 英文。`sink_ref`/`taint`/`left`/`right` 用代码原文标识符（不翻译）。`op` 用运算符。
@@ -58,7 +72,7 @@
 - `to`：目标节点 id。return/source 边 `to`=-1（虚拟目标）。
 - `kind`：
   - `inside`：函数内赋值/数据流（a=t）。
-  - `callee`：传入直接调用。`sink_ref`=callee **限定名**（含类/命名空间，如 `A::handle`；间接调用填指针表达式如 `fp`/`ctxt->sax->fn`）。`param_taints`=[`{param: callee形参名, taint: caller污点}`]；多污点参数多填。单污点 `taints` 长 1。
+  - `callee`：传入直接调用。`sink_ref`=callee **限定名**（含类/命名空间，如 `A::handle`；间接调用填指针表达式如 `fp`/`ctxt->sax->fn`）。`param_taints`=[`{param: callee形参名, taint: caller污点}`]；多污点参数多填。单污点 `taints` 长 1。**`param` 必须是 callee 真实形参名**（据调用点实参对应 callee 签名形参，可用 `v2_db lookup <callee名>` 查其签名）；不要臆造形参名（如 callee 无 `fd` 参数就不要填 `fd`）。
   - `extern`：流入外部变量/类成员。`escape_subkind`=`global`|`field_alias`；`sink_ref`=外部对象符号（`g_cache`/`ctx->out`）；`field_alias` 填 `carrier`（载体）。
   - `container`：流入队列/堆容器。`escape_subkind`=`container`；`carrier`=载体变量（常 alloc 产物）；`escape_via`=插入调用名（`enqueue`/`list_add`）；`sink_ref`=外部容器符号。
   - `return`：经 return 流出。`to`=-1。

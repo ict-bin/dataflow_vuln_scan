@@ -161,7 +161,8 @@ class DagflowPipeline:
                                       on_event=self.on_event, task_id=task_id)
             analyzer.cancel_event = self.cancel_event
 
-            def analyze_fn(func, taint_sig):
+            def analyze_fn(func, taint_sig, depth=0):
+                analyzer._cur_depth = depth
                 dag, _sp = analyzer.analyze(func, taint_sig, is_auto=(taint_sig == "auto"))
                 fill_lines(dag, func, self.source_root)
                 return dag
