@@ -88,29 +88,32 @@ def _read_body(func: dict) -> str:
         return f"// 读取失败: {e}"
 
 
-def _find_func_in_source_v2db(name: str, src_root: Path) -> tuple[str, str] | None:
+def _find_func_in_source_v2db(name: str, src_root: Path) -> list[tuple[str, str]]:
     """在源码树中搜索函数定义所在文件 (grep)。
-    返回 (rel_file, matched_name) 或 None。
+    返回 [(rel_file, matched_name), ...] 或 []。
     """
     import subprocess, re
-    # 搜索函数定义模式: name 后跟 ( 且前面有换行/分号/{/空格
+    # 搜索函数定义模式: name 后跟 (
     pattern = rf'\b{re.escape(name)}\s*\('
     try:
         r = subprocess.run(
-            ["grep", "-rl", "--include=*.c", "--include=*.cpp", "--include=*.cc",
-             "-E", pattern, str(src_root)],
+            ["grep", "-rl", "-E", "--include=*.c", "--include=*.cpp", "--include=*.cc",
+             "--include=*.h", "--include=*.hpp", "--include=*.hxx",
+             pattern, str(src_root)],
             capture_output=True, text=True, timeout=15)
+        results: list[tuple[str, str]] = []
         for line in r.stdout.strip().split("\n"):
             if not line:
                 continue
             try:
                 rel = str(Path(line).relative_to(src_root)).replace("\\", "/")
-                return (rel, name)
+                results.append((rel, name))
             except ValueError:
                 continue
+        return results
     except Exception:
         pass
-    return None
+    return []
 
 
 def _log_trajectory(func: dict, query: str) -> None:
@@ -153,18 +156,21 @@ def cmd_lookup(name: str) -> None:
         _print_prefix_candidates(name, src_root)
         return
 
-    rel_file, matched_name = found
-    # 用 ensure_file_indexed 索引该文件 (tree-sitter + include + class, 增量)
+    # find_func_in_source 返回 list[tuple[str,str]]; 索引每个候选文件后重查
     db_dir = _db_dir()
     sys.path.insert(0, os.environ.get("DVS_APP_DIR", "/opt/dataflow_vuln_scan"))
     try:
         from app.dataflow_v2.function_extractor import ensure_file_indexed
         from app.dataflow_v2.store import DataflowStore
         store = DataflowStore(db_dir)
-        ensure_file_indexed(str(src_root), rel_file, store)
+        for rel_file, matched_name in found:
+            try:
+                ensure_file_indexed(str(src_root), rel_file, store)
+            except Exception as e:
+                print(f"INDEX_ERROR: 索引文件 {rel_file} 失败: {e}")
         store.close()
     except Exception as e:
-        print(f"INDEX_ERROR: 索引文件 {rel_file} 失败: {e}")
+        print(f"INDEX_ERROR: 索引失败: {e}")
         return
 
     # 再查 db
