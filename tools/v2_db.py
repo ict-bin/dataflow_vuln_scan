@@ -22,6 +22,7 @@
 import json
 import re
 import os
+import shlex
 import sqlite3
 import sys
 import time
@@ -381,6 +382,28 @@ def cmd_index(file_path: str) -> None:
 def cmd_symbol(name: str) -> None:
     """查宏定义/typedef/struct/enum (grep 全盘 .h 优先, .c 补充)。"""
     import subprocess
+
+    def _shell_join(argv: list[str]) -> str:
+        return " ".join(shlex.quote(part) for part in argv)
+
+    executed_commands: list[str] = []
+
+    def _run_symbol_search(argv: list[str], *, limit: int | None = None) -> list[str]:
+        executed_commands.append(_shell_join(argv))
+        try:
+            r = subprocess.run(
+                argv,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except Exception:
+            return []
+        rows = [line for line in r.stdout.strip().split("\n") if line]
+        if limit is not None:
+            rows = rows[:limit]
+        return rows
+
     src = os.environ.get("DVS_SOURCE_ROOT", "")
     if not src:
         print("ERROR: DVS_SOURCE_ROOT 未设置")
@@ -400,59 +423,35 @@ def cmd_symbol(name: str) -> None:
     results = []
     # 先搜 .h (定义通常在头文件)
     for pattern in patterns:
-        try:
-            r = subprocess.run(
-                ["/usr/bin/grep", "-rn", "-E", "--include=*.h",
-                 pattern, src],
-                capture_output=True, text=True, timeout=10)
-            for line in r.stdout.strip().split("\n"):
-                if line:
-                    results.append(line)
-        except Exception:
-            pass
+        results.extend(_run_symbol_search([
+            "/usr/bin/grep", "-rn", "-E", "--include=*.h", pattern, src,
+        ]))
     log.info("symbol .h pattern search results=%d", len(results))
     # .h 未中 → 补搜 .c
     if not results:
         for pattern in patterns:
-            try:
-                r = subprocess.run(
-                    ["/usr/bin/grep", "-rn", "-E", "--include=*.c",
-                     pattern, src],
-                    capture_output=True, text=True, timeout=10)
-                for line in r.stdout.strip().split("\n"):
-                    if line:
-                        results.append(line)
-            except Exception:
-                pass
+            results.extend(_run_symbol_search([
+                "/usr/bin/grep", "-rn", "-E", "--include=*.c", pattern, src,
+            ]))
         log.info("symbol .c pattern search results=%d", len(results))
     # pattern 搜未中 → fallback: 纯名字搜 .h (看使用上下文, 如 struct field)
     if not results:
         log.info("symbol fallback: simple name search in .h")
-        try:
-            r = subprocess.run(
-                ["/usr/bin/grep", "-rn", "--include=*.h",
-                 name, src],
-                capture_output=True, text=True, timeout=10)
-            for line in r.stdout.strip().split("\n")[:20]:
-                if line:
-                    results.append(line)
-            log.info("symbol fallback .h results=%d", len(results))
-        except Exception:
-            pass
+        results.extend(_run_symbol_search([
+            "/usr/bin/grep", "-rn", "--include=*.h", name, src,
+        ], limit=20))
+        log.info("symbol fallback .h results=%d", len(results))
     # .h fallback 未中 → 最后搜 .c
     if not results:
         log.info("symbol fallback: simple name search in .c")
-        try:
-            r = subprocess.run(
-                ["/usr/bin/grep", "-rn", "--include=*.c",
-                 name, src],
-                capture_output=True, text=True, timeout=10)
-            for line in r.stdout.strip().split("\n")[:20]:
-                if line:
-                    results.append(line)
-            log.info("symbol fallback .c results=%d", len(results))
-        except Exception:
-            pass
+        results.extend(_run_symbol_search([
+            "/usr/bin/grep", "-rn", "--include=*.c", name, src,
+        ], limit=20))
+        log.info("symbol fallback .c results=%d", len(results))
+    print(f"DVS_SOURCE_ROOT={src}")
+    print("EXECUTED_COMMANDS:")
+    for command in executed_commands:
+        print(f"  {command}")
     if results:
         print(f"SYMBOL: {name} 找到 {len(results)} 个匹配:")
         for line in results[:20]:
