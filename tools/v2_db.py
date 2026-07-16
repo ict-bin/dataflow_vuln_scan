@@ -33,15 +33,14 @@ _APP_DIR = os.environ.get("DVS_APP_DIR", "/opt/dataflow_vuln_scan")
 if _APP_DIR not in sys.path:
     sys.path.insert(0, _APP_DIR)
 
-# ── 日志 ──────────────────────────────────────────────────────────────────────
+# ── 日志 (写 /tmp/v2db.log, 不污染 LLM stdout) ──────────────────────────────
 import logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="[v2db %(asctime)s] %(message)s",
-    datefmt="%H:%M:%S",
-    stream=sys.stderr,
-)
-log = logging.getLogger("v2db")
+_logger = logging.FileHandler('/tmp/v2db.log')
+_logger.setFormatter(logging.Formatter('[v2db %(asctime)s] %(message)s', datefmt='%H:%M:%S'))
+log = logging.getLogger('v2db')
+log.addHandler(_logger)
+log.setLevel(logging.INFO)
+log.propagate = False
 
 
 def _db_dir() -> Path:
