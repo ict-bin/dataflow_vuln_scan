@@ -24,6 +24,15 @@ RUN pip install --no-cache-dir \
     && python3 -c "import tree_sitter, tree_sitter_c, tree_sitter_cpp; print('tree-sitter OK')" \
     && python3 -c "from pydantic import BaseModel; print('pydantic OK')"
 
+# tree-sitter installed in venv; symlink to system python's site-packages
+# so that pi's bash tool (uses system python3) can import tree-sitter
+RUN for pkg in tree_sitter tree_sitter_c tree_sitter_cpp; do \
+        src="/opt/venv/lib/python3.12/site-packages/$pkg"; \
+        dst="/usr/local/lib/python3.12/dist-packages/$pkg"; \
+        [ -d "$src" ] && [ ! -e "$dst" ] && ln -sf "$src" "$dst" || true; \
+    done && \
+    /usr/bin/python3 -c "import tree_sitter, tree_sitter_c, tree_sitter_cpp; print('system python tree-sitter OK')" || echo 'WARNING: system python tree-sitter link failed'
+
 # ═══ cache-bust: 每次 commit 改变该层, 强制后续 COPY app/ 代码层重建 ══════
 # (buildx GHA 缓存曾命中旧 app 层致 digest 不变; 此 ARG bust 代码层, pip 层仍缓存)
 ARG CACHEBUST=""
