@@ -165,6 +165,20 @@ class DagflowPipeline:
 
         try:
             self._emit("task_start", task_id=task_id)
+            # 诊断: 写 cfg 关键字段到 NFS
+            try:
+                from pathlib import Path as _P
+                _diag = nfs_run / "dagflow_diag.txt"
+                _diag.write_text(
+                    f"cwd={getattr(self.config, 'cwd', '?')}\n"
+                    f"source_file={getattr(self.config, 'source_file', '?')}\n"
+                    f"function_name={getattr(self.config, 'function_name', '?')}\n"
+                    f"source_root={self.source_root}\n"
+                    f"agents={len(getattr(self.config.workers, 'agents', []))}\n"
+                    f"agent_model={self.config.workers.agents[0].model if self.config.workers.agents else 'NONE'}\n"
+                    f"feature_flags={getattr(self.config, 'feature_flags', {})}\n", encoding='utf-8')
+            except Exception as e:
+                logger.warning("diag write failed: %s", e)
 
             # ── 阶段 1: taint 跟踪 ──
             logger.info("[dagflow] PHASE 1 START: taint tracking, root=%s", root_name)
@@ -174,9 +188,19 @@ class DagflowPipeline:
 
             def analyze_fn(func, taint_sig, depth=0):
                 analyzer._cur_depth = depth
-                dag, _sp = analyzer.analyze(func, taint_sig, is_auto=(taint_sig == "auto"))
-                fill_lines(dag, func, self.source_root)
-                return dag
+                try:
+                    dag, _sp = analyzer.analyze(func, taint_sig, is_auto=(taint_sig == "auto"))
+                    fill_lines(dag, func, self.source_root)
+                    return dag
+                except Exception as e:
+                    import traceback
+                    from pathlib import Path as _P
+                    _elog = nfs_run / "dagflow_analyze_errors.txt"
+                    with open(_elog, "a", encoding="utf-8") as _f:
+                        _f.write(f"=== analyze_fn FAILED func={func.name} taint={taint_sig} depth={depth} ===\n")
+                        _f.write(traceback.format_exc())
+                        _f.write("\n")
+                    raise
 
             # tracker reader_finder/function_resolver: LLM+v2_db 找读者/解析间接 (生产实现)
             from .reader_finder import ReaderFinder
