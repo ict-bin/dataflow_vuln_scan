@@ -84,8 +84,6 @@ class FuncIndex:
             finally:
                 conn.close()
         return None  # 所有文件都试过, 仍未索引
-        finally:
-            conn.close()
 
     @staticmethod
     def _row_to_rec(r):
