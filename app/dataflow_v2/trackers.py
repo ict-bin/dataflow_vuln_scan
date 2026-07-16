@@ -86,7 +86,8 @@ def resolve_external(
         env=v2_env,
         thinking_level="off",
         task_context={"task_id": "", "task_root": "", "task_run_root": "",
-                      "task_pi_dir": "", "agent_role": "workers"},
+                      "task_pi_dir": "", "agent_role": "workers",
+                      "fork_purpose": "external_tracking"},
     )
     parsed = _extract_json_object(output.output, "confirmed") or {}
     confirmed: list[tuple[FunctionRecord, TaintParamInfo]] = []
@@ -205,7 +206,8 @@ def resolve_indirect(
         env=v2_env,
         thinking_level="off",
         task_context={"task_id": "", "task_root": "", "task_run_root": "",
-                      "task_pi_dir": "", "agent_role": "workers"},
+                      "task_pi_dir": "", "agent_role": "workers",
+                      "fork_purpose": "indirect_call_tracking"},
     )
     parsed = _extract_json_object(output.output, "handlers") or {}
     out = []

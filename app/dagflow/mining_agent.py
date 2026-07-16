@@ -76,7 +76,7 @@ class MiningAgent:
             timeout_max_retries=getattr(self.config, "agent_timeout_max_retries", 20),
             pi_max_retries=getattr(self.config, "pi_max_retries", 3),
             pi_retry_delay=getattr(self.config, "pi_retry_delay", 10.0),
-            task_context={"task_id": self.task_id, "agent_role": "workers"})
+            task_context={"task_id": self.task_id, "agent_role": "workers", "fork_purpose": "dagflow_vuln_mining"})
         text = output.output or ""
         parsed = _extract_json_object(text, "findings") or self._greedy_json(text) or {"findings": []}
         findings = self._parse_findings(parsed)

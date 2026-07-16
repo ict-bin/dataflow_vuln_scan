@@ -213,6 +213,8 @@ class RunAgentPromptFileTests(unittest.TestCase):
                     retry_delay=0,
                     pi_max_retries=-1,
                     pi_retry_delay=1,
+                    model="glm-5.2",
+                    thinking_level="off",
                 )
         finally:
             timer.cancel()
@@ -245,6 +247,10 @@ class RunAgentPromptFileTests(unittest.TestCase):
             captured["args"] = kwargs["args"]
             captured["prompt_text"] = kwargs["prompt"]
             captured["env"] = kwargs["env"]
+            captured["fork_purpose"] = kwargs["fork_purpose"]
+            captured["session_file"] = kwargs["session_file"]
+            captured["model"] = kwargs["model"]
+            captured["thinking_level"] = kwargs["thinking_level"]
             result = runner.AgentResult()
             result.output = "ok"
             result.exit_code = 0
@@ -270,6 +276,7 @@ class RunAgentPromptFileTests(unittest.TestCase):
                             "task_run_root": "/tmp/dvs_123/run/epochs/0001",
                             "worker_id": "worker-a",
                             "execution_epoch": 1,
+                            "fork_purpose": "taint_analysis",
                         },
                     )
 
@@ -281,6 +288,81 @@ class RunAgentPromptFileTests(unittest.TestCase):
         self.assertEqual(payload["task_root"], "/tmp/dvs_123")
         self.assertEqual(payload["task_run_root"], "/tmp/dvs_123/run/epochs/0001")
         self.assertEqual(payload["worker_id"], "worker-a")
+        self.assertEqual(captured["fork_purpose"], "taint_analysis")
+        self.assertIsNone(captured["session_file"])
+        self.assertEqual(captured["model"], "test-model")
+        self.assertEqual(captured["thinking_level"], "off")
+
+    def test_run_with_api_retry_logs_pi_launch_metadata(self):
+        logs: list[tuple] = []
+
+        class _FakePipe:
+            def __init__(self, chunks=None):
+                self._chunks = list(chunks or [])
+                self.closed = False
+
+            def read(self, _size=-1):
+                if self._chunks:
+                    return self._chunks.pop(0)
+                return b""
+
+            def write(self, _data):
+                return None
+
+            def flush(self):
+                return None
+
+            def close(self):
+                self.closed = True
+
+        class _FakeProc:
+            def __init__(self):
+                self.pid = 4321
+                self.stdout = _FakePipe()
+                self.stderr = _FakePipe()
+                self.stdin = _FakePipe()
+                self.returncode = 0
+
+            def wait(self, timeout=None):
+                self.returncode = 0
+                return 0
+
+            def poll(self):
+                return 0
+
+        with patch.object(runner.subprocess, "Popen", return_value=_FakeProc()), \
+             patch.object(runner, "_terminate_pi_process_tree", return_value=None), \
+             patch.object(runner, "_log_info", side_effect=lambda *args: logs.append(args)), \
+             patch.object(runner, "_is_pi_crash", return_value=False), \
+             patch.object(runner, "_is_fatal_error", return_value=False), \
+             patch.object(runner, "_is_retryable_query_engine_401_error", return_value=False), \
+             patch.object(runner, "_is_retryable_api_error", return_value=False):
+            result = runner._run_with_api_retry(
+                args=["/usr/bin/pi", "--session", "/tmp/demo.jsonl"],
+                cwd="/tmp/work",
+                env=None,
+                prompt="hello",
+                post_skill_prompt=None,
+                cancel_event=None,
+                on_stream=None,
+                max_retries=0,
+                retry_delay=0,
+                timeout_seconds=None,
+                model="glm-5.2",
+                thinking_level="high",
+                session_file="/tmp/demo.jsonl",
+                fork_purpose="vuln_mining",
+            )
+
+        self.assertEqual(result.exit_code, 0)
+        launch_logs = [entry for entry in logs if entry and "started pi process" in entry[0]]
+        self.assertEqual(1, len(launch_logs))
+        launch = launch_logs[0]
+        self.assertIn("session_file=%s", launch[0])
+        self.assertEqual("/tmp/demo.jsonl", launch[4])
+        self.assertEqual("vuln_mining", launch[5])
+        self.assertEqual("glm-5.2", launch[6])
+        self.assertEqual("high", launch[7])
 
     def test_run_agent_triggers_compaction_then_retries_on_context_overflow(self):
         prompts: list[str] = []

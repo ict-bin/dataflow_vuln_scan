@@ -176,7 +176,8 @@ class AutonomousRunner:
                     pi_max_retries=cfg.pi_max_retries, pi_retry_delay=cfg.pi_retry_delay,
                     task_context={"task_id": tid, "task_root": str(shared_run_dir.parent),
                                   "task_run_root": str(shared_run_dir),
-                                  "task_pi_dir": cfg.role_pi_dir("workers"), "agent_role": "workers"},
+                                  "task_pi_dir": cfg.role_pi_dir("workers"), "agent_role": "workers",
+                                  "fork_purpose": "autonomous_round"},
                     retry_prompt=("## 续探 (重试)\n刚才你的探索因 pi 崩溃/超时中断。session 历史仍在。"
                                   "请**从上次中断处继续**探索, 不要从头重来。回顾你已读的函数 + 正在追的污点路径,"
                                   "继续往深挖 + 发现漏洞即 report_finding。结束时 checkpoint。"),

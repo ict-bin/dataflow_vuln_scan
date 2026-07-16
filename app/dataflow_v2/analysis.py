@@ -229,7 +229,7 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                 pi_max_retries=self.cfg.pi_max_retries, pi_retry_delay=self.cfg.pi_retry_delay,
                 task_context={"task_id": getattr(ctx, "path_id", ""), "task_root": str(self.run_dir.parent),
                               "task_run_root": str(self.run_dir), "task_pi_dir": self.cfg.role_pi_dir("workers"),
-                              "agent_role": "workers"},
+                              "agent_role": "workers", "fork_purpose": "taint_analysis"},
             )
 
         output = _run_taint_agent(prompt)
@@ -785,7 +785,7 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
             pi_max_retries=self.cfg.pi_max_retries, pi_retry_delay=self.cfg.pi_retry_delay,
             task_context={"task_id": self.task_id, "task_root": str(self.run_dir.parent),
                           "task_run_root": str(self.run_dir), "task_pi_dir": self.cfg.role_pi_dir("workers"),
-                          "agent_role": "workers"},
+                          "agent_role": "workers", "fork_purpose": "vuln_mining"},
         )
         logger.info("[V2-mine] DONE func=%s::%s duration=%.1fs error=%s output_len=%d",
                     func.file, func.name, time.time() - _t0, (output.error or "")[:100], len(output.output or ""))

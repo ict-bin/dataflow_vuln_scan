@@ -203,6 +203,7 @@ def _run_with_context_overflow_recovery(
     timeout_seconds: float | None = None,
     agent_role: str | None = None,
     runtime_dir: str | None = None,
+    fork_purpose: str | None = None,
     retry_prompt: str | None = None,
 ) -> AgentResult:
     context_window = _model_context_window(model)
@@ -259,6 +260,10 @@ def _run_with_context_overflow_recovery(
             pi_max_retries=pi_max_retries,
             pi_retry_delay=pi_retry_delay,
             timeout_seconds=timeout_seconds,
+            model=model,
+            thinking_level=thinking_level,
+            session_file=session_file,
+            fork_purpose=fork_purpose,
             retry_prompt=retry_prompt,
         )
         result.agent_role = agent_role
@@ -393,6 +398,7 @@ def run_agent(
                 timeout_seconds=timeout_seconds,
                 agent_role=str(task_context.get("agent_role") or "").strip() or None,
                 runtime_dir=str(task_context.get("task_pi_dir") or "").strip() or None,
+                fork_purpose=str(task_context.get("fork_purpose") or "").strip() or None,
                 retry_prompt=retry_prompt,
             )
             logger.info("run_agent DONE model=%s session=%s duration=%.1fs exit=%s output_len=%d error=%s",
@@ -445,6 +451,10 @@ def _run_with_pi_retry(
     pi_max_retries: int,
     pi_retry_delay: float,
     timeout_seconds: float | None = None,
+    model: str,
+    thinking_level: str,
+    session_file: str | None = None,
+    fork_purpose: str | None = None,
     retry_prompt: str | None = None,
 ) -> AgentResult:
     """Outer loop: handle pi process launch failures, crashes, fatal errors."""
@@ -476,6 +486,10 @@ def _run_with_pi_retry(
                 cancel_event=cancel_event, on_stream=on_stream,
                 max_retries=max_retries, retry_delay=retry_delay,
                 timeout_seconds=timeout_seconds,
+                model=model,
+                thinking_level=thinking_level,
+                session_file=session_file,
+                fork_purpose=fork_purpose,
             )
 
             if _is_fatal_error(result) or result.fatal:
@@ -572,6 +586,10 @@ def _run_with_api_retry(
     max_retries: int,
     retry_delay: float,
     timeout_seconds: float | None = None,
+    model: str,
+    thinking_level: str,
+    session_file: str | None = None,
+    fork_purpose: str | None = None,
 ) -> AgentResult:
     """Inner loop: launch pi subprocess via subprocess.Popen, threaded stdout/stderr reading."""
     api_attempt = 0
@@ -611,7 +629,14 @@ def _run_with_api_retry(
             raise
 
         _log_info(
-            f"started pi process [{process_label}] pid={proc.pid} cwd={cwd}"
+            "started pi process [%s] pid=%s cwd=%s session_file=%s fork_purpose=%s model=%s thinking_level=%s",
+            process_label,
+            proc.pid,
+            cwd,
+            session_file or "",
+            fork_purpose or "",
+            model,
+            thinking_level,
         )
 
         # Cancel monitor thread
