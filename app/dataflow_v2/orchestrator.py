@@ -22,6 +22,7 @@ processed_taints 命中 → 跳过重复分析。
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 import threading
 from dataclasses import dataclass, field
@@ -34,6 +35,8 @@ from .models import (
 )
 from .store import DataflowStore
 from ..vuln_report_utils import safe_name as _safe_name
+
+logger = logging.getLogger("dvs.dataflow_v2.orchestrator")
 
 
 @dataclass
