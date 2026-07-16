@@ -549,6 +549,8 @@ def _prop_backed_by_taint(prop: PropagationRecord, taint_set: set) -> bool:
     """propagation 的 source 是否有已确认污点支撑。
 
     callee 传播: source_taint 必须 ∈ taint_set (严格, 防 callee 返回值未确认就跟入)。
+      但接受结构体前缀匹配: source="request" 匹配 taint="request->domain"
+      (LLM 在 taint 识别时用字段级, 在 propagation 中可能用结构体级)。
     escape 传播 (is_external + escape_kind): 语义匹配, 接受 carrier 整体逃逸 /
       carrier->field 字段访问, 只要背后有已确认污点 (carrier 持有 taints[] 字段, 或
       field ∈ taint_set)。非 blind 放行 — 仍要求确认污点支撑, 只是匹配更准。
@@ -556,7 +558,12 @@ def _prop_backed_by_taint(prop: PropagationRecord, taint_set: set) -> bool:
     src = prop.source_taint_name
     if src in taint_set:
         return True
+    # callee 传播: 结构体前缀匹配 (source="request" 匹配 taint="request->domain")
     if not (prop.is_external and prop.escape_kind):
+        if src and len(src) >= 2:
+            for t in taint_set:
+                if t.startswith(src + "->") or t.startswith(src + "."):
+                    return True
         return False
     carrier = prop.carrier
     # carrier 整体逃逸: src == carrier, carrier 是否持有已确认污点字段
