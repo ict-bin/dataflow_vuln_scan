@@ -293,9 +293,16 @@ def cmd_taints(func_name: str) -> None:
 
 def cmd_propagations(func_name: str) -> None:
     """查传播库: 返回函数的传播路径。"""
-    rows = _query("propagations.db", "SELECT * FROM propagations WHERE source_func_id IN (SELECT func_id FROM functions WHERE name = ?)", (func_name,))
-    if not rows:
-        rows = _query("propagations.db", "SELECT * FROM propagations WHERE source_func_id IN (SELECT func_id FROM functions WHERE name LIKE ?)", (f"%{func_name}",))
+    # 先查 functions.db 拿 func_id, 再查 propagations.db (两库分离, 不能跨库子查询)
+    func_rows = _query("functions.db", "SELECT func_id FROM functions WHERE name = ?", (func_name,))
+    if not func_rows:
+        func_rows = _query("functions.db", "SELECT func_id FROM functions WHERE name LIKE ?", (f"%{func_name}",))
+    if not func_rows:
+        print(f"NOT_FOUND: 函数 '{func_name}' 在函数库中未找到。")
+        return
+    func_ids = [r["func_id"] for r in func_rows]
+    placeholders = ",".join("?" * len(func_ids))
+    rows = _query("propagations.db", f"SELECT * FROM propagations WHERE source_func_id IN ({placeholders})", tuple(func_ids))
     if rows:
         for r in rows:
             print(f"propagation: {r['source_taint_name']} → {r['target_taint_name']}")
