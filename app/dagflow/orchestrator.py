@@ -61,18 +61,16 @@ class DagflowOrchestrator:
         if item.kind in ("escape_track", "indirect_track"):
             self._track_stub(item)
             return
-        dag, is_fresh = self._analyze_or_replay(item.target_func, item.target_taint, item.depth)
+        dag, is_fresh, fname = self._analyze_or_replay(item.target_func, item.target_taint, item.depth)
         if dag is not None and is_fresh:
-            self._emit_followups(dag, caller_func_id=item.origin_func, depth=item.depth)
+            self._emit_followups(dag, caller_func_id=item.origin_func, depth=item.depth, func_name=fname)
 
-    def _analyze_or_replay(self, func_id: str, taint: str, depth: int = 0) -> tuple[TaintDAG | None, bool]:
-        """(func, taint): 未分析 -> analyze (产 DAG+存); 已分析 -> 加载已存 DAG (重放)。返回 (dag, is_fresh)。"""
+    def _analyze_or_replay(self, func_id: str, taint: str, depth: int = 0) -> tuple[TaintDAG | None, bool, str]:
+        """(func, taint): 未分析 -> analyze (产 DAG+存); 已分析 -> 加载已存 DAG (重放)。返回 (dag, is_fresh, func_name)。"""
         if should_skip(self.store, func_id, taint):
-            # 已分析: 加载已存 DAG, 重放下游 (不重分析)
-            return self.store.load_dag(func_id, taint), False
+            return self.store.load_dag(func_id, taint), False, ""
         if not reserve_or_skip(self.store, func_id, taint):
-            # 并发 peer 已占位: 跳过 (peer 会发下游; 本项重复, 不重放避免重复发)
-            return None, False
+            return None, False, ""
         # 本线程占位成功 -> analyze
         func = self.func_lookup_by_id(func_id)
         if func is None:
@@ -100,9 +98,10 @@ class DagflowOrchestrator:
                               task_id=self.task_id)
             except Exception:
                 pass
-        return dag, True
+        return dag, True, func.name
 
-    def _emit_followups(self, dag: TaintDAG, caller_func_id: str = "", depth: int = 0) -> None:
+    def _emit_followups(self, dag: TaintDAG, caller_func_id: str = "", depth: int = 0,
+                       func_name: str = "") -> None:
         """从 DAG 边发跟入项入队 (callee/return/escape/indirect)。 callee depth+1。
         return 边回传给 caller (caller_func_id, 非 dag 自己)。"""
         callees: list[str] = []
@@ -122,7 +121,7 @@ class DagflowOrchestrator:
         # 发标准 trace_callees 事件 (dispatcher/前端认) — 仅首次分析发 (_process 已保证 is_fresh)
         if callees and self.on_event:
             try:
-                self.on_event("trace_callees", function=dag.func_id, callees=callees, depth=depth, task_id=self.task_id)
+                self.on_event("trace_callees", function=func_name or dag.func_id, callees=callees, depth=depth, task_id=self.task_id)
             except Exception:
                 pass
 

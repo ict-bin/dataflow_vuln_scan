@@ -116,8 +116,9 @@ class DagflowPipeline:
             pass
 
     def execute_recursive(self, task_id: str, *, _root_out_dir: str | None = None,
-                          _root_output_dir: str | None = None) -> dict:
-        """阶段 1 taint 跟踪 -> 阶段 2 挖掘。"""
+                          _root_output_dir: str | None = None) -> TaskResult:
+        """阶段 1 taint 跟踪 -> 阶段 2 挖掘。返回 TaskResult (兼容 task_service model_dump)。"""
+        from ..models import TaskResult, TaskStatus, TokenUsage
         from .dag_store import DagflowStore
         from .taint_analyzer import TaintAnalyzer
         from .line_filler import fill_lines
@@ -230,8 +231,21 @@ class DagflowPipeline:
                         logger.exception("mine %s/%s failed: %s", func.name, ts, e)
             self._emit("v2_dagflow_phase", phase="mining_done", findings=total_findings, task_id=task_id)
             self._emit("task_end", task_id=task_id)
-            return {"task_id": task_id, "status": "done", "pipeline": "dagflow",
-                    "analyzed": len(store.list_analyzed()), "findings": total_findings}
+            return TaskResult(
+                task_id=task_id, status=TaskStatus.PASSED, task=self.config.task,
+                analysis_status="dagflow_complete",
+                completion_reason="dagflow tracking + mining 完成",
+                vuln_summary={"pipeline": "dagflow", "analyzed": len(store.list_analyzed()),
+                              "findings": total_findings},
+                total_tokens=TokenUsage(),
+            )
+        except Exception as e:
+            logger.exception("dagflow pipeline error: %s", e)
+            return TaskResult(
+                task_id=task_id, status=TaskStatus.ERROR, task=getattr(self.config, "task", ""),
+                analysis_status="error", completion_reason=str(e),
+                error=str(e), total_tokens=TokenUsage(),
+            )
         finally:
             store.close()
             if v2_store is not None:
