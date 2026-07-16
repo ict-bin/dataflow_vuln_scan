@@ -65,7 +65,8 @@ class MiningAgent:
             cwd=str(self.source_root), env=v2_env, session_file=sp,
             system_prompt=_system_prompt(),
             cancel_event=getattr(self, "cancel_event", None),
-            thinking_level=getattr(self.config, "vuln_mining_thinking_level", "high"),
+            # Only v2 vuln mining keeps reasoning enabled; legacy dagflow mining stays explicitly off.
+            thinking_level="off",
             run_timeout_seconds=getattr(self.config, "agent_run_timeout_seconds", 900),
             timeout_retry_enabled=getattr(self.config, "agent_timeout_retry_enabled", True),
             timeout_max_retries=getattr(self.config, "agent_timeout_max_retries", 20),

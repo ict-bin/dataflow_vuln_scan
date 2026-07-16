@@ -63,6 +63,9 @@ def _floor_max_tokens(mt: Any) -> int:
 def _apply_zai_reasoning_compat(entry: dict[str, Any]) -> None:
     """Keep existing model fields and mark reasoning-capable models."""
     entry["reasoning"] = True
+    compat = dict(entry.get("compat") or {})
+    compat["thinkingFormat"] = "qwen"
+    entry["compat"] = compat
 
 
 def _model_entries(provider: dict[str, Any]) -> list[dict[str, Any]]:

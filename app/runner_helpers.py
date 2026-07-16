@@ -444,7 +444,7 @@ def _build_args(
     if tools:
         args.extend(["--tools", ",".join(tools)])
     if thinking_level and thinking_level != "off":
-        args.extend(["--thinking-level", thinking_level])
+        args.extend(["--thinking", thinking_level])
     if post_skill_prompt:
         args.extend(["--post-skill-prompt", post_skill_prompt])
     if max_turns is not None and max_turns > 0:

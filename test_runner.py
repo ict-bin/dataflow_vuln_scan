@@ -3,6 +3,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from app import agent_process
@@ -28,6 +29,19 @@ def _overflow_result() -> runner.AgentResult:
 
 
 class RunAgentPromptFileTests(unittest.TestCase):
+    def test_build_args_uses_pi_thinking_flag(self):
+        args = runner._build_args(
+            ["/usr/bin/pi"],
+            "glm-5.2",
+            ["read", "bash"],
+            "high",
+            None,
+        )
+
+        self.assertIn("--thinking", args)
+        self.assertIn("high", args)
+        self.assertNotIn("--thinking-level", args)
+
     def test_is_fatal_error_ignores_context_overflow_wrapped_as_invalid_request(self):
         result = runner.AgentResult()
         result.error = (
@@ -371,6 +385,102 @@ class RunAgentPromptFileTests(unittest.TestCase):
         )
         self.assertEqual("/tmp/runtime/workers", emitted[0][1]["runtime_dir"])
         self.assertEqual("glm-5.1", emitted[0][1]["model"])
+
+    def test_dataflow_v2_vuln_mining_keeps_configured_thinking(self):
+        from app.dataflow_v2.analysis import TaintAnalysisCallbacks
+        from app.dataflow_v2.models import FunctionRecord, TaintParamInfo
+        from app.models import RoleConfig, TaskConfig
+
+        cfg = TaskConfig(
+            task="demo",
+            cwd="/tmp/source",
+            task_pi_dirs={"workers": "/tmp/runtime/workers"},
+            vuln_mining_thinking_level="high",
+            workers=RoleConfig(default_model="glm-5.2", agents=[{"model": "glm-5.2", "tools": ["read"]}]),
+        )
+        cb = TaintAnalysisCallbacks.__new__(TaintAnalysisCallbacks)
+        cb.cfg = cfg
+        cb.sessions_dir = Path(tempfile.mkdtemp())
+        cb.run_dir = Path(tempfile.mkdtemp())
+        cb.vuln_root = Path(tempfile.mkdtemp())
+        cb.vuln_root.mkdir(parents=True, exist_ok=True)
+        cb.cancel_event = None
+        cb.task_id = "dvs_test"
+        cb.run_id = "run_1"
+        cb.source_root = "/tmp/source"
+        cb._vuln_miner_prompt = "mine"
+        cb.graph_store = object()
+        cb.on_event = None
+        cb._format_taint_context = lambda *args, **kwargs: "context"
+
+        func = FunctionRecord(file="demo.c", name="demo", signature="void demo()", start_line=1, end_line=10)
+        taint = TaintParamInfo(positions=[0], signature="arg0", names=["input"])
+        ctx = SimpleNamespace(depth=1)
+        store = SimpleNamespace(
+            list_taints_in_function=lambda *_: [],
+            list_propagations_from=lambda *_: [],
+        )
+        captured: dict[str, object] = {}
+
+        def fake_run_agent(*, thinking_level: str, **kwargs):
+            captured["thinking_level"] = thinking_level
+            result = runner.AgentResult()
+            result.output = '{"findings":[]}'
+            result.exit_code = 0
+            return result
+
+        with patch("app.dataflow_v2.analysis.run_agent", side_effect=fake_run_agent):
+            count = cb.mine_vulns(store, func, taint, ctx, base_session="")
+
+        self.assertEqual(0, count)
+        self.assertEqual("high", captured["thinking_level"])
+
+    def test_legacy_dagflow_vuln_mining_is_forced_off(self):
+        from app.dagflow.mining_agent import MiningAgent
+
+        cfg = SimpleNamespace(
+            cwd="/tmp/source",
+            source_root="/tmp/source",
+            vuln_mining_thinking_level="high",
+            agent_run_timeout_seconds=900,
+            agent_timeout_retry_enabled=True,
+            agent_timeout_max_retries=20,
+            pi_max_retries=3,
+            pi_retry_delay=10.0,
+            workers=SimpleNamespace(
+                agents=[SimpleNamespace(model="glm-5.2", tools=["read"])],
+                default_tools=["read"],
+            ),
+        )
+        store = SimpleNamespace(load_dag=lambda *_: object())
+        captured: dict[str, object] = {}
+
+        def fake_run_agent(*, thinking_level: str, **kwargs):
+            captured["thinking_level"] = thinking_level
+            result = runner.AgentResult()
+            result.output = '{"findings":[]}'
+            result.exit_code = 0
+            return result
+
+        with tempfile.TemporaryDirectory() as sessions_dir, tempfile.TemporaryDirectory() as source_root:
+            agent = MiningAgent(
+                config=cfg,
+                store=store,
+                sessions_dir=Path(sessions_dir),
+                vuln_store=object(),
+                run_id="run_1",
+                func_lookup=None,
+                task_id="dvs_test",
+            )
+            func = SimpleNamespace(func_id="func_1", file="demo.c", name="demo", start_line=1, end_line=10)
+            with patch("app.runner.run_agent", side_effect=fake_run_agent), \
+                 patch("app.dagflow.chain_builder.build_chain", return_value=[]), \
+                 patch("app.dagflow.dag_tools.get_func_source", return_value="void demo() {}"), \
+                 patch("app.dagflow.finding_store.save_findings"):
+                findings = agent.mine(func, "arg0")
+
+        self.assertEqual([], findings)
+        self.assertEqual("off", captured["thinking_level"])
 
 
 if __name__ == "__main__":
