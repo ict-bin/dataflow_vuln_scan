@@ -47,6 +47,12 @@ def _extract_call_name(text: str) -> str:
             return nm
     return ""
 
+
+def _candidate_names(callee_names: set[str]) -> set[str]:
+    names = set(callee_names)
+    names.update(n.rsplit("::", 1)[-1] for n in callee_names)
+    return {n for n in names if n}
+
 # ── libclang bootstrap ───────────────────────────────────────────────────────
 # 干净策略: 仅用 libclang PyPI 包 (自带与绑定版本匹配的原生库), 不再拼凑系统
 # libclang-*.so (之前强制用系统 libclang-19 与 pip clang 包不匹配 → undefined symbol)。
@@ -173,6 +179,36 @@ def _cursor_text(cursor: Any, source_lines: list[str]) -> str:
         return ""
 
 
+def _collect_matching_call_expr_names(cursor: Any, callee_names: set[str]) -> set[str]:
+    """Collect matching CALL_EXPR names in subtree.
+
+    Used by the UNEXPOSED_EXPR fallback to avoid duplicating a call that
+    libclang already exposed as a real CALL_EXPR somewhere below.
+    """
+    out: set[str] = set()
+    target_names = _candidate_names(callee_names)
+
+    def walk(node: Any) -> None:
+        try:
+            kind = node.kind
+        except Exception:
+            return
+        if kind == _cindex.CursorKind.CALL_EXPR:
+            ref = node.referenced
+            name = ref.spelling if ref is not None else ""
+            if not name:
+                kids = list(node.get_children())
+                if kids:
+                    name = kids[0].spelling or ""
+            if name and name in target_names:
+                out.add(name)
+        for child in node.get_children():
+            walk(child)
+
+    walk(cursor)
+    return out
+
+
 def _function_def_cursor(tu: Any, func_name: str) -> Any | None:
     """Locate the FunctionDecl definition matching func_name."""
     short = func_name.rsplit("::", 1)[-1]
@@ -272,6 +308,19 @@ def _walk(cursor: Any, branch_stack: list[dict], source_lines: list[str],
         for ch in cursor.get_children():
             _walk(ch, branch_stack, source_lines, callee_names, hits)
         return
+
+    if kind == _cindex.CursorKind.UNEXPOSED_EXPR:
+        subtree_calls = _collect_matching_call_expr_names(cursor, callee_names)
+        if not subtree_calls:
+            name = _extract_call_name(_cursor_text(cursor, source_lines))
+            if name and name in _candidate_names(callee_names):
+                hits.append(_CallHit(
+                    name=name,
+                    call_line=_line(cursor),
+                    call_expr=_cursor_text(cursor, source_lines),
+                    actual_args=[],
+                    branch_path=[dict(f) for f in branch_stack],
+                ))
 
     # default: recurse
     for ch in cursor.get_children():

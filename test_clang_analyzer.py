@@ -15,7 +15,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from app.clang_analyzer import (  # noqa: E402
     _CallHit,
+    _collect_matching_call_expr_names,
     _compute_mutex,
+    _extract_call_name,
     analyze_function_callsites,
     libclang_available,
 )
@@ -91,6 +93,44 @@ class DegradeTests(unittest.TestCase):
 
     def test_empty_callee_names(self):
         self.assertEqual({}, analyze_function_callsites(".", "x.c", "f", []))
+
+
+class FallbackHelperTests(unittest.TestCase):
+    def test_extract_call_name_skips_keywords(self):
+        self.assertEqual("_dns_server_get_dns_rule",
+                         _extract_call_name("if (_dns_server_get_dns_rule(request, DOMAIN_RULE_NAMESERVER) != NULL) {"))
+
+    def test_extract_call_name_handles_strstr_condition(self):
+        self.assertEqual("strstr", _extract_call_name('if (strstr(arpa, "ip6.arpa") == NULL) {'))
+
+    def test_collect_matching_call_expr_names_ignores_non_call_nodes(self):
+        class FakeCursor:
+            def __init__(self, kind, spelling="", referenced=None, children=None):
+                self.kind = kind
+                self.spelling = spelling
+                self.referenced = referenced
+                self._children = children or []
+
+            def get_children(self):
+                return list(self._children)
+
+        class Kind:
+            CALL_EXPR = "CALL_EXPR"
+            UNEXPOSED_EXPR = "UNEXPOSED_EXPR"
+
+        ref = type("Ref", (), {"spelling": "_dns_server_setup_soa"})
+        call = FakeCursor(Kind.CALL_EXPR, referenced=ref, children=[])
+        plain = FakeCursor(Kind.UNEXPOSED_EXPR, spelling="request", children=[])
+        root = FakeCursor(Kind.UNEXPOSED_EXPR, children=[plain, call])
+
+        import app.clang_analyzer as clang_analyzer
+        old_cindex = clang_analyzer._cindex
+        clang_analyzer._cindex = type("FakeCIndex", (), {"CursorKind": Kind})
+        try:
+            matched = _collect_matching_call_expr_names(root, {"_dns_server_setup_soa"})
+        finally:
+            clang_analyzer._cindex = old_cindex
+        self.assertEqual({"_dns_server_setup_soa"}, matched)
 
 
 if __name__ == "__main__":
