@@ -115,6 +115,11 @@ class DagflowPipeline:
         except Exception:
             pass
 
+    def abort(self):
+        """取消任务 (与 V2 Orchestrator.abort 接口兼容)。"""
+        if self.cancel_event is not None:
+            self.cancel_event.set()
+
     def execute_recursive(self, task_id: str, *, _root_out_dir: str | None = None,
                           _root_output_dir: str | None = None) -> TaskResult:
         """阶段 1 taint 跟踪 -> 阶段 2 挖掘。返回 TaskResult (兼容 task_service model_dump)。"""
