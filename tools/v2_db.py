@@ -226,41 +226,41 @@ def cmd_lookup(name: str) -> None:
         return
     log.warning("db MISS (after index) name=%s duration=%.2fs", name, time.time() - _t0)
 
-    # 某些文件正在被另一进程索引 → 自行 tree-sitter 提取, 直接搜函数 (不依赖 DB)
-    if indexing_files:
-        log.info("trying own tree-sitter extraction for %d files", len(indexing_files))
-        try:
-            from app.dataflow_v2.function_extractor import extract_file_functions
-            from app.dataflow_v2.store import DataflowStore
-            store2 = DataflowStore(db_dir)
-            for rel_file in indexing_files:
-                try:
-                    records = extract_file_functions(str(src_root), rel_file, store2)
-                    for rec in records:
-                        if rec.name == name or name in rec.name or rec.name in name:
-                            log.info("found via own extraction: name=%s file=%s lines=%s-%s",
-                                     rec.name, rec.file, rec.start_line, rec.end_line)
-                            # 读函数体直接返回
-                            src_path = Path(src_root) / rec.file
-                            if src_path.is_file():
-                                lines = src_path.read_text(encoding="utf-8", errors="replace").splitlines()
-                                body = "\n".join(lines[max(0, rec.start_line-1):min(len(lines), rec.end_line)])
-                                print(f"function: {rec.name}")
-                                print(f"file: {rec.file}")
-                                print(f"lines: {rec.start_line}-{rec.end_line}")
-                                print(f"signature: {rec.signature}")
-                                print(f"description: {rec.description or ''}")
-                                print(f"---")
-                                print(body)
-                                store2.close()
-                                return
-                except Exception as e:
-                    log.warning("own extraction failed file=%s: %s", rel_file, e)
-            store2.close()
-        except Exception as e:
-            log.warning("own extraction setup failed: %s", e)
+    # DB 查不到 → 对所有候选文件做 own tree-sitter 提取, 直接搜函数
+    # (不依赖 DB, 避免 upsert 失败导致的 NOT_FOUND)
+    all_candidate_files = list(set([f for f, _ in found] + indexing_files))
+    log.info("trying own tree-sitter extraction for %d files (all candidates)", len(all_candidate_files))
+    try:
+        from app.dataflow_v2.function_extractor import extract_file_functions
+        from app.dataflow_v2.store import DataflowStore
+        store2 = DataflowStore(db_dir)
+        for rel_file in all_candidate_files:
+            try:
+                records = extract_file_functions(str(src_root), rel_file, store2)
+                for rec in records:
+                    if rec.name == name or name in rec.name or rec.name in name:
+                        log.info("found via own extraction: name=%s file=%s lines=%s-%s",
+                                 rec.name, rec.file, rec.start_line, rec.end_line)
+                        src_path = Path(src_root) / rec.file
+                        if src_path.is_file():
+                            lines = src_path.read_text(encoding="utf-8", errors="replace").splitlines()
+                            body = "\n".join(lines[max(0, rec.start_line-1):min(len(lines), rec.end_line)])
+                            print(f"function: {rec.name}")
+                            print(f"file: {rec.file}")
+                            print(f"lines: {rec.start_line}-{rec.end_line}")
+                            print(f"signature: {rec.signature}")
+                            print(f"description: {rec.description or ''}")
+                            print(f"---")
+                            print(body)
+                            store2.close()
+                            return
+            except Exception as e:
+                log.warning("own extraction failed file=%s: %s", rel_file, e)
+        store2.close()
+    except Exception as e:
+        log.warning("own extraction setup failed: %s", e)
 
-    # 精确未找到 → 前缀/模糊匹配候选 (LLM 常传截断的长 C 函数名, 精确匹配会漏)
+    # 精确未找到 → 前缀/模糊匹配候选
     _print_prefix_candidates(name, src_root)
 
 
