@@ -76,11 +76,12 @@ class TaintAnalyzer:
             system_prompt=_system_prompt(),
             cancel_event=getattr(self, "cancel_event", None),
             thinking_level="off",
-            run_timeout_seconds=getattr(self.config, "agent_run_timeout_seconds", 900),
+            run_timeout_seconds=min(getattr(self.config, "agent_run_timeout_seconds", 900), 600),
             timeout_retry_enabled=getattr(self.config, "agent_timeout_retry_enabled", True),
-            timeout_max_retries=getattr(self.config, "agent_timeout_max_retries", 20),
+            timeout_max_retries=min(getattr(self.config, "agent_timeout_max_retries", 20), 3),
             pi_max_retries=getattr(self.config, "pi_max_retries", 3),
             pi_retry_delay=getattr(self.config, "pi_retry_delay", 10.0),
+            retry_prompt="你刚才的 DAG 分析超时了。请直接输出你之前分析的 DAG JSON (```json 块), 不要重新分析或调工具。",
             task_context={"task_id": self.task_id, "agent_role": "workers"},
         )
         text = output.output or ""
