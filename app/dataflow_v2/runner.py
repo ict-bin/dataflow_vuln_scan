@@ -71,22 +71,23 @@ class DataflowV2Runner:
     ) -> TaskResult:
         tid = task_id or self.task_id
         cfg = self.cfg
-        # 路径镜像 v1: shared_run_dir=run/ (NFS, 存 vuln-scan.sqlite/vulnerabilities/数据库),
-        # root_out_dir=run/epochs/<epoch>/ (存 sessions), output/=任务根/output
+        # DB 放 epoch 目录 (通过 workspace_manager symlink → pod 本地)
+        # NFS 只做归档同步 (workspace_manager sync_back_and_cleanup)
         if _root_out_dir is not None:
             root_out_dir = Path(_root_out_dir)
+            # shared_run_dir 用于 output/ 路径计算 (NFS)
             shared_run_dir = root_out_dir.parent.parent if ("epochs" in root_out_dir.parts and "run" in root_out_dir.parts) else root_out_dir
         else:
             root_out_dir = Path(cfg.output_dir) / tid / "run"
             shared_run_dir = root_out_dir
         root_out_dir.mkdir(parents=True, exist_ok=True)
-        shared_run_dir.mkdir(parents=True, exist_ok=True)
         root_output_path = Path(_root_output_dir) if _root_output_dir is not None else (shared_run_dir.parent / "output")
         root_output_path.mkdir(parents=True, exist_ok=True)
-        v2_run_dir = shared_run_dir / "dataflow-v2"
+        # DB 放 root_out_dir (epoch 目录, 通过 symlink → 本地存储)
+        v2_run_dir = root_out_dir / "dataflow-v2"
         sessions_dir = root_out_dir / "sessions"
-        graph_db_path = shared_run_dir / "vuln-scan.sqlite"
-        vuln_root = shared_run_dir / "vulnerabilities"
+        graph_db_path = root_out_dir / "vuln-scan.sqlite"
+        vuln_root = root_out_dir / "vulnerabilities"
         source_root = cfg.cwd
         status = TaskStatus.PASSED
         err_msg = ""
@@ -223,10 +224,8 @@ class DataflowV2Runner:
                 shutil.copytree(v2_run_dir, dst)
             except OSError as e:
                 logger.warning("v2 archive dataflow-v2 db: %s", e)
-        # output/sessions/ (归档全部 sessions: taint/vuln/track/fptrack, 写 local 后同步 NFS)
-        sessions_src = shared_run_dir / "sessions"
-        if not sessions_src.exists():
-            sessions_src = root_out_dir / "sessions"
+        # output/sessions/ (sessions 现在在 root_out_dir/sessions/, 通过 symlink → 本地)
+        sessions_src = root_out_dir / "sessions"
         if sessions_src.exists():
             try:
                 dst = root_output_path / "sessions"
