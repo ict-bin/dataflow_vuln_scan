@@ -252,15 +252,16 @@ class AutonomousRunner:
     def _build_call_tree_from_path(self, run_dir: Path, store, root_func) -> None:
         """Q3: 从 path.log 提取调用边写入 orchestration.db 供前端展示调用树。
 
-        path.log 是扁平轨迹 (read_function 的函数序列), 按顺序连成线性调用链:
-        root -> callee1 -> callee2 -> ... 每对连续 read_function 构成一条边。
-        grep_function 条目跳过 (不是函数调用)。
+        path.log 是扁平轨迹, 两类条目构成调用树:
+        - read_function / v2_db_lookup: agent 读了函数体 (A→B 连续读 = A 调 B 的边)
+        - grep_function: agent 搜到的函数 (matched_funcs 从上一个读过的函数分叉)
         """
         from .models import OrchestrationEdge, TaintParamInfo
         p = run_dir / "path.log"
         if not p.exists():
             return
-        entries = []
+        # 解析全部条目, 保留顺序
+        all_entries = []
         for line in p.read_text(encoding="utf-8").splitlines():
             if not line.strip():
                 continue
@@ -268,36 +269,66 @@ class AutonomousRunner:
                 d = json.loads(line)
             except Exception:
                 continue
-            if d.get("via") == "read_function" and d.get("func"):
-                entries.append(d)
-        if len(entries) < 2:
-            return  # 只有根函数, 无边
+            all_entries.append(d)
+        if not all_entries:
+            return
         path_id = "autonomous"
-        for i in range(1, len(entries)):
-            prev = entries[i - 1]
-            curr = entries[i]
-            if prev["func"] == curr["func"]:
-                continue  # 跳过连续重复
-            # 查 func_id (已索引)
-            src_rec = store.find_function(prev["func"], prev.get("file", ""))
-            tgt_rec = store.find_function(curr["func"], curr.get("file", ""))
-            edge = OrchestrationEdge(
-                path_id=path_id,
-                source_function=prev["func"],
-                source_signature=prev.get("signature", ""),
-                source_func_id=src_rec.func_id if src_rec else "",
-                target_function=curr["func"],
-                target_signature=curr.get("signature", ""),
-                target_func_id=tgt_rec.func_id if tgt_rec else "",
-                taint_params=TaintParamInfo(),
-                depth=i,
-                edge_order=i,
-                status="done")
-            try:
-                store.upsert_edge(edge)
-            except Exception:
-                logger.debug("upsert_edge failed for %s->%s", prev["func"], curr["func"], exc_info=True)
-        self._emit("v2_autonomous_call_tree", edges=len(entries) - 1)
+        edge_count = 0
+        # 上一个读过的函数 (read_function/v2_db_lookup 的 func), 作为 grep 分叉的父
+        last_read_func = None
+        last_read_entry = None
+        depth = 0
+        for d in all_entries:
+            via = d.get("via", "")
+            if via in ("read_function", "v2_db_lookup") and d.get("func"):
+                func = d["func"]
+                if last_read_entry and last_read_entry["func"] != func:
+                    # 连续读 A→B = 调用边
+                    src_rec = store.find_function(last_read_entry["func"], last_read_entry.get("file", ""))
+                    tgt_rec = store.find_function(func, d.get("file", ""))
+                    edge = OrchestrationEdge(
+                        path_id=path_id,
+                        source_function=last_read_entry["func"],
+                        source_signature=last_read_entry.get("signature", ""),
+                        source_func_id=src_rec.func_id if src_rec else "",
+                        target_function=func,
+                        target_signature=d.get("signature", ""),
+                        target_func_id=tgt_rec.func_id if tgt_rec else "",
+                        taint_params=TaintParamInfo(),
+                        depth=depth, edge_order=depth, status="done")
+                    try:
+                        store.upsert_edge(edge)
+                        edge_count += 1
+                    except Exception:
+                        logger.debug("upsert_edge failed for %s->%s", last_read_entry["func"], func, exc_info=True)
+                    depth += 1
+                last_read_func = func
+                last_read_entry = d
+            elif via == "grep_function" and last_read_entry:
+                # grep 的 matched_funcs 从上一个读过的函数分叉
+                for mf in (d.get("matched_funcs") or []):
+                    if not isinstance(mf, str) or mf.startswith("<global:"):
+                        continue  # 跳过非函数 (全局代码)
+                    if mf == last_read_entry["func"]:
+                        continue  # 跳过自引用
+                    tgt_rec = store.find_function(mf, "")
+                    edge = OrchestrationEdge(
+                        path_id=path_id,
+                        source_function=last_read_entry["func"],
+                        source_signature=last_read_entry.get("signature", ""),
+                        source_func_id=store.find_function(last_read_entry["func"], last_read_entry.get("file", "")).func_id if store.find_function(last_read_entry["func"], last_read_entry.get("file", "")) else "",
+                        target_function=mf,
+                        target_signature=tgt_rec.signature if tgt_rec else "",
+                        target_func_id=tgt_rec.func_id if tgt_rec else "",
+                        taint_params=TaintParamInfo(),
+                        depth=depth, edge_order=depth, status="pending")
+                    try:
+                        store.upsert_edge(edge)
+                        edge_count += 1
+                    except Exception:
+                        logger.debug("upsert_edge failed for grep %s->%s", last_read_entry["func"], mf, exc_info=True)
+                    depth += 1
+        self._emit("v2_autonomous_call_tree", edges=edge_count)
 
     def _resume_prompt(self, run_dir: Path, rnd: int) -> str:
         """构造续探 prompt: 注入已探索路径 + pending_branches。"""

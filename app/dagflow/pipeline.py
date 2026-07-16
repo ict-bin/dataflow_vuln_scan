@@ -56,32 +56,34 @@ class FuncIndex:
             conn.close()
 
     def _ondemand(self, name: str):
-        """按需: 用 function_extractor 在已知文件里搜该函数 (写 functions.db)。"""
+        """按需: 逐个文件 extract 直到函数被索引 (.h 只有声明, .c 才有定义)。"""
         if self._v2_store is None:
             return None
         from ..dataflow_v2.function_extractor import find_func_in_source, extract_file_functions
         hits = find_func_in_source(name, self.source_root)
         if not hits:
             return None
+        import sqlite3
         for rel_file, _ in hits:
             try:
                 extract_file_functions(self.source_root, rel_file, self._v2_store)
             except Exception as e:
                 logger.debug("ondemand extract %s failed: %s", rel_file, e)
-            return None
-        # 再查
-        import sqlite3
-        conn = sqlite3.connect(str(self.db))
-        conn.row_factory = sqlite3.Row
-        try:
-            rows = conn.execute(
-                "SELECT func_id,file,name,signature,start_line,end_line,description "
-                "FROM functions WHERE name=?", (name,)).fetchall()
-            return self._row_to_rec(rows[0]) if rows else None
-        except sqlite3.Error:
-            return None
-        finally:
-            conn.close()
+                continue
+            # 每个 extract 后查一次
+            conn = sqlite3.connect(str(self.db))
+            conn.row_factory = sqlite3.Row
+            try:
+                rows = conn.execute(
+                    "SELECT func_id,file,name,signature,start_line,end_line,description "
+                    "FROM functions WHERE name=?", (name,)).fetchall()
+                if rows:
+                    return self._row_to_rec(rows[0])
+            except sqlite3.Error:
+                pass
+            finally:
+                conn.close()
+        return None  # 所有文件都试过, 仍未索引
 
     @staticmethod
     def _row_to_rec(r):
@@ -165,6 +167,20 @@ class DagflowPipeline:
 
         try:
             self._emit("task_start", task_id=task_id)
+            # 诊断: 写 cfg 关键字段到 NFS
+            try:
+                from pathlib import Path as _P
+                _diag = nfs_run / "dagflow_diag.txt"
+                _diag.write_text(
+                    f"cwd={getattr(self.config, 'cwd', '?')}\n"
+                    f"source_file={getattr(self.config, 'source_file', '?')}\n"
+                    f"function_name={getattr(self.config, 'function_name', '?')}\n"
+                    f"source_root={self.source_root}\n"
+                    f"agents={len(getattr(self.config.workers, 'agents', []))}\n"
+                    f"agent_model={self.config.workers.agents[0].model if self.config.workers.agents else 'NONE'}\n"
+                    f"feature_flags={getattr(self.config, 'feature_flags', {})}\n", encoding='utf-8')
+            except Exception as e:
+                logger.warning("diag write failed: %s", e)
 
             # ── 阶段 1: taint 跟踪 ──
             logger.info("[dagflow] PHASE 1 START: taint tracking, root=%s", root_name)
@@ -174,9 +190,19 @@ class DagflowPipeline:
 
             def analyze_fn(func, taint_sig, depth=0):
                 analyzer._cur_depth = depth
-                dag, _sp = analyzer.analyze(func, taint_sig, is_auto=(taint_sig == "auto"))
-                fill_lines(dag, func, self.source_root)
-                return dag
+                try:
+                    dag, _sp = analyzer.analyze(func, taint_sig, is_auto=(taint_sig == "auto"))
+                    fill_lines(dag, func, self.source_root)
+                    return dag
+                except Exception as e:
+                    import traceback
+                    from pathlib import Path as _P
+                    _elog = nfs_run / "dagflow_analyze_errors.txt"
+                    with open(_elog, "a", encoding="utf-8") as _f:
+                        _f.write(f"=== analyze_fn FAILED func={func.name} taint={taint_sig} depth={depth} ===\n")
+                        _f.write(traceback.format_exc())
+                        _f.write("\n")
+                    raise
 
             # tracker reader_finder/function_resolver: LLM+v2_db 找读者/解析间接 (生产实现)
             from .reader_finder import ReaderFinder

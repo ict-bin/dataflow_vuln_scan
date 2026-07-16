@@ -69,9 +69,9 @@ class DagflowOrchestrator:
             self._emit_followups(dag, caller_func_id=item.origin_func, depth=item.depth, func_name=fname)
 
     def _analyze_or_replay(self, func_id: str, taint: str, depth: int = 0) -> tuple[TaintDAG | None, bool, str]:
-        """(func, taint): 未分析 -> analyze
+        """(func, taint): 未分析 -> analyze (产 DAG+存); 已分析 -> 加载已存 DAG (重放)。返回 (dag, is_fresh, func_name)。"""
         import time as _time
-        _t0 = _time.time() (产 DAG+存); 已分析 -> 加载已存 DAG (重放)。返回 (dag, is_fresh, func_name)。"""
+        _t0 = _time.time()
         if should_skip(self.store, func_id, taint):
             return self.store.load_dag(func_id, taint), False, ""
         if not reserve_or_skip(self.store, func_id, taint):

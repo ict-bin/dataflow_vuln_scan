@@ -623,12 +623,12 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
     # ── prompt 构造 ─────────────────────────────────────────────────────────
     def _infer_external_callees(self, external_props: list, func: FunctionRecord) -> dict:
         """批量 LLM 推断外部函数语义 (一次调用)。
-        _t0 = time.time()
-        _names = [p.target_function for p in external_props]
-        logger.info("[V2-infer-ext] START func=%s callees=%s count=%d", func.name, _names, len(_names))
 
         返回 {function_name: {inferable, return_taint, propagation, validation}}
         """
+        _t0 = time.time()
+        _names = [p.target_function for p in external_props]
+        logger.info("[V2-infer-ext] START func=%s callees=%s count=%d", func.name, _names, len(_names))
         acfg = self.cfg.workers.agents[0] if self.cfg.workers.agents else None
         if acfg is None:
             return {}
@@ -738,12 +738,12 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
     def mine_vulns(self, store: DataflowStore, func: FunctionRecord,
                    taint_params: TaintParamInfo, ctx: PathContext,
                    base_session: str = "") -> int:
-        """fork 漏洞挖掘会话
+        """fork 漏洞挖掘会话: 继承链 session (base_session, v1 模型 fork-from-parent),
+        再提示分析本函数内的漏洞。存 finding + 上报 intake。"""
         _t0 = time.time()
         logger.info("[V2-mine] START func=%s::%s taint=%s thinking=%s",
                     func.file, func.name, taint_params.signature,
-                    getattr(self.cfg, "vuln_mining_thinking_level", "high")): 继承链 session (base_session, v1 模型 fork-from-parent),
-        再提示分析本函数内的漏洞。存 finding + 上报 intake。"""
+                    getattr(self.cfg, "vuln_mining_thinking_level", "high"))
         acfg = self.cfg.workers.agents[0] if self.cfg.workers.agents else None
         if acfg is None:
             return 0
