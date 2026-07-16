@@ -59,6 +59,8 @@ class DagflowOrchestrator:
     def _process(self, item: WorkItem) -> None:
         """消费一项: callee/return_taint -> analyze/replay + 发下游; escape/indirect -> stub。
         重放(已分析)不发下游 (首次分析已发+去重, 重放重发冗余刷屏)。"""
+        logger.info("process item: kind=%s target=%s taint=%s depth=%d origin=%s",
+                    item.kind, item.target_func[:10] if item.target_func else "", item.target_taint, item.depth, item.origin_func[:10] if item.origin_func else "")
         if item.kind in ("escape_track", "indirect_track"):
             self._track_stub(item)
             return
@@ -136,24 +138,27 @@ class DagflowOrchestrator:
         校验 param 是 callee 真实形参 (据签名); 不匹配的跳过 (防 LLM 臆造形参名)。"""
         # sink_ref 可能是限定名/指针表达式 (间接); 间接 -> indirect_track
         if e.sink_ref and ("->" in e.sink_ref or e.sink_ref.startswith("(") or "*" in e.sink_ref):
+            logger.info("emit indirect_track: func=%s sink_ref=%s depth=%d", dag.func_id[:10], e.sink_ref, depth)
             self._wq.put(WorkItem(kind="indirect_track", origin_func=dag.func_id,
                                   origin_node=node.id, depth=depth,
                                   origin_edge=f"{node.id}->{e.to_node}"))
             return
         callee = self.func_lookup(e.sink_ref)
         if callee is None:
-            logger.debug("callee not indexed: %s (on-demand 待 P5)", e.sink_ref)
+            logger.info("callee NOT indexed (skip): sink_ref=%s depth=%d — on-demand 未找到", e.sink_ref, depth)
             return
         # 校验 callee 真实形参名 (从 signature 提取)
         real_params = _extract_params(getattr(callee, "signature", ""))
         for pt in e.param_taints:
             param = str(pt.get("param", "")).strip()
             if not param or param.startswith("("):
-                continue  # 间接/未解析的形参跳过
+                continue
             if real_params and param not in real_params:
                 logger.warning("callee %s 形参 %r 不在签名 %r (LLM 臆造? 跳过该项)",
                                e.sink_ref, param, getattr(callee, "signature", "")[:60])
                 continue
+            logger.info("emit callee item: target=%s taint=%s param=%s depth=%d",
+                        callee.func_id[:10], param, param, depth + 1)
             self._wq.put(WorkItem(kind="callee", target_func=callee.func_id,
                                   target_taint=param, origin_func=dag.func_id,
                                   origin_node=node.id, depth=depth + 1,

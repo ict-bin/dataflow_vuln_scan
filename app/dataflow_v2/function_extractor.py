@@ -398,10 +398,10 @@ def find_func_in_source(name: str, src_root) -> list[tuple[str, str]]:
     pattern = rf'\b{re.escape(name)}\s*\('
     try:
         r = subprocess.run(
-            ["grep", "-rl",
+            ["/usr/bin/grep", "-rl", "-E",
              "--include=*.c", "--include=*.cpp", "--include=*.cc", "--include=*.cxx",
              "--include=*.h", "--include=*.hpp", "--include=*.hxx",
-             "-E", pattern, str(src_root)],
+             pattern, str(src_root)],
             capture_output=True, text=True, timeout=15)
         results: list[tuple[str, str]] = []
         for line in r.stdout.strip().split("\n"):

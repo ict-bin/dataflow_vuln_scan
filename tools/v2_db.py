@@ -97,7 +97,7 @@ def _find_func_in_source_v2db(name: str, src_root: Path) -> list[tuple[str, str]
     pattern = rf'\b{re.escape(name)}\s*\('
     try:
         r = subprocess.run(
-            ["grep", "-rl", "-E", "--include=*.c", "--include=*.cpp", "--include=*.cc",
+            ["/usr/bin/grep", "-rl", "-E", "--include=*.c", "--include=*.cpp", "--include=*.cc",
              "--include=*.h", "--include=*.hpp", "--include=*.hxx",
              pattern, str(src_root)],
             capture_output=True, text=True, timeout=15)
@@ -208,7 +208,7 @@ def _print_prefix_candidates(name: str, src_root) -> None:
         try:
             pat = _re.escape(name)
             r = subprocess.run(
-                ["grep", "-rl", "-E", rf"\b{pat}",
+                ["/usr/bin/grep", "-rl", "-E", rf"\b{pat}",
                  "--include=*.c", "--include=*.cpp", "--include=*.cc", "--include=*.cxx",
                  "--include=*.h", "--include=*.hpp", "--include=*.hxx", str(src_root)],
                 capture_output=True, text=True, timeout=20)
