@@ -194,8 +194,8 @@ def _print_prefix_candidates(name: str, src_root) -> None:
     """精确未找到时: 按前缀/包含查候选函数名, 返回给 LLM 用全名再查。
 
     修: LLM 常传截断名 (如 _dns_server_resolve_callback_reply_p 缺 assthrough),
-    精确匹配 (grep \bname\s*\( + SQL name=?) 漏 → NOT_FOUND, LLM 又得改用 raw grep 找。
-    现在前缀匹配: SQL name LIKE 'name%' + 源码 grep \bname (不需 \s*\() 索引候选 →
+    精确匹配 (grep \\bname\\s*\\( + SQL name=?) 漏 → NOT_FOUND, LLM 又得改用 raw grep 找。
+    现在前缀匹配: SQL name LIKE 'name%' + 源码 grep \\bname (不需 \\s*\\() 索引候选 →
     返回候选函数名清单, LLM 用全名再 lookup。不再直接 NOT_FOUND。
     """
     import subprocess, re as _re
@@ -203,7 +203,7 @@ def _print_prefix_candidates(name: str, src_root) -> None:
     # 1) db 前缀/包含匹配
     cands = _query("functions.db", "SELECT name, file, start_line, end_line FROM functions WHERE name LIKE ? OR name LIKE ? ORDER BY length(name) LIMIT 20",
                    (f"{name}%", f"%{name}%"))
-    # 2) db 无候选 → 源码前缀 grep (\bname 不需 \s*\(, 拓宽) + 增量索引
+    # 2) db 无候选 → 源码前缀 grep (\\bname 不需 \\s*\\(, 拓宽) + 增量索引
     if not cands:
         try:
             pat = _re.escape(name)
