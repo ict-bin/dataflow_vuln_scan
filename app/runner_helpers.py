@@ -496,10 +496,17 @@ def _build_agent_env(
     merged.setdefault("TMPDIR", os.path.join(cwd, "tmp"))
     if task_context:
         merged["DVS_TASK_CONTEXT"] = json.dumps(task_context, ensure_ascii=False)
-    # Prepend restricted tool wrappers to PATH — find/grep 只能在源码目录内搜索
+    # Prepend venv bin (so python3 resolves to venv with tree-sitter installed)
+    # then restricted tool wrappers (find/grep 只能在源码目录内搜索)
     _wrapper_dir = "/opt/dataflow_vuln_scan/bin/restricted"
+    _venv_bin = "/opt/venv/bin"
+    _prepend = []
+    if os.path.isdir(_venv_bin) and _venv_bin not in (merged.get("PATH", "")):
+        _prepend.append(_venv_bin)
     if os.path.isdir(_wrapper_dir):
-        merged["PATH"] = _wrapper_dir + ":" + merged.get("PATH", "")
+        _prepend.append(_wrapper_dir)
+    if _prepend:
+        merged["PATH"] = ":".join(_prepend) + ":" + merged.get("PATH", "")
     return merged
 
 

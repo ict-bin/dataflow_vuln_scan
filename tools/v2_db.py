@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/opt/venv/bin/python3
 """v2_db — V2 数据流数据库查询工具 (供 LLM 通过 bash 调用)
 
 用法:
