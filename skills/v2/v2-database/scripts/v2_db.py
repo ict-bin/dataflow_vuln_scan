@@ -229,13 +229,13 @@ def _print_prefix_candidates(name: str, src_root) -> None:
         for c in cands:
             print(f"  - {c['name']} ({c['file']} 行 {c['start_line']}-{c['end_line']})")
     else:
-        print(f"NOT_FOUND: 函数 '{name}' 在源码树中未找到。该函数可能是外部库函数或系统 API，定义不在当前源码树中，不需要查找其源码。")
+        print(f"NOT_FOUND: 函数 '{name}' 在源码树中未找到。该函数可能是外部库函数或系统 API，定义不在当前源码树中，请根据函数名称猜测该函数的功能，禁止查找其源码。")
 
 
 def cmd_taints(name: str) -> None:
     func = _find_func(name)
     if not func:
-        print(f"NOT_FOUND: 函数 '{name}' 不在数据库中。该函数可能是外部库函数或系统 API，定义不在当前源码树中，不需要查找其源码。")
+        print(f"NOT_FOUND: 函数 '{name}' 不在数据库中。该函数可能是外部库函数或系统 API，定义不在当前源码树中，请根据函数名称猜测该函数的功能，禁止查找其源码。")
         return
     rows = _query("taints.db", "SELECT * FROM taints WHERE func_id = ?", (func["func_id"],))
     if not rows:
