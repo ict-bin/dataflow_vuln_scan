@@ -26,6 +26,11 @@ from .store import DataflowStore
 logger = logging.getLogger("dvs.dataflow_v2.autonomous")
 
 
+class _PiKilledExternally(Exception):
+    """pi 被外部杀 (SIGTERM=143 等) — raise 让 celery 失败, 任务留 running, stale-reset 回 pending 重派。"""
+    pass
+
+
 class AutonomousRunner:
     """自主模式执行器, 对外接口与 DataflowV2Runner 兼容 (execute_recursive)。"""
 
@@ -185,6 +190,11 @@ class AutonomousRunner:
                 if self._cancel_event is not None and self._cancel_event.is_set():
                     status, err_msg = TaskStatus.FAILED, "autonomous: cancelled"
                     break
+                # 检测 pi 异常退出 (SIGTERM=143 被 pod rollout/worker 重启杀, 非零=崩溃)
+                # 不当正常完成 pass — raise 让 celery 失败 → 任务留 running → stale-reset → pending → 重派
+                if _ec is not None and _ec not in (0, 1) and not _co:
+                    self._emit("v2_autonomous_pi_killed", round=rnd, exit_code=_ec, error=str(_err)[:200])
+                    raise _PiKilledExternally(f"pi exited abnormally (exit_code={_ec}), likely pod rollout/worker restart")
                 # 读 checkpoint
                 ck = self._read_checkpoint(shared_run_dir)
                 self._emit("v2_autonomous_checkpoint", round=rnd, checkpoint=ck)
@@ -206,6 +216,8 @@ class AutonomousRunner:
             # 任务完成: 输出探索路径 + 剩余 pending
             self._emit("v2_autonomous_done", round=rnd if 'rnd' in dir() else 0,
                         path_steps=self._count_path(shared_run_dir))
+        except _PiKilledExternally:
+            raise  # re-raise: 让 celery 失败 → 任务留 running → stale-reset → pending → 重派
         except Exception as exc:
             logger.exception("autonomous runner failed")
             status, err_msg = TaskStatus.ERROR, str(exc)
