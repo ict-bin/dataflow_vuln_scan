@@ -81,7 +81,7 @@ class DagflowOrchestrator:
         if func is None:
             logger.warning("func not found for func_id=%s, release reserve", func_id[:10])
             release_on_failure(self.store, func_id, taint)
-            return None
+            return None, False, ""
         # 发标准 trace_start 事件 (dispatcher 卡死检测/前端进度都认这个)
         if self.on_event:
             try:
@@ -97,7 +97,7 @@ class DagflowOrchestrator:
         except Exception as e:
             logger.exception("analyze failed func=%s taint=%s: %s", getattr(func, "name", "?"), taint, e)
             release_on_failure(self.store, func_id, taint)
-            return None
+            return None, False, ""
         self.store.save_dag(dag)
         if self.on_event:
             try:

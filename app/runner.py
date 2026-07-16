@@ -382,7 +382,7 @@ def run_agent(
         # 重试 (attempt>1) 用 retry_prompt 而非原始 prompt (自主模式: 续探而非重发 entry)
         _eff_prompt = (retry_prompt or prompt) if _attempt > 1 else prompt
         try:
-            return _run_with_context_overflow_recovery(
+            result = _run_with_context_overflow_recovery(
                 pi_cmd=pi_cmd, args=args, prompt=_eff_prompt,
                 system_prompt=system_prompt, post_skill_prompt=post_skill_prompt,
                 model=model, tools=tools, thinking_level=thinking_level,
@@ -395,6 +395,10 @@ def run_agent(
                 runtime_dir=str(task_context.get("task_pi_dir") or "").strip() or None,
                 retry_prompt=retry_prompt,
             )
+            logger.info("run_agent DONE model=%s session=%s duration=%.1fs exit=%s output_len=%d error=%s",
+                        model, _func_hint, time.time() - _run_start, result.exit_code,
+                        len(result.output or ""), (result.error or "")[:100])
+            return result
         except TimeoutError:
             timeout_failures += 1
             logger.warning("run_agent TIMEOUT model=%s session=%s attempt=%d timeout=%.0fs — will retry",
@@ -409,6 +413,8 @@ def run_agent(
                 timeout_max_retries < 0 or timeout_failures <= timeout_max_retries
             )
             if not can_retry or (cancel_event and cancel_event.is_set()):
+                logger.warning("run_agent TIMEOUT-EXHAUSTED model=%s session=%s duration=%.1fs",
+                             model, _func_hint, time.time() - _run_start)
                 return r
             delay = _backoff(retry_delay, timeout_failures)
             if on_stream:
@@ -418,6 +424,8 @@ def run_agent(
                 )
             if _sleep_with_cancel(delay, cancel_event):
                 r.error = "cancelled during timeout backoff"
+                logger.warning("run_agent CANCELLED model=%s session=%s duration=%.1fs",
+                             model, _func_hint, time.time() - _run_start)
                 return r
 
 
@@ -901,13 +909,8 @@ def _run_with_api_retry(
                     continue
             _log_warn(f"pi exit code {result.exit_code} (has output, not retrying): {result.error[:200]}")
 
-        _dur = time.time() - _run_start
-        logger.info("run_agent DONE model=%s session=%s duration=%.1fs exit=%s output_len=%d error=%s",
-                    model, _func_hint, _dur, result.exit_code, len(result.output or ""), (result.error or "")[:100])
-        return result
 
-
-# ─── JSON Lines parsing ───────────────────────────────────────────────────────
+# ─── JSON Lines parsing ───────────────────────────────────────────────────────────────
 
 def _process_line(
     line: str,
