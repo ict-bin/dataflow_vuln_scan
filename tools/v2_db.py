@@ -155,108 +155,132 @@ def _log_trajectory(func: dict, query: str) -> None:
         pass
 
 
+def _print_function_result(name, file, start_line, end_line, signature, body):
+    """打印函数查询结果。"""
+    print(f"function: {name}")
+    print(f"file: {file}")
+    print(f"lines: {start_line}-{end_line}")
+    print(f"signature: {signature}")
+    print(f"description:")
+    print(f"---")
+    print(body)
+
+
+def _read_body_from_source(src_root, rel_file, start_line, end_line):
+    """从源文件按行号读函数体。"""
+    src_path = Path(src_root) / rel_file
+    if not src_path.is_file():
+        return ""
+    lines = src_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    return "\n".join(lines[max(0, start_line-1):min(len(lines), end_line)])
+
+
+def _async_index_file(src_root, rel_file, db_dir):
+    """异步入库: 后台线程执行 ensure_file_indexed。"""
+    import threading
+    def _do():
+        try:
+            sys.path.insert(0, os.environ.get("DVS_APP_DIR", "/opt/dataflow_vuln_scan"))
+            from app.dataflow_v2.function_extractor import ensure_file_indexed
+            from app.dataflow_v2.store import DataflowStore
+            store = DataflowStore(db_dir)
+            ensure_file_indexed(str(src_root), rel_file, store)
+            store.close()
+        except Exception as e:
+            log.warning("async index failed file=%s: %s", rel_file, e)
+    t = threading.Thread(target=_do, daemon=True, name=f"dvs-idx-{rel_file[-30:]}")
+    t.start()
+
+
 def cmd_lookup(name: str) -> None:
-    """查函数体: db 查 → 找不到 → grep 找文件 → tree-sitter 索引入库 → 返回。"""
+    """查函数体:
+    1. 查 DB -> 有就返回
+    2. grep 找到所有候选文件
+    3. 遍历每个文件:
+       a. 文件在索引中? -> tree-sitter 直接搜, 跳过 DB 写入
+       b. 文件在 DB 中? -> 函数不在该文件, skip
+       c. tree-sitter 解析 -> 搜函数定义 -> 找到 -> 返回 (异步入库)
+       d. 没找到 -> 继续 (异步入库)
+    """
     _t0 = time.time()
     log.info("lookup START name=%s db_dir=%s source_root=%s",
              name, os.environ.get("DVS_V2_DB_DIR", "(unset)"), os.environ.get("DVS_SOURCE_ROOT", "(unset)"))
 
+    # 1. 查 DB
     func = _find_func(name)
     if func:
-        log.info("db HIT name=%s func_id=%s file=%s lines=%s-%s",
-                 name, func.get("func_id", "")[:12], func.get("file", ""), func.get("start_line"), func.get("end_line"))
+        log.info("db HIT name=%s file=%s", name, func.get("file", ""))
         _log_trajectory(func, name)
         body = _read_body(func)
-        print(f"function: {func['name']}")
-        print(f"file: {func['file']}")
-        print(f"lines: {func['start_line']}-{func['end_line']}")
-        print(f"signature: {func['signature']}")
-        print(f"description: {func.get('description', '')}")
-        print(f"---")
-        print(body)
+        _print_function_result(func["name"], func["file"], func["start_line"],
+                              func["end_line"], func["signature"], body)
         return
 
-    log.info("db MISS name=%s — trying find_func_in_source", name)
+    log.info("db MISS name=%s", name)
 
-    # db 没找到 → 在源码树中搜索函数定义所在文件
+    # 2. grep 找到所有候选文件
     src_root = Path(_source_root())
     found = __import__("app.dataflow_v2.function_extractor", fromlist=["find_func_in_source"]).find_func_in_source(name, src_root)
-    log.info("find_func_in_source returned %d candidates: %s", len(found), [(f, n) for f, n in found[:5]])
+    log.info("find_func_in_source returned %d candidates", len(found))
     if not found:
-        # 精确源码搜未中 → 前缀候选 (LLM 截断名场景)
         _print_prefix_candidates(name, src_root)
         return
 
-    # find_func_in_source 返回 list[tuple[str,str]]; 索引每个候选文件后重查
-    db_dir = _db_dir()
+    db_dir = str(_db_dir())
     sys.path.insert(0, os.environ.get("DVS_APP_DIR", "/opt/dataflow_vuln_scan"))
-    try:
-        from app.dataflow_v2.function_extractor import ensure_file_indexed, extract_file_functions
-        from app.dataflow_v2.store import DataflowStore
-        store = DataflowStore(db_dir)
-        indexing_files = []  # 文件正在被另一进程索引
-        for rel_file, matched_name in found:
-            try:
-                log.info("indexing file=%s", rel_file)
-                status = ensure_file_indexed(str(src_root), rel_file, store)
-                if status == "indexing":
-                    log.info("file=%s is being indexed by another process, will do own extraction", rel_file)
-                    indexing_files.append(rel_file)
-            except Exception as e:
-                log.warning("index failed file=%s: %s", rel_file, e)
-                print(f"INDEX_ERROR: 索引文件 {rel_file} 失败: {e}")
-        store.close()
-    except Exception as e:
-        log.warning("index setup failed: %s", e)
-        print(f"INDEX_ERROR: 索引失败: {e}")
-        return
+    from app.dataflow_v2.function_extractor import find_function_in_file
 
-    # 再查 db
-    func = _find_func(name)
-    if func:
-        log.info("db HIT (after index) name=%s duration=%.2fs", name, time.time() - _t0)
-        _log_trajectory(func, name)
-        body = _read_body(func)
-        print(f"function: {func['name']}")
-        print(f"file: {func['file']}")
-        print(f"lines: {func['start_line']}-{func['end_line']}")
-        print(f"signature: {func['signature']}")
-        print(f"description: {func.get('description', '')}")
-        print(f"---")
-        print(body)
-        return
-    log.warning("db MISS (after index) name=%s duration=%.2fs", name, time.time() - _t0)
+    # 3. 遍历每个候选文件
+    for rel_file, _ in found:
+        # 3a. 文件是否在索引中?
+        try:
+            idx_rows = _query("functions.db", "SELECT 1 FROM indexing_files WHERE file_path=?", (rel_file,))
+            is_indexing = len(idx_rows) > 0
+        except Exception:
+            is_indexing = False
 
-    # DB 查不到 → 对所有候选文件用 tree-sitter 直接查找 (不依赖 DB)
-    all_candidate_files = list(set([f for f, _ in found] + indexing_files))
-    log.info("trying tree-sitter direct search for %d files", len(all_candidate_files))
-    try:
-        from app.dataflow_v2.function_extractor import find_function_in_file
-        for rel_file in all_candidate_files:
-            try:
-                result = find_function_in_file(str(src_root), rel_file, name)
-                if result:
-                    start_line, end_line, sig = result
-                    log.info("found via tree-sitter: name=%s file=%s lines=%s-%s",
-                             name, rel_file, start_line, end_line)
-                    src_path = Path(src_root) / rel_file
-                    if src_path.is_file():
-                        lines = src_path.read_text(encoding="utf-8", errors="replace").splitlines()
-                        body = "\n".join(lines[max(0, start_line-1):min(len(lines), end_line)])
-                        print(f"function: {name}")
-                        print(f"file: {rel_file}")
-                        print(f"lines: {start_line}-{end_line}")
-                        print(f"signature: {sig}")
-                        print(f"description:")
-                        print(f"---")
-                        print(body)
-                        return
-            except Exception as e:
-                log.warning("tree-sitter search failed file=%s: %s", rel_file, e)
-    except Exception as e:
-        log.warning("tree-sitter search setup failed: %s", e)
+        if is_indexing:
+            log.info("file=%s being indexed by another process, tree-sitter only", rel_file)
+            # 5. tree-sitter 直接搜 (不写 DB)
+            result = find_function_in_file(str(src_root), rel_file, name)
+            if result:
+                start_line, end_line, sig = result
+                log.info("found (indexing) name=%s file=%s lines=%s-%s", name, rel_file, start_line, end_line)
+                body = _read_body_from_source(src_root, rel_file, start_line, end_line)
+                _print_function_result(name, rel_file, start_line, end_line, sig, body)
+                return
+            # 6. 跳过异步入库 (另一进程在索引)
+            continue
 
-    # 精确未找到 → 前缀/模糊匹配候选
+        # 3b. 文件是否在 DB 中?
+        try:
+            db_rows = _query("functions.db", "SELECT 1 FROM functions WHERE file=? LIMIT 1", (rel_file,))
+            in_db = len(db_rows) > 0
+        except Exception:
+            in_db = False
+
+        if in_db:
+            log.info("file=%s already in DB, function not here, skip", rel_file)
+            continue  # 函数定义不在该文件
+
+        # 5. tree-sitter 解析文件, 搜函数定义
+        log.info("tree-sitter search file=%s", rel_file)
+        result = find_function_in_file(str(src_root), rel_file, name)
+        if result:
+            start_line, end_line, sig = result
+            log.info("found name=%s file=%s lines=%s-%s duration=%.2fs",
+                     name, rel_file, start_line, end_line, time.time() - _t0)
+            body = _read_body_from_source(src_root, rel_file, start_line, end_line)
+            _print_function_result(name, rel_file, start_line, end_line, sig, body)
+            # 6. 异步入库 (不阻塞返回)
+            _async_index_file(str(src_root), rel_file, db_dir)
+            return
+
+        # 没找到, 继续, 异步入库
+        _async_index_file(str(src_root), rel_file, db_dir)
+
+    # 所有文件都搜完, 未找到
+    log.warning("NOT_FOUND name=%s duration=%.2fs", name, time.time() - _t0)
     _print_prefix_candidates(name, src_root)
 
 
