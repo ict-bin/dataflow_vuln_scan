@@ -81,6 +81,26 @@
 - `taints`：沿边传播的污点签名列表。
 - `param_taints`：仅 callee/source 边，callee 形参 ← caller 污点 映射。
 
+## escape / indirect / source 识别强化（必须检查，漏报导致 tracker 不跑 + 漏洞漏报）
+
+### source 边（被动输入）— 务必识别
+网络/IO 函数把外部数据写入 buffer，buffer 变污点源：
+- `recv(sock, buf, n)` / `recvmsg(sock, &msg, 0)` / `read(fd, buf, n)` / `accept(...)` → buf/msg 是 source（is_source=true），`kind=source`，`sink_ref=recv/read/accept`，`param_taints=[{param: buf, taint: buf}]`。
+- `getenv()` / `fgets()` / `fread()` 返回值是 source。
+- **宁可多报不可漏报**：任何从外部（网络/文件/环境/IPC）获取数据的调用都是 source。
+
+### escape 边（extern/container）— 务必识别
+污点流出本函数作用域：
+- 污点赋给**全局/静态变量**（`g_cache = t`）→ `kind=extern, escape_subkind=global, sink_ref=g_cache`。
+- 污点写入**入参指针的字段**（`ctx->out = t`）→ `kind=extern, escape_subkind=field_alias, carrier=ctx, sink_ref=ctx->out`。
+- 污点写入**堆对象后挂入容器**（`p->data=t; enqueue(p, &head->q)`）→ `kind=container, escape_subkind=container, carrier=p, escape_via=enqueue, sink_ref=head->q`。
+- **检查每个被污变量是否流出**：赋给全局/入参字段/容器 → 报 escape 边。escape 不清洗污点（同一污点可继续传播到其他 sink）。
+
+### indirect 调用 — 务必识别
+经函数指针/回调/dispatch 调用：
+- `(*fp)(t)` / `obj->handler(t)` / `ctxt->sax->fn(t)` → `kind=callee, sink_ref=fp`/`obj->handler`/`ctxt->sax->fn`（填**指针表达式**，非函数名）。tracker 会解析真实函数。
+- **不要把间接调用标为 extern**。
+
 ## self_contained
 true=本函数自身存在 sink（memcpy/strcpy/system/exec/deref/free-use/escape/return-to-boundary 等本函数即触发点）；false=中转/转发无自身 sink。不确定取 false。
 

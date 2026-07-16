@@ -128,16 +128,20 @@ class DagflowPipeline:
         from ..vuln_store import VulnScanStore
         from ..dataflow_v2.function_extractor import extract_file_functions
 
-        run_dir = Path(_root_out_dir or (Path(self.source_root) / "run"))
-        store = DagflowStore(run_dir)
-        sessions_dir = run_dir / "sessions"
-        functions_db = run_dir / "dataflow-v2" / "functions.db"  # 共享 functions.db
-        (run_dir / "dataflow-v2").mkdir(parents=True, exist_ok=True)
+        # _root_out_dir = epoch /tmp 路径 (symlink -> /tmp, 随 pod 消失)。
+        # dagflow.db + vuln-scan.sqlite 放 NFS (持久, run/ 下), sessions/functions.db 留 epoch (与 V2 一致)。
+        epoch_dir = Path(_root_out_dir or (Path(self.source_root) / "run"))
+        # NFS run/ = epoch_dir.parent.parent (run/epochs/00NN -> run/epochs -> run/)
+        nfs_run = epoch_dir.parent.parent if epoch_dir.name != "run" else epoch_dir
+        store = DagflowStore(nfs_run)  # dagflow.db -> run/dagflow/ (NFS, 持久)
+        sessions_dir = epoch_dir / "sessions"  # sessions -> epoch /tmp (与 V2 一致, 大文件 ephemeral)
+        functions_db = epoch_dir / "dataflow-v2" / "functions.db"  # functions.db -> epoch (重建, 与 V2 一致)
+        (epoch_dir / "dataflow-v2").mkdir(parents=True, exist_ok=True)
         # V2 DataflowStore 用于 function_extractor 按需索引 (共享, 不用其模式逻辑)
         v2_store = None
         try:
             from ..dataflow_v2.store import DataflowStore
-            v2_store = DataflowStore(run_dir / "dataflow-v2")
+            v2_store = DataflowStore(epoch_dir / "dataflow-v2")
         except Exception:
             pass
         func_index = FuncIndex(self.source_root, functions_db, v2_store)
@@ -205,7 +209,7 @@ class DagflowPipeline:
                            root=root_name, task_id=task_id)
 
             # ── 阶段 2: 挖掘 (传出点就绪的 (func,taint)) ──
-            vuln_db = run_dir / "vuln-scan.sqlite"
+            vuln_db = nfs_run / "vuln-scan.sqlite"  # findings -> NFS (持久, 产出不随 pod 丢)
             vuln_store = VulnScanStore(vuln_db)
             miner = MiningAgent(config=self.config, store=store, sessions_dir=sessions_dir,
                                 vuln_store=vuln_store, run_id=task_id,
