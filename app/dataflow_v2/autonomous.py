@@ -187,6 +187,16 @@ class AutonomousRunner:
                 # 读 checkpoint
                 ck = self._read_checkpoint(shared_run_dir)
                 self._emit("v2_autonomous_checkpoint", round=rnd, checkpoint=ck)
+                # Q2 诊断: checkpoint 决策日志
+                _cont = ck.get("continue")
+                _pend = len(ck.get("pending_branches") or [])
+                _will_break = (not _cont) and (_pend == 0)
+                self._emit("v2_autonomous_q2_decision", round=rnd,
+                           continue_val=str(_cont), pending_count=_pend,
+                           will_break=_will_break)
+                import sys as _sys2
+                _sys2.stderr.write(f"Q2DBG round={rnd} continue={_cont} pending={_pend} will_break={_will_break}\n")
+                _sys2.stderr.flush()
                 if not ck:
                     break  # 无 checkpoint (异常)
                 # Q2: agent 说不继续 BUT 有 pending_branches -> 仍续探 (不盲从 continue=false)
@@ -275,6 +285,10 @@ class AutonomousRunner:
         ck = self._read_checkpoint(run_dir)
         pending = ck.get("pending_branches") or []
         if not pending:
+            self._emit("v2_autonomous_resume_empty", round=rnd, reason="no pending_branches", ck_keys=list(ck.keys()))
+            import sys as _sys3
+            _sys3.stderr.write(f"RESUMEDBG round={rnd} empty: ck_keys={list(ck.keys())}\n")
+            _sys3.stderr.flush()
             return ""
         path_lines = self._read_path_render(run_dir, limit=60)
         pend_text = "\n".join(

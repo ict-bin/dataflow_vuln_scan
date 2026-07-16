@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/opt/venv/bin/python
 """自主模式服务工具: report_finding '<finding JSON>'
 
 LLM 发现漏洞即调 → 即写即包 (与完整模式 mine_vulns 同格式: vuln-scan.sqlite +

@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/opt/venv/bin/python
 """自主模式服务工具: grep_function <pattern> [-n N]
 
 搜源码, 返回**包含该 pattern 的函数名清单**(不返回函数体)。

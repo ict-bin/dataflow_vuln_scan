@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/opt/venv/bin/python
 """自主模式服务工具: read_function <name|file:line>
 
 读函数体 + 记录探索轨迹 (trajectory) + 新文件增量建库。

@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/opt/venv/bin/python
 """自主模式服务工具: checkpoint '<JSON>'
 
 LLM 结束一轮探索时调 → 写 checkpoint.json (pending_branches + continue + stop_reason)。
