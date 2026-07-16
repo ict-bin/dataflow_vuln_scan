@@ -61,10 +61,14 @@ class TaintAnalyzer:
         from ..dataflow_v2.function_extractor import read_function_body
         from ..runner import run_agent
         from ..parsers import _extract_json_object
+        import time as _time
+        _t0 = _time.time()
         body = read_function_body(self.source_root, func, max_lines=0)  # 全函数体 (不截断, 防 LLM read 补读)
         prompt, sp = self._build_prompt(func, body, taint_sig, is_auto)
         v2_env = {"DVS_SOURCE_ROOT": str(self.source_root),
                   "DVS_V2_DB_DIR": str(self.sessions_dir.parent / "dataflow-v2")}
+        logger.info("[dagflow-taint] CALLING run_agent func=%s taint=%s session=%s",
+                    func.name, taint_sig, sp[-60:])
         output = run_agent(
             prompt=prompt, model=self._acfg.model,
             tools=self._acfg.tools or self._default_tools or [],
@@ -89,6 +93,8 @@ class TaintAnalyzer:
         parsed["func_id"] = func.func_id
         parsed["taint_signature"] = taint_sig or "auto"
         dag = TaintDAG.from_dict(parsed)
+        logger.info("[dagflow-taint] DONE func=%s taint=%s duration=%.1fs error=%s output_len=%d",
+                    func.name, taint_sig, _time.time() - _t0, (output.error or "")[:100], len(output.output or ""))
         if self.on_event:
             try:
                 self.on_event("v2_dagflow_taint_done", function=func.name, taint=taint_sig,

@@ -185,6 +185,9 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
     def analyze_function(self, store: DataflowStore, func: FunctionRecord,
                          taint_params: TaintParamInfo, pre_validations: list[Validation],
                          base_session: str, ctx: PathContext) -> AnalysisResult:
+        _t0 = time.time()
+        logger.info("[V2-taint] START func=%s::%s taint=%s depth=%d",
+                    func.file, func.name, taint_params.signature, getattr(ctx, "depth", 0))
         # 1) 确保文件已索引 (函数体在 run/functions/)
         ensure_file_indexed(self.source_root, func.file, store)
         body = self._read_body(func)
@@ -331,6 +334,9 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
 
         # taint 分析失败时跳过后续 mining — 无污点分析结果, 挖掘无意义
         taint_failed = bool(parse_warn)
+        logger.info("[V2-taint] DONE func=%s::%s duration=%.1fs taint_failed=%s self_contained=%s propagations=%d",
+                    func.file, func.name, time.time() - _t0, taint_failed, parsed.get("self_contained", False),
+                    len(parsed.get("propagations") or []))
         return self._build_result(store, func, taint_params, parsed, fork_session, body, taint_failed=taint_failed)
 
     # ── 结果构造 + clang 标注 ───────────────────────────────────────────────
@@ -616,6 +622,9 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
     # ── prompt 构造 ─────────────────────────────────────────────────────────
     def _infer_external_callees(self, external_props: list, func: FunctionRecord) -> dict:
         """批量 LLM 推断外部函数语义 (一次调用)。
+        _t0 = time.time()
+        _names = [p.target_function for p in external_props]
+        logger.info("[V2-infer-ext] START func=%s callees=%s count=%d", func.name, _names, len(_names))
 
         返回 {function_name: {inferable, return_taint, propagation, validation}}
         """
@@ -640,6 +649,7 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
             '输出格式: ```json\n[{"function": "...", ...}, ...]\n```'
         )
         # 用 fresh session (不继承 taint 分析上下文)
+        logger.info("[V2-infer-ext] CALLING run_agent (no-session, timeout=%ss)", self.cfg.agent_run_timeout_seconds)
         result = run_agent(
             prompt=prompt, model=acfg.model,
             tools=acfg.tools or self.cfg.workers.default_tools,
@@ -654,6 +664,8 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
             timeout_max_retries=self.cfg.agent_timeout_max_retries,
             pi_max_retries=self.cfg.pi_max_retries, pi_retry_delay=self.cfg.pi_retry_delay,
         )
+        logger.info("[V2-infer-ext] DONE func=%s duration=%.1fs error=%s output_len=%d",
+                    func.name, time.time() - _t0, (result.error or "")[:100], len(result.output or ""))
         # 解析 JSON 数组
         from ..parsers import _extract_json_object
         text = result.output or ""
@@ -725,7 +737,11 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
     def mine_vulns(self, store: DataflowStore, func: FunctionRecord,
                    taint_params: TaintParamInfo, ctx: PathContext,
                    base_session: str = "") -> int:
-        """fork 漏洞挖掘会话: 继承链 session (base_session, v1 模型 fork-from-parent),
+        """fork 漏洞挖掘会话
+        _t0 = time.time()
+        logger.info("[V2-mine] START func=%s::%s taint=%s thinking=%s",
+                    func.file, func.name, taint_params.signature,
+                    getattr(self.cfg, "vuln_mining_thinking_level", "high")): 继承链 session (base_session, v1 模型 fork-from-parent),
         再提示分析本函数内的漏洞。存 finding + 上报 intake。"""
         acfg = self.cfg.workers.agents[0] if self.cfg.workers.agents else None
         if acfg is None:
@@ -754,6 +770,8 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                          f"{_EMBEDDED_VULN_MINING_SKILL}\n\n{self._vuln_miner_prompt}")
         v2_env = {"DVS_V2_DB_DIR": str(self.vuln_root.parent / "dataflow-v2"),
                   "DVS_SOURCE_ROOT": self.source_root}
+        logger.info("[V2-mine] CALLING run_agent (session=%s thinking=%s)",
+                    str(fork_session)[-60:], getattr(self.cfg, "vuln_mining_thinking_level", "high"))
         output = run_agent(
             prompt=prompt, model=acfg.model, tools=acfg.tools or self.cfg.workers.default_tools,
             cwd=str(self.vuln_root.parent), session_file=str(fork_session),
@@ -768,6 +786,8 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                           "task_run_root": str(self.run_dir), "task_pi_dir": self.cfg.role_pi_dir("workers"),
                           "agent_role": "workers"},
         )
+        logger.info("[V2-mine] DONE func=%s::%s duration=%.1fs error=%s output_len=%d",
+                    func.file, func.name, time.time() - _t0, (output.error or "")[:100], len(output.output or ""))
         if self.on_event:
             emit_agent_runtime_events(self.on_event, result=output, stage="vuln_mining_v2",
                                       role="workers", model=acfg.model, extra={"function": func.name})

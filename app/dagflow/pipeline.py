@@ -162,6 +162,7 @@ class DagflowPipeline:
             self._emit("task_start", task_id=task_id)
 
             # ── 阶段 1: taint 跟踪 ──
+            logger.info("[dagflow] PHASE 1 START: taint tracking, root=%s", root_name)
             analyzer = TaintAnalyzer(config=self.config, sessions_dir=sessions_dir,
                                       on_event=self.on_event, task_id=task_id)
             analyzer.cancel_event = self.cancel_event
@@ -203,6 +204,7 @@ class DagflowPipeline:
                 for td in taints:
                     tn = str(td.get("name", "auto")).strip() or "auto"
                     orch.run(root_func, tn)
+                logger.info("[dagflow] PHASE 1 DONE: analyzed=%d", len(store.list_analyzed()))
                 self._emit("v2_dagflow_phase", phase="tracking_done",
                            analyzed=len(store.list_analyzed()), task_id=task_id)
             else:
@@ -210,6 +212,7 @@ class DagflowPipeline:
                            root=root_name, task_id=task_id)
 
             # ── 阶段 2: 挖掘 (传出点就绪的 (func,taint)) ──
+            logger.info("[dagflow] PHASE 2 START: vuln mining, candidates=%d", len(list(store.list_analyzed())))
             vuln_db = nfs_run / "vuln-scan.sqlite"  # findings -> NFS (持久, 产出不随 pod 丢)
             vuln_store = VulnScanStore(vuln_db)
             miner = MiningAgent(config=self.config, store=store, sessions_dir=sessions_dir,
@@ -229,6 +232,7 @@ class DagflowPipeline:
                         total_findings += len(fs)
                     except Exception as e:
                         logger.exception("mine %s/%s failed: %s", func.name, ts, e)
+            logger.info("[dagflow] PHASE 2 DONE: findings=%d", total_findings)
             self._emit("v2_dagflow_phase", phase="mining_done", findings=total_findings, task_id=task_id)
             self._emit("task_end", task_id=task_id)
             return TaskResult(

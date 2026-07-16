@@ -369,6 +369,13 @@ def run_agent(
     timeout_seconds = _normalize_timeout_seconds(run_timeout_seconds)
     timeout_failures = 0
     _attempt = 0
+    _run_start = time.time()
+    _stage = (task_context.get("agent_role") or "workers")
+    _func_hint = ""
+    # Heuristic: identify which LLM call this is from cwd/session name
+    _func_hint = (session_file or "")[-60:] if session_file else "(no-session)"
+    logger.info("run_agent START model=%s session=%s no_session=%s thinking=%s timeout=%ss cwd_tail=%s",
+                model, _func_hint, session_file is None, thinking_level, timeout_seconds or -1, cwd[-60:])
 
     while True:
         _attempt += 1
@@ -390,6 +397,8 @@ def run_agent(
             )
         except TimeoutError:
             timeout_failures += 1
+            logger.warning("run_agent TIMEOUT model=%s session=%s attempt=%d timeout=%.0fs — will retry",
+                         model, _func_hint, timeout_failures, timeout_seconds or -1)
             r = AgentResult()
             r.error = (
                 f"agent step idle timed out after {timeout_seconds:.0f}s"
@@ -892,6 +901,9 @@ def _run_with_api_retry(
                     continue
             _log_warn(f"pi exit code {result.exit_code} (has output, not retrying): {result.error[:200]}")
 
+        _dur = time.time() - _run_start
+        logger.info("run_agent DONE model=%s session=%s duration=%.1fs exit=%s output_len=%d error=%s",
+                    model, _func_hint, _dur, result.exit_code, len(result.output or ""), (result.error or "")[:100])
         return result
 
 

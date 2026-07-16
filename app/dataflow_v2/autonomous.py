@@ -162,6 +162,7 @@ class AutonomousRunner:
                 if not prompt:
                     break  # 无可续探
                 self._emit("v2_autonomous_round", round=rnd, session=str(round_session))
+                logger.info("[AUTO] round=%d START session=%s", rnd, str(round_session)[-60:])
                 # 本轮 context session 路径 (report_finding 用)
                 base_env["DVS_CONTEXT_SESSION"] = str(round_session)
                 result = run_agent(
@@ -182,6 +183,8 @@ class AutonomousRunner:
                     extension="/opt/dataflow_vuln_scan/extensions/restricted-bash.ts")
                 # 诊断日志: 记录每轮 run_agent 结果 (error/exit/timeout) 供后续判断
                 _err = getattr(result, "error", "") or ""
+                logger.info("[AUTO] round=%d DONE exit=%s error=%s output_len=%d",
+                            rnd, getattr(result, "exit_code", None), _err[:100], len(getattr(result, "output", "") or ""))
                 _ec = getattr(result, "exit_code", None)
                 _co = getattr(result, "context_overflow_failed_after_compaction", False)
                 _outlen = len(getattr(result, "output", "") or "")

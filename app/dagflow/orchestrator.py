@@ -40,6 +40,7 @@ class DagflowOrchestrator:
 
     def run(self, root_func, root_taint: str) -> None:
         """从根 (func, taint) 起 BFS 跟踪, 至队列空 + idle。"""
+        logger.info("[dagflow-orch] run START root=%s taint=%s", root_func.name, root_taint)
         self._wq = WorkQueue()
         self._seed(root_func, root_taint)
         run_workers(self._wq, self._process, self.n_workers, self.cancel_event)
@@ -66,7 +67,9 @@ class DagflowOrchestrator:
             self._emit_followups(dag, caller_func_id=item.origin_func, depth=item.depth, func_name=fname)
 
     def _analyze_or_replay(self, func_id: str, taint: str, depth: int = 0) -> tuple[TaintDAG | None, bool, str]:
-        """(func, taint): 未分析 -> analyze (产 DAG+存); 已分析 -> 加载已存 DAG (重放)。返回 (dag, is_fresh, func_name)。"""
+        """(func, taint): 未分析 -> analyze
+        import time as _time
+        _t0 = _time.time() (产 DAG+存); 已分析 -> 加载已存 DAG (重放)。返回 (dag, is_fresh, func_name)。"""
         if should_skip(self.store, func_id, taint):
             return self.store.load_dag(func_id, taint), False, ""
         if not reserve_or_skip(self.store, func_id, taint):
@@ -85,7 +88,10 @@ class DagflowOrchestrator:
             except Exception:
                 pass
         try:
+            logger.info("[dagflow-orch] analyze START func=%s taint=%s depth=%d", func.name, taint, depth)
             dag = self.analyze_fn(func, taint, depth)
+            logger.info("[dagflow-orch] analyze DONE func=%s taint=%s duration=%.1fs nodes=%d",
+                        func.name, taint, _time.time() - _t0, len(dag.nodes) if dag else 0)
         except Exception as e:
             logger.exception("analyze failed func=%s taint=%s: %s", getattr(func, "name", "?"), taint, e)
             release_on_failure(self.store, func_id, taint)

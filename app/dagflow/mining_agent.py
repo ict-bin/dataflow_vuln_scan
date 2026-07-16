@@ -48,6 +48,8 @@ class MiningAgent:
         """挖 (func, taint) -> findings (落库)。"""
         if self._acfg is None:
             return []
+        import time as _time
+        _t0 = _time.time()
         dag = self.store.load_dag(func.func_id, taint_sig)
         if dag is None:
             return []
@@ -59,6 +61,8 @@ class MiningAgent:
         from ..parsers import _extract_json_object
         v2_env = {"DVS_SOURCE_ROOT": str(self.source_root),
                   "DVS_V2_DB_DIR": str(self.sessions_dir.parent / "dataflow-v2")}
+        logger.info("[dagflow-mine] CALLING run_agent func=%s taint=%s session=%s",
+                    func.name, taint_sig, sp[-60:])
         output = run_agent(
             prompt=prompt, model=self._acfg.model,
             tools=self._acfg.tools or self._default_tools or [],
@@ -79,6 +83,8 @@ class MiningAgent:
         node_id = f"{func.file}::{func.name}"
         finding_store.save_findings(self.vuln_store, findings, run_id=self.run_id,
                                     node_id=node_id, func=func)
+        logger.info("[dagflow-mine] DONE func=%s taint=%s duration=%.1fs findings=%d error=%s",
+                    func.name, taint_sig, _time.time() - _t0, len(findings), (output.error or "")[:100])
         if self.on_event:
             try:
                 self.on_event("v2_dagflow_mined", function=func.name, taint=taint_sig,

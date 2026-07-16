@@ -250,6 +250,7 @@ class DfsOrchestrator:
 
         self.cbs.on_event("trace_start", function=func.name, source_file=func.file,
                           depth=depth, max_depth=self.max_depth)
+        logger.info("[V2-orch] _process START func=%s depth=%d taint=%s", func.name, depth, taint_params.signature)
 
         # 2) LLM 污点分析 (fork 会话); 失败时删占位 (让后续可重试)
         ctx.depth = depth
@@ -383,6 +384,8 @@ class DfsOrchestrator:
             self._process(func, new_tp, list(pre_validations), new_session, ctx, depth)
 
         # 8) 返回 (本函数校验, 本函数的 return_taints)
+        logger.info("[V2-orch] _process DONE func=%s depth=%d paths=%d return_taints=%d",
+                    func.name, depth, len(paths) if "paths" in dir() else 0, len(all_callee_return_taints))
         return my_discovered, result.return_taints
 
     def _run_path(self, steps: list[ChainStep], base_accumulated: list[Validation],
