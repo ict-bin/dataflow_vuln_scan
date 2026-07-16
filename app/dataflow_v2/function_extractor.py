@@ -195,15 +195,21 @@ def find_function_in_file(source_root: str, rel_file: str, name: str) -> tuple[i
     from pathlib import Path
     src_path = Path(source_root) / rel_file
     if not src_path.is_file():
+        logger.warning("find_function_in_file: file not found %s/%s", source_root, rel_file)
         return None
     source = src_path.read_bytes()
     parser = _parser_for(src_path, source)
     if parser is None:
+        logger.warning("find_function_in_file: parser is None for %s", rel_file)
         return None
     try:
         tree = parser.parse(source)
-    except Exception:
+    except Exception as e:
+        logger.warning("find_function_in_file: parse failed for %s: %s", rel_file, e)
         return None
+
+    func_count = [0]
+    matched = [None]
 
     def walk(node):
         if node.type == "function_definition":
@@ -215,18 +221,21 @@ def find_function_in_file(source_root: str, rel_file: str, name: str) -> tuple[i
                 if ct in ("identifier", "type_identifier", "scoped_identifier", "qualified_identifier", "namespace_qualified_name"):
                     nm = cur.text.decode("utf-8", "replace"); break
                 cur = cur.child_by_field_name("declarator") or (cur.children[0] if cur.children else None)
-            if nm == name or name in nm or nm in name:
+            func_count[0] += 1
+            if nm == name:
                 start_line = int(node.start_point[0]) + 1
                 end_line = int(node.end_point[0]) + 1
                 sig = _func_signature(node, source)
-                return (start_line, end_line, sig)
+                matched[0] = (start_line, end_line, sig)
+                return
         for child in node.children:
-            result = walk(child)
-            if result:
-                return result
-        return None
+            walk(child)
+            if matched[0]:
+                return
 
-    return walk(tree.root_node)
+    walk(tree.root_node)
+    logger.info("find_function_in_file: %s found %d functions, match=%s", rel_file, func_count[0], matched[0] is not None)
+    return matched[0]
 
 # ── include 索引 (C 作用域) ──────────────────────────────────────────────
 
