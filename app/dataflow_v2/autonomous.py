@@ -268,7 +268,7 @@ class AutonomousRunner:
                 d = json.loads(line)
             except Exception:
                 continue
-            if d.get("via") == "read_function" and d.get("func"):
+            if d.get("via") in ("read_function", "v2_db_lookup") and d.get("func"):
                 entries.append(d)
         if len(entries) < 2:
             return  # 只有根函数, 无边
