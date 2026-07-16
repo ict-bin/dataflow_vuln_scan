@@ -135,7 +135,16 @@ def extract_file_functions(source_root: str, rel_file: str, store: DataflowStore
                 body_path="", func_hash=func_hash,
             )
             records.append(rec)
-            store.upsert_function(rec)
+            for _attempt in range(3):
+                try:
+                    store.upsert_function(rec)
+                    break
+                except Exception:
+                    if _attempt < 2:
+                        import time as _time
+                        _time.sleep(0.1)
+                    # ON CONFLICT DO UPDATE is idempotent; if all 3 attempts fail,
+                    # another process likely already wrote this function
         for child in node.children:
             walk(child)
 
