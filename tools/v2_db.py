@@ -20,6 +20,7 @@
   4. 需要宏/typedef/struct 定义 → v2_db symbol <name> (一次 grep 全盘)
 """
 import json
+import re
 import os
 import sqlite3
 import sys
@@ -68,11 +69,18 @@ def _query(db_name: str, sql: str, params: tuple = ()) -> list[dict]:
     if not db.exists():
         print(f"ERROR: 数据库不存在: {db_name}", file=sys.stderr)
         return []
-    conn = sqlite3.connect(db)
-    conn.row_factory = sqlite3.Row
-    rows = [dict(r) for r in conn.execute(sql, params).fetchall()]
-    conn.close()
-    return rows
+    try:
+        conn = sqlite3.connect(db, timeout=10)
+        conn.row_factory = sqlite3.Row
+        rows = [dict(r) for r in conn.execute(sql, params).fetchall()]
+        conn.close()
+        return rows
+    except sqlite3.OperationalError as e:
+        log.warning("query failed db=%s: %s", db_name, e)
+        return []
+    except Exception as e:
+        log.warning("query error db=%s: %s", db_name, e)
+        return []
 
 
 def _find_func(name: str) -> dict | None:
@@ -331,13 +339,13 @@ def cmd_symbol(name: str) -> None:
     if not src:
         print("ERROR: DVS_SOURCE_ROOT 未设置")
         return
-    # grep 搜索 #define / typedef / struct / enum 定义
+    log.info("symbol START name=%s src=%s", name, src)
+    # grep 搜索 #define / typedef / struct / enum 定义 (ERE 兼容 pattern)
     patterns = [
-        f"#define\\s+{name}\\b",
-        f"typedef\\s+.*\\b{name}\\b",
-        f"struct\\s+{name}\\b",
-        f"enum\\s+{name}\\b",
-        f"{name}\\s*=.*;".replace(f"{name}\\s*=.*;", f"\\b{name}\\s*="),  # enum member
+        f"#define[[:space:]]+{re.escape(name)}",
+        f"typedef[[:space:]].*{re.escape(name)}",
+        f"struct[[:space:]]+{re.escape(name)}",
+        f"enum[[:space:]]+{re.escape(name)}",
     ]
     results = []
     for pattern in patterns:
@@ -351,13 +359,27 @@ def cmd_symbol(name: str) -> None:
                     results.append(line)
         except Exception:
             pass
+    log.info("symbol pattern search results=%d", len(results))
+    # pattern 搜索未中 → fallback: 纯名字搜索, 返回所有使用处给 LLM
+    if not results:
+        log.info("symbol fallback: simple name search")
+        try:
+            r = subprocess.run(
+                ["/usr/bin/grep", "-rn", "--include=*.h", "--include=*.c",
+                 name, src],
+                capture_output=True, text=True, timeout=10)
+            for line in r.stdout.strip().split("\n")[:20]:
+                if line:
+                    results.append(line)
+            log.info("symbol fallback results=%d", len(results))
+        except Exception:
+            pass
     if results:
-        print(f"SYMBOL: {name} 找到 {len(results)} 个定义:")
+        print(f"SYMBOL: {name} 找到 {len(results)} 个匹配:")
         for line in results[:20]:
             print(f"  {line}")
     else:
-        print(f"NOT_FOUND: 符号 '{name}' 在源码中未找到定义。")
-        print(f"提示: 可能是外部库/系统头文件中的符号, 用 grep -rn {name} /usr/include 搜索。")
+        print(f"NOT_FOUND: 符号 '{name}' 在源码中未找到。该符号可能定义在外部库/系统头文件中。")
 
 
 def main():
