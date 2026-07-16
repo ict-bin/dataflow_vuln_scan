@@ -340,25 +340,30 @@ def cmd_index(file_path: str) -> None:
 
 
 def cmd_symbol(name: str) -> None:
-    """查宏定义/typedef/struct/enum (grep 全盘 .h/.c)。"""
+    """查宏定义/typedef/struct/enum (grep 全盘 .h 优先, .c 补充)。"""
     import subprocess
     src = os.environ.get("DVS_SOURCE_ROOT", "")
     if not src:
         print("ERROR: DVS_SOURCE_ROOT 未设置")
         return
     log.info("symbol START name=%s src=%s", name, src)
-    # grep 搜索 #define / typedef / struct / enum 定义 (ERE 兼容 pattern)
-    patterns = [
-        f"#define[[:space:]]+{re.escape(name)}",
-        f"typedef[[:space:]].*{re.escape(name)}",
-        f"struct[[:space:]]+{re.escape(name)}",
-        f"enum[[:space:]]+{re.escape(name)}",
-    ]
+    is_macro = name.isupper() or "_" in name and name.replace("_", "").isalnum()
+    # 宏定义优先搜 .h, typedef/struct/enum 同时搜 .h+.c
+    if is_macro:
+        patterns = [f"#define[[:space:]]+{re.escape(name)}"]
+    else:
+        patterns = [
+            f"#define[[:space:]]+{re.escape(name)}",
+            f"typedef[[:space:]].*{re.escape(name)}",
+            f"struct[[:space:]]+{re.escape(name)}",
+            f"enum[[:space:]]+{re.escape(name)}",
+        ]
     results = []
+    # 先搜 .h (定义通常在头文件)
     for pattern in patterns:
         try:
             r = subprocess.run(
-                ["/usr/bin/grep", "-rn", "-E", "--include=*.h", "--include=*.c",
+                ["/usr/bin/grep", "-rn", "-E", "--include=*.h",
                  pattern, src],
                 capture_output=True, text=True, timeout=10)
             for line in r.stdout.strip().split("\n"):
@@ -366,19 +371,47 @@ def cmd_symbol(name: str) -> None:
                     results.append(line)
         except Exception:
             pass
-    log.info("symbol pattern search results=%d", len(results))
-    # pattern 搜索未中 → fallback: 纯名字搜索, 返回所有使用处给 LLM
+    log.info("symbol .h pattern search results=%d", len(results))
+    # .h 未中 → 补搜 .c
     if not results:
-        log.info("symbol fallback: simple name search")
+        for pattern in patterns:
+            try:
+                r = subprocess.run(
+                    ["/usr/bin/grep", "-rn", "-E", "--include=*.c",
+                     pattern, src],
+                    capture_output=True, text=True, timeout=10)
+                for line in r.stdout.strip().split("\n"):
+                    if line:
+                        results.append(line)
+            except Exception:
+                pass
+        log.info("symbol .c pattern search results=%d", len(results))
+    # pattern 搜未中 → fallback: 纯名字搜 .h (看使用上下文, 如 struct field)
+    if not results:
+        log.info("symbol fallback: simple name search in .h")
         try:
             r = subprocess.run(
-                ["/usr/bin/grep", "-rn", "--include=*.h", "--include=*.c",
+                ["/usr/bin/grep", "-rn", "--include=*.h",
                  name, src],
                 capture_output=True, text=True, timeout=10)
             for line in r.stdout.strip().split("\n")[:20]:
                 if line:
                     results.append(line)
-            log.info("symbol fallback results=%d", len(results))
+            log.info("symbol fallback .h results=%d", len(results))
+        except Exception:
+            pass
+    # .h fallback 未中 → 最后搜 .c
+    if not results:
+        log.info("symbol fallback: simple name search in .c")
+        try:
+            r = subprocess.run(
+                ["/usr/bin/grep", "-rn", "--include=*.c",
+                 name, src],
+                capture_output=True, text=True, timeout=10)
+            for line in r.stdout.strip().split("\n")[:20]:
+                if line:
+                    results.append(line)
+            log.info("symbol fallback .c results=%d", len(results))
         except Exception:
             pass
     if results:
