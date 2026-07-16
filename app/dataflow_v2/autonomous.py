@@ -187,8 +187,11 @@ class AutonomousRunner:
                 # 读 checkpoint
                 ck = self._read_checkpoint(shared_run_dir)
                 self._emit("v2_autonomous_checkpoint", round=rnd, checkpoint=ck)
-                if not ck or not ck.get("continue"):
-                    break  # LLM 决定不再继续 / 无 checkpoint
+                if not ck:
+                    break  # 无 checkpoint (异常)
+                # Q2: agent 说不继续 BUT 有 pending_branches -> 仍续探 (不盲从 continue=false)
+                if not ck.get("continue") and not ck.get("pending_branches"):
+                    break  # 真完成: 不继续 + 无未探索分支
             # 任务完成: 输出探索路径 + 剩余 pending
             self._emit("v2_autonomous_done", round=rnd if 'rnd' in dir() else 0,
                         path_steps=self._count_path(shared_run_dir))
@@ -196,6 +199,8 @@ class AutonomousRunner:
             logger.exception("autonomous runner failed")
             status, err_msg = TaskStatus.ERROR, str(exc)
 
+        # Q3: 从 path.log 提取调用边写入 orchestration.db 供前端展示
+        self._build_call_tree_from_path(shared_run_dir, store, root_func)
         # 最终报告 (markdown: 探索路径 + pending)
         self._write_final_report(shared_run_dir, root_output_path)
         return self._build_result(tid, status, err_msg)
@@ -214,6 +219,56 @@ class AutonomousRunner:
             return sum(1 for _ in p.read_text(encoding="utf-8").splitlines() if _.strip()) if p.exists() else 0
         except Exception:
             return 0
+
+    def _build_call_tree_from_path(self, run_dir: Path, store, root_func) -> None:
+        """Q3: 从 path.log 提取调用边写入 orchestration.db 供前端展示调用树。
+
+        path.log 是扁平轨迹 (read_function 的函数序列), 按顺序连成线性调用链:
+        root -> callee1 -> callee2 -> ... 每对连续 read_function 构成一条边。
+        grep_function 条目跳过 (不是函数调用)。
+        """
+        from .models import OrchestrationEdge, TaintParamInfo
+        p = run_dir / "path.log"
+        if not p.exists():
+            return
+        entries = []
+        for line in p.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                d = json.loads(line)
+            except Exception:
+                continue
+            if d.get("via") == "read_function" and d.get("func"):
+                entries.append(d)
+        if len(entries) < 2:
+            return  # 只有根函数, 无边
+        path_id = "autonomous"
+        for i in range(1, len(entries)):
+            prev = entries[i - 1]
+            curr = entries[i]
+            if prev["func"] == curr["func"]:
+                continue  # 跳过连续重复
+            # 查 func_id (已索引)
+            src_rec = store.find_function(prev["func"], prev.get("file", ""))
+            tgt_rec = store.find_function(curr["func"], curr.get("file", ""))
+            edge = OrchestrationEdge(
+                path_id=path_id,
+                source_function=prev["func"],
+                source_signature=prev.get("signature", ""),
+                source_func_id=src_rec.func_id if src_rec else "",
+                target_function=curr["func"],
+                target_signature=curr.get("signature", ""),
+                target_func_id=tgt_rec.func_id if tgt_rec else "",
+                taint_params=TaintParamInfo(),
+                depth=i,
+                edge_order=i,
+                status="done")
+            try:
+                store.upsert_edge(edge)
+            except Exception:
+                logger.debug("upsert_edge failed for %s->%s", prev["func"], curr["func"], exc_info=True)
+        self._emit("v2_autonomous_call_tree", edges=len(entries) - 1)
 
     def _resume_prompt(self, run_dir: Path, rnd: int) -> str:
         """构造续探 prompt: 注入已探索路径 + pending_branches。"""
