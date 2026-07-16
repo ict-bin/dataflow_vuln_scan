@@ -174,7 +174,7 @@ class DagflowPipeline:
             # tracker reader_finder/function_resolver: LLM+v2_db 找读者/解析间接 (生产实现)
             from .reader_finder import ReaderFinder
             from .function_resolver import FunctionResolver
-            v2_db_dir = run_dir / "dataflow-v2"
+            v2_db_dir = epoch_dir / "dataflow-v2"
             rf = ReaderFinder(config=self.config, source_root=self.source_root,
                               v2_db_dir=v2_db_dir, sessions_dir=sessions_dir,
                               task_id=task_id, on_event=self.on_event,
