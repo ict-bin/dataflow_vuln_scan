@@ -78,7 +78,7 @@ class MiningAgent:
             cancel_event=getattr(self, "cancel_event", None),
             # Only v2 vuln mining keeps reasoning enabled; legacy dagflow mining stays explicitly off.
             thinking_level="off",
-            run_timeout_seconds=getattr(self.config, "agent_run_timeout_seconds", 900),
+            run_timeout_seconds=getattr(self.config, "agent_run_timeout_seconds", 1500),
             timeout_retry_enabled=getattr(self.config, "agent_timeout_retry_enabled", True),
             timeout_max_retries=getattr(self.config, "agent_timeout_max_retries", 20),
             pi_max_retries=getattr(self.config, "pi_max_retries", 3),
