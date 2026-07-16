@@ -58,7 +58,7 @@ class MiningAgent:
         from ..runner import run_agent
         from ..parsers import _extract_json_object
         v2_env = {"DVS_SOURCE_ROOT": str(self.source_root),
-                  "DVS_V2_DB_DIR": str(Path(self.source_root).parent / "run" / "dataflow-v2")}
+                  "DVS_V2_DB_DIR": str(self.sessions_dir.parent / "dataflow-v2")}
         output = run_agent(
             prompt=prompt, model=self._acfg.model,
             tools=self._acfg.tools or self._default_tools or [],
