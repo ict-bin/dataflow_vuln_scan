@@ -81,6 +81,7 @@ class MiningAgent:
                           "task_run_root": str(self.sessions_dir.parent),
                           "task_pi_dir": self.config.role_pi_dir("workers"),
                           "agent_role": "workers", "fork_purpose": "vuln_mining"},
+        )
         text = output.output or ""
         parsed = _extract_json_object(text, "findings") or self._greedy_json(text) or {"findings": []}
         findings = self._parse_findings(parsed)

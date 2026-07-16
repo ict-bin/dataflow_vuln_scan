@@ -72,6 +72,7 @@ class FunctionResolver:
                           "task_run_root": str(self.sessions_dir.parent),
                           "task_pi_dir": self.config.role_pi_dir("workers"),
                           "agent_role": "workers", "fork_purpose": "external_tracking"},
+        )
         text = output.output or ""
         parsed = _extract_json_object(text, "resolved") or _greedy_json_object(text) or {}
         out = []
