@@ -19,6 +19,13 @@ _PROMPT_PATH = Path(__file__).resolve().parent.parent.parent / "prompts" / "dagf
 _PROMPT_CACHE: str | None = None
 
 
+def _task_pi_dir(config: Any, role: str) -> str:
+    resolver = getattr(config, "role_pi_dir", None)
+    if callable(resolver):
+        return str(resolver(role) or "")
+    return ""
+
+
 def _system_prompt() -> str:
     global _PROMPT_CACHE
     if _PROMPT_CACHE is None:
@@ -79,7 +86,7 @@ class MiningAgent:
             task_context={"task_id": self.task_id,
                           "task_root": str(self.sessions_dir.parent.parent.parent),
                           "task_run_root": str(self.sessions_dir.parent),
-                          "task_pi_dir": self.config.role_pi_dir("workers"),
+                          "task_pi_dir": _task_pi_dir(self.config, "workers"),
                           "agent_role": "workers", "fork_purpose": "vuln_mining"},
         )
         text = output.output or ""

@@ -402,6 +402,9 @@ def cmd_symbol(name: str) -> None:
     """查宏定义/typedef/struct/enum (grep 全盘 .h 优先, .c 补充)。"""
     import subprocess
 
+    header_globs = ["*.h", "*.hpp"]
+    source_globs = ["*.c", "*.cpp"]
+
     def _shell_join(argv: list[str]) -> str:
         return " ".join(shlex.quote(part) for part in argv)
 
@@ -423,6 +426,24 @@ def cmd_symbol(name: str) -> None:
             rows = rows[:limit]
         return rows
 
+    def _run_symbol_search_for_globs(
+        prefix_argv: list[str],
+        tail_argv: list[str],
+        globs: list[str],
+        *,
+        limit: int | None = None,
+    ) -> list[str]:
+        rows: list[str] = []
+        for glob in globs:
+            rows.extend(_run_symbol_search([
+                *prefix_argv,
+                f"--include={glob}",
+                *tail_argv,
+            ], limit=limit))
+            if limit is not None and len(rows) >= limit:
+                return rows[:limit]
+        return rows
+
     src = os.environ.get("DVS_SOURCE_ROOT", "")
     if not src:
         print("ERROR: DVS_SOURCE_ROOT 未设置")
@@ -440,33 +461,43 @@ def cmd_symbol(name: str) -> None:
             f"enum[[:space:]]+{re.escape(name)}",
         ]
     results = []
-    # 先搜 .h (定义通常在头文件)
+    # 先搜常见头文件 (定义通常在头文件)
     for pattern in patterns:
-        results.extend(_run_symbol_search([
-            "/usr/bin/grep", "-rn", "-E", "--include=*.h", pattern, src,
-        ]))
-    log.info("symbol .h pattern search results=%d", len(results))
-    # .h 未中 → 补搜 .c
+        results.extend(_run_symbol_search_for_globs(
+            ["/usr/bin/grep", "-rn", "-E"],
+            [pattern, src],
+            header_globs,
+        ))
+    log.info("symbol header pattern search results=%d", len(results))
+    # 头文件未中 → 补搜常见源码文件
     if not results:
         for pattern in patterns:
-            results.extend(_run_symbol_search([
-                "/usr/bin/grep", "-rn", "-E", "--include=*.c", pattern, src,
-            ]))
-        log.info("symbol .c pattern search results=%d", len(results))
-    # pattern 搜未中 → fallback: 纯名字搜 .h (看使用上下文, 如 struct field)
+            results.extend(_run_symbol_search_for_globs(
+                ["/usr/bin/grep", "-rn", "-E"],
+                [pattern, src],
+                source_globs,
+            ))
+        log.info("symbol source pattern search results=%d", len(results))
+    # pattern 搜未中 → fallback: 纯名字搜常见头文件 (看使用上下文, 如 struct field)
     if not results:
-        log.info("symbol fallback: simple name search in .h")
-        results.extend(_run_symbol_search([
-            "/usr/bin/grep", "-rn", "--include=*.h", name, src,
-        ], limit=20))
-        log.info("symbol fallback .h results=%d", len(results))
-    # .h fallback 未中 → 最后搜 .c
+        log.info("symbol fallback: simple name search in headers")
+        results.extend(_run_symbol_search_for_globs(
+            ["/usr/bin/grep", "-rn"],
+            [name, src],
+            header_globs,
+            limit=20,
+        ))
+        log.info("symbol fallback header results=%d", len(results))
+    # 头文件 fallback 未中 → 最后搜常见源码文件
     if not results:
-        log.info("symbol fallback: simple name search in .c")
-        results.extend(_run_symbol_search([
-            "/usr/bin/grep", "-rn", "--include=*.c", name, src,
-        ], limit=20))
-        log.info("symbol fallback .c results=%d", len(results))
+        log.info("symbol fallback: simple name search in sources")
+        results.extend(_run_symbol_search_for_globs(
+            ["/usr/bin/grep", "-rn"],
+            [name, src],
+            source_globs,
+            limit=20,
+        ))
+        log.info("symbol fallback source results=%d", len(results))
     print(f"DVS_SOURCE_ROOT={src}")
     print("EXECUTED_COMMANDS:")
     for command in executed_commands:

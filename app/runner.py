@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import select
 import subprocess
 import threading
 import time
@@ -652,11 +653,11 @@ def _run_with_api_retry(
             cancel_thread = threading.Thread(target=_cancel_monitor, daemon=True)
             cancel_thread.start()
 
-        # Shared state for stdout reading thread
+        # Shared state for pipe reading thread
         agent_ended = False
         result_lock = threading.Lock()
-        buffer_lock = threading.Lock()
-        buffer = b""
+        stdout_buffer = b""
+        stderr_buffer = b""
         last_activity_at = time.monotonic()
         activity_lock = threading.Lock()
 
@@ -669,53 +670,104 @@ def _run_with_api_retry(
             if timeout_seconds and (time.monotonic() - last_activity_at) >= timeout_seconds:
                 raise TimeoutError("agent idle timeout")
 
-        # Thread: read stdout
+        # Thread: read stdout/stderr with poll/select + os.read, so idle timeout
+        # still works even when pipes stay open but stop producing data.
         read_error = None
 
-        def _read_stdout():
-            nonlocal agent_ended, buffer, read_error
+        def _close_stdin_after_rpc_completed():
+            try:
+                if proc.stdin and not proc.stdin.closed:
+                    _log_info(
+                        "run_agent closing stdin after rpc_completed pid=%s session=%s process_label=%s",
+                        proc.pid,
+                        session_file or "(no-session)",
+                        process_label,
+                    )
+                    proc.stdin.close()
+            except Exception:
+                pass
+
+        def _drain_stdout_lines(final_flush: bool = False):
+            nonlocal agent_ended, stdout_buffer
+            while True:
+                if b"\n" not in stdout_buffer:
+                    break
+                line, stdout_buffer = stdout_buffer.split(b"\n", 1)
+                decoded = line.decode("utf-8", errors="replace")
+                ended = _process_line(decoded, result, on_stream, _mark_activity, result_lock)
+                if ended:
+                    _log_info(
+                        "run_agent stdout observed agent_end pid=%s session=%s process_label=%s",
+                        proc.pid,
+                        session_file or "(no-session)",
+                        process_label,
+                    )
+                    agent_ended = True
+                    return
+                if getattr(result, "_rpc_completed", False):
+                    _close_stdin_after_rpc_completed()
+            if final_flush and stdout_buffer.strip():
+                _process_line(
+                    stdout_buffer.decode("utf-8", errors="replace"),
+                    result, on_stream, _mark_activity, result_lock,
+                )
+                if getattr(result, "_rpc_completed", False):
+                    _close_stdin_after_rpc_completed()
+                stdout_buffer = b""
+
+        def _read_pipes():
+            nonlocal agent_ended, stdout_buffer, stderr_buffer, read_error
             try:
                 assert proc.stdout is not None
-                while True:
+                assert proc.stderr is not None
+                stdout_fd = proc.stdout.fileno()
+                stderr_fd = proc.stderr.fileno()
+                open_fds = {stdout_fd: "stdout", stderr_fd: "stderr"}
+                poller = select.poll() if hasattr(select, "poll") else None
+                if poller is not None:
+                    poll_mask = select.POLLIN | select.POLLHUP | select.POLLERR
+                    poller.register(stdout_fd, poll_mask)
+                    poller.register(stderr_fd, poll_mask)
+                while open_fds and not agent_ended:
                     _check_timeout()
-                    chunk = proc.stdout.read(4096)
-                    if not chunk:
-                        break
-                    _mark_activity()
-                    with buffer_lock:
-                        buffer += chunk
-                    while True:
-                        with buffer_lock:
-                            if b"\n" not in buffer:
+                    if poller is not None:
+                        ready = poller.poll(1000)
+                        ready_fds = [fd for fd, _event in ready]
+                    else:
+                        ready_fds, _, _ = select.select(list(open_fds.keys()), [], [], 1.0)
+                    if not ready_fds:
+                        continue
+                    for fd in ready_fds:
+                        stream_name = open_fds.get(fd)
+                        if not stream_name:
+                            continue
+                        try:
+                            chunk = os.read(fd, 4096)
+                        except BlockingIOError:
+                            continue
+                        if not chunk:
+                            if poller is not None:
+                                try:
+                                    poller.unregister(fd)
+                                except Exception:
+                                    pass
+                            open_fds.pop(fd, None)
+                            continue
+                        _mark_activity()
+                        if stream_name == "stdout":
+                            stdout_buffer += chunk
+                            _drain_stdout_lines()
+                            if agent_ended:
                                 break
-                            line, buffer = buffer.split(b"\n", 1)
-                        decoded = line.decode("utf-8", errors="replace")
-                        ended = _process_line(decoded, result, on_stream, _mark_activity, result_lock)
-                        if ended:
-                            agent_ended = True
-                            return
-                        # When LLM completes, close stdin so pi exits and sends agent_end
-                        if getattr(result, '_rpc_completed', False):
-                            try:
-                                if proc.stdin and not proc.stdin.closed:
-                                    proc.stdin.close()
-                            except Exception:
-                                pass
-                # Process remaining buffer
-                with buffer_lock:
-                    remaining = buffer
-                    buffer = b""
-                if remaining.strip():
-                    _process_line(
-                        remaining.decode("utf-8", errors="replace"),
-                        result, on_stream, _mark_activity, result_lock,
-                    )
+                        else:
+                            stderr_buffer += chunk
+                _drain_stdout_lines(final_flush=True)
             except TimeoutError:
                 read_error = TimeoutError("agent idle timeout")
             except Exception as e:
                 read_error = e
 
-        stdout_thread = threading.Thread(target=_read_stdout, daemon=True, name="dvs-stdout")
+        stdout_thread = threading.Thread(target=_read_pipes, daemon=True, name="dvs-stdout")
         stdout_thread.start()
 
         try:
@@ -730,14 +782,25 @@ def _run_with_api_retry(
 
             # Wait for stdout reader to finish
             stdout_thread.join(timeout=timeout_seconds or 3600)
+            _log_info(
+                "run_agent stdout join finished pid=%s session=%s process_label=%s alive=%s agent_ended=%s rpc_completed=%s",
+                proc.pid,
+                session_file or "(no-session)",
+                process_label,
+                stdout_thread.is_alive(),
+                agent_ended,
+                getattr(result, "_rpc_completed", False),
+            )
+            if stdout_thread.is_alive() and read_error is None:
+                read_error = TimeoutError("agent pipe reader thread did not finish before join timeout")
 
             if read_error is not None:
                 if isinstance(read_error, TimeoutError):
-                    _log_warn("agent stdout read timed out")
+                    _log_warn("agent stdout/stderr read timed out")
                     result.error = str(read_error)
                 else:
-                    _log_warn(f"agent stdout read error: {read_error}")
-                    result.error = f"stdout read error: {read_error}"
+                    _log_warn(f"agent stdout/stderr read error: {read_error}")
+                    result.error = f"stdout/stderr read error: {read_error}"
 
             # Post-skill prompt (RPC second turn)
             if agent_ended and post_skill_prompt and proc.stdin and not proc.stdin.closed:
@@ -783,30 +846,49 @@ def _run_with_api_retry(
             if agent_ended:
                 try:
                     if proc.stdout:
-                        proc.stdout.read()
+                        _log_info(
+                            "run_agent remaining stdout already handled by poll reader pid=%s session=%s process_label=%s",
+                            proc.pid,
+                            session_file or "(no-session)",
+                            process_label,
+                        )
                 except Exception as _e:
                     logger.warning("unexpected error in runner.py: %s", _e, exc_info=True)
 
             # Close stdin
             try:
+                _log_info(
+                    "run_agent closing stdin at finalize pid=%s session=%s process_label=%s stdin_closed=%s",
+                    proc.pid,
+                    session_file or "(no-session)",
+                    process_label,
+                    bool(proc.stdin.closed) if proc.stdin else True,
+                )
                 proc.stdin.close()
             except Exception as _e:
                 logger.warning("unexpected error in runner.py: %s", _e, exc_info=True)
 
-            # Read stderr
-            try:
-                if proc.stderr:
-                    stderr_data = proc.stderr.read()
-                    stderr_text = stderr_data.decode("utf-8", errors="replace").strip()
-                    if stderr_text and not result.error:
-                        result.error = stderr_text
-            except Exception as _e:
-                logger.warning("unexpected error in runner.py: %s", _e, exc_info=True)
+            stderr_text = stderr_buffer.decode("utf-8", errors="replace").strip()
+            if stderr_text and not result.error:
+                result.error = stderr_text
 
             # Wait for process exit
             try:
+                _log_info(
+                    "run_agent waiting for pi exit pid=%s session=%s process_label=%s",
+                    proc.pid,
+                    session_file or "(no-session)",
+                    process_label,
+                )
                 proc.wait(timeout=15.0)
                 result.exit_code = proc.returncode or 0
+                _log_info(
+                    "run_agent observed pi exit pid=%s session=%s process_label=%s exit_code=%s",
+                    proc.pid,
+                    session_file or "(no-session)",
+                    process_label,
+                    result.exit_code,
+                )
             except subprocess.TimeoutExpired:
                 _log_warn("pi process did not exit within 15s, force terminating")
                 _terminate_pi_process_tree(proc, reason="exit_timeout")
@@ -1020,6 +1102,11 @@ def _process_line(
             # reader to close stdin so pi detects EOF and sends agent_end.
             stop_reason = msg.get("stopReason", "")
             if stop_reason in ("stop", "end_turn", "error", "length", "max_tokens"):
+                _log_info(
+                    "run_agent assistant message_end marked rpc_completed stop_reason=%s message_id=%s",
+                    stop_reason,
+                    msg.get("id", ""),
+                )
                 result._rpc_completed = True
 
     return False
