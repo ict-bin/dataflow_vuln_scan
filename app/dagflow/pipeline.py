@@ -56,30 +56,34 @@ class FuncIndex:
             conn.close()
 
     def _ondemand(self, name: str):
-        """按需: 用 function_extractor 在已知文件里搜该函数 (写 functions.db)。"""
+        """按需: 逐个文件 extract 直到函数被索引 (.h 只有声明, .c 才有定义)。"""
         if self._v2_store is None:
             return None
         from ..dataflow_v2.function_extractor import find_func_in_source, extract_file_functions
         hits = find_func_in_source(name, self.source_root)
         if not hits:
             return None
+        import sqlite3
         for rel_file, _ in hits:
             try:
                 extract_file_functions(self.source_root, rel_file, self._v2_store)
             except Exception as e:
                 logger.debug("ondemand extract %s failed: %s", rel_file, e)
-            return None
-        # 再查
-        import sqlite3
-        conn = sqlite3.connect(str(self.db))
-        conn.row_factory = sqlite3.Row
-        try:
-            rows = conn.execute(
-                "SELECT func_id,file,name,signature,start_line,end_line,description "
-                "FROM functions WHERE name=?", (name,)).fetchall()
-            return self._row_to_rec(rows[0]) if rows else None
-        except sqlite3.Error:
-            return None
+                continue
+            # 每个 extract 后查一次
+            conn = sqlite3.connect(str(self.db))
+            conn.row_factory = sqlite3.Row
+            try:
+                rows = conn.execute(
+                    "SELECT func_id,file,name,signature,start_line,end_line,description "
+                    "FROM functions WHERE name=?", (name,)).fetchall()
+                if rows:
+                    return self._row_to_rec(rows[0])
+            except sqlite3.Error:
+                pass
+            finally:
+                conn.close()
+        return None  # 所有文件都试过, 仍未索引
         finally:
             conn.close()
 
