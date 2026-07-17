@@ -94,7 +94,7 @@ def _find_func(name: str) -> dict | None:
 
 
 def _read_body(func: dict) -> str:
-    """从原源文件按 start_line/end_line 读取函数体。"""
+    """从原源文件按 start_line/end_line 读取函数体, 带行号前缀。"""
     src = Path(_source_root()) / func["file"]
     if not src.is_file():
         return f"// 源文件不可读: {func['file']}"
@@ -102,7 +102,7 @@ def _read_body(func: dict) -> str:
         lines = src.read_text(encoding="utf-8", errors="replace").splitlines()
         start = max(0, func["start_line"] - 1)
         end = min(len(lines), func["end_line"])
-        return "\n".join(lines[start:end])
+        return "\n".join(f"{func['start_line']+i:4d} | {line}" for i, line in enumerate(lines[start:end]))
     except OSError as e:
         return f"// 读取失败: {e}"
 
@@ -167,12 +167,13 @@ def _print_function_result(name, file, start_line, end_line, signature, body):
 
 
 def _read_body_from_source(src_root, rel_file, start_line, end_line):
-    """从源文件按行号读函数体。"""
+    """从源文件按行号读函数体, 带行号前缀。"""
     src_path = Path(src_root) / rel_file
     if not src_path.is_file():
         return ""
     lines = src_path.read_text(encoding="utf-8", errors="replace").splitlines()
-    return "\n".join(lines[max(0, start_line-1):min(len(lines), end_line)])
+    body = lines[max(0, start_line-1):min(len(lines), end_line)]
+    return "\n".join(f"{start_line+i:4d} | {line}" for i, line in enumerate(body))
 
 
 def _async_index_file(src_root, rel_file, db_dir):
