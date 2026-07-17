@@ -705,8 +705,6 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
         pre_val_text = "\n".join(f"- {v.left} {v.op} {v.right} (行 {v.line})" for v in pre_validations if v.left and v.op) or "(无)"
         return (
             f"# 阶段：单函数污点传播分析 Fork\n\n"
-            f"**重要**: 本 session 继承了父函数的分析历史。你只分析 **当前函数体** "
-            f"(行 {func.start_line}-{func.end_line}) 内的传播，不要重述父函数已报告的传播。\n\n"
             f"目标函数: `{func.file}::{func.name}` (行 {func.start_line}-{func.end_line})\n"
             f"攻击面复核要求: 无论上游是否已传入污点参数，都要根据函数的功能，传递的参数值的含义，先判断当前函数里哪些输入/变量真实属于外部攻击者可控制的内容；"
             f"对攻击者不可控的常量、编译期固定值、静态配置、进程内部状态、纯内部派生值以及其他无法控制的内容，一律不要作为污点继续跟踪，可根据经验进行判断是否属于攻击者可控内容。\n\n"

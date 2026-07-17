@@ -21,65 +21,6 @@
   只标注和跟踪外部攻击者可能控制的内容；攻击者无法控制的内部常量、编译期常量、静态配置、进程内部状态、纯内部派生值，一律不要继续当作污点。
 - 前置校验链：从根函数到本函数，调用链上已累积的校验（condition+content 列表）。
 
-## 剪枝规则（最高优先级，必须遵守）
-
-以下规则大幅减少无价值传播，**必须严格执行**：
-
-### 1. 只报本函数体内的传播，不重述继承上下文
-
-fork session 继承了父函数的完整分析历史。**只报告当前函数体内真实发生的传播**，
-不要把父函数/上游函数中已经报告过的传播重新输出。
-
-判断方法：检查传播的 `call_line` 是否在当前函数的行号范围内（`目标函数` 提示的 `行 X-Y`）。
-如果该调用不在当前函数体内，**不要报告**。
-
-### 2. 简单 getter/accessor 函数不作为传播目标
-
-以下模式的一行封装函数**不报告为 propagation**：
-- `const char *get_xxx(obj) { return obj->field; }` — 纯字段读取
-- `int get_xxx(obj) { return obj->val; }` — 纯字段读取
-- `http_head_get_url`、`http_head_get_method`、`http_head_get_fields_value`、
-  `http_head_get_data`、`http_head_get_params_value` 等此类 getter
-
-这些函数只是返回结构体字段，不产生新的传播路径。污点在结构体字段本身，
-通过 `obj->field` 直接访问即可跟踪，不需要经 getter 间接跟踪。
-
-**例外**：如果 getter 的返回值被直接用于 sink（如 `memcpy(buf, get_xxx(obj), len)`），
-则报告对 getter 的调用为传播，但 `self_contained` 应判断 sink 是否在本函数。
-
-### 3. 校验/条件检查不作为传播
-
-如果污点仅用于**条件判断**而未传给任何 callee 或写入外部，**不报告为 propagation**，
-应放入 `validations[]`：
-
-- `strncasecmp(path, "/dns-query", ...)` — 路径校验，不是传播
-- `if (qtype == DNS_T_A)` — 类型校验，不是传播
-- `if (request->rcode != DNS_RC_NOERROR)` — 状态校验，不是传播
-- `if (len > buffer_size)` — 长度校验，不是传播
-
-**判断标准**：如果污点变量只出现在 `if/while/for` 条件或比较运算的参数中，
-且**没有**被赋值给其他变量、传给其他函数、或写入外部容器 -> 这是校验，不是传播。
-
-### 4. 写入局部 buffer 不作为逃逸
-
-`snprintf(buffer, len, "%s", tainted)` / `memcpy(buffer, tainted, len)` 写入**局部缓冲区**时：
-- 如果 buffer 是函数局部变量 -> **不报告 escape**，如果 buffer 被 return 则走 `return_taints`
-- 如果 buffer 是入参指针指向的内存（caller 提供）-> 报告 `field_alias` escape
-- 如果 buffer 是全局/静态 -> 报告 `global` escape
-
-### 5. 安全工具函数不作为传播目标
-
-以下函数是安全工具函数，污点传给它们**不产生安全风险**，**不报告为 propagation**：
-- 内存操作：`memcpy`、`memset`、`memmove`、`memcmp`、`safe_strncpy`、`strncpy`、`strcpy`
-- 格式化：`snprintf`、`vsnprintf`（除非目标是定长栈 buffer 且无长度校验 -> 这是 sink）
-- 日志：`tlog`、`tlog_printf`、`printf`、`fprintf`
-- 类型转换：`atoi`、`atol`、`strtol`
-- 哈希/原子：`hash_string`、`jhash`、`atomic_read`、`atomic_inc`
-
-**例外**：如果 `memcpy`/`snprintf` 写入**定长栈 buffer 且长度来自污点**（可能溢出），
-这是 sink，应报告为 propagation（`target_function` 填该函数，`is_external=False`），
-并设 `self_contained=true`。
-
 ## 污点源识别规则
 
 污点源不仅限于入参，以下都是合法的污点源：
@@ -192,10 +133,6 @@ target_file —— 这些由服务端 clang/脚本从 AST 精确获取 (行号/�
 ### 判定要点
 - 只当逃逸目标“经入参/全局/this 可达”才报；挂入纯局部容器不报（那个容器若再逃逸，在它所在函数处理）。
 - `return` 语句返回污点走 `return_taints`，不重复报 escape。
-- **写入局部 buffer 不是 escape**：`snprintf(buf, len, "%s", tainted)` 写入局部 `buf[]`
-  不是逃逸。如果 `buf` 是入参指针或被 return，用 `return_taints` 或 `field_alias`。
-- **不要重复报告继承的 escape**：如果父函数已报告 `url -> http_head->url` escape，
-  当前函数不需要重复报告同一个 escape（除非当前函数有新的写入路径）。
 - 系统会另起 tracker 会话用 v2_db 按逃逸语义查找下游读者，你只需把逃逸描述清楚即可；
 - 如果污点传播不会造成安全漏洞，则不需要记录此类污点传播；
 - 如果污点是简单类型，很难造成安全漏洞，也不需要跟踪和记录此类污点传播，但需要防止作为数组指针使用的场景；
