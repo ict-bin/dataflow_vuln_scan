@@ -172,9 +172,22 @@ class DataflowV2Runner:
                 except Exception:
                     _prop_count = 0
                 if _edge_count == 0 and _prop_count == 0:
-                    # 无传播边也无 propagation 记录 = taint 分析确实失败
-                    status = TaskStatus.COMPLETED_LIMITED
-                    err_msg = "v2: taint 分析未产出传播边 (LLM 输出可能截断或格式错误)"
+                    # 0 传播边 + 0 传播记录: 区分"解析失败" vs "解析成功但无传播"
+                    # taints > 0 说明 LLM 成功分析了函数, 识别了污点, 但未报告任何传播路径
+                    # taints == 0 说明 LLM 解析失败或未识别污点 (真失败)
+                    try:
+                        _taint_count = store._q("taints", "SELECT count(*) FROM taints")
+                        _taint_count = int(_taint_count[0][0]) if _taint_count else 0
+                    except Exception:
+                        _taint_count = 0
+                    if _taint_count > 0:
+                        # 解析成功, 有污点但无传播 = LLM 判定无传播路径 (可能漏报)
+                        status = TaskStatus.COMPLETED_LIMITED
+                        err_msg = "v2: taint 分析未产出传播边 (LLM 识别了污点但未报告传播路径, 可能漏报)"
+                    else:
+                        # 无污点也无传播 = taint 分析确实失败 (解析失败或 LLM 未识别污点)
+                        status = TaskStatus.COMPLETED_LIMITED
+                        err_msg = "v2: taint 分析未产出传播边 (LLM 输出可能截断或格式错误)"
                 # else: 有 propagation 记录但 edge_count=0 (callee 找不到/不跟入) = 正常完成
             final_output = self._build_final_report(tid, cfg, store, graph_db_path)
             vuln_summary = {"functions": len(store.list_functions()),
