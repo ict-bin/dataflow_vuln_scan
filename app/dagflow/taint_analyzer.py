@@ -67,7 +67,7 @@ class TaintAnalyzer:
         )
         from .session_naming import session_path
         sp = str(session_path(self.sessions_dir, func.name, taint_sig or "auto",
-                              kind="taint", depth=getattr(self, "_cur_depth", -1)))
+                              kind="taint", depth=getattr(self, "_cur_depth", 0)))
         return prompt, sp
 
     def analyze(self, func, taint_sig: str, is_auto: bool = False) -> tuple[TaintDAG, str]:

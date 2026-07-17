@@ -3,6 +3,7 @@
 
 用法:
   v2_db lookup <function_name>           # 查函数库→返回函数体 (从原源文件按行读)
+  v2_db lookup_hash <func_id>           # 按函数 hash 查函数库→返回函数体
   v2_db taints <func_name>               # 查污点库→返回函数的污点变量
   v2_db propagations <func_name>          # 查传播库→返回函数的传播路径
   v2_db orchestration <func_name>         # 查编排库→返回调用链
@@ -15,7 +16,8 @@
 
 流程:
   1. LLM 需要函数源码 → v2_db lookup <name>
-  2. 查到 → 返回函数体 (从原源文件 start_line~end_line 读取)
+  2. 有 func_id hash → v2_db lookup_hash <func_id>
+  3. 查到 → 返回函数体 (从原源文件 start_line~end_line 读取)
   3. 查不到 → 提示用 v2_db index <file> 建库后再查
   4. 需要宏/typedef/struct 定义 → v2_db symbol <name> (一次 grep 全盘)
 """
@@ -74,8 +76,31 @@ def _find_func(name: str) -> dict | None:
     return rows[0] if rows else None
 
 
+def _find_func_by_hash(func_id: str) -> dict | None:
+    """查函数库 (按 func_id hash)。"""
+    rows = _query("functions.db", "SELECT * FROM functions WHERE func_id = ?", (func_id,))
+    return rows[0] if rows else None
+
+
+def cmd_lookup_by_hash(func_id: str) -> None:
+    """查函数体 (按 func_id hash): db 查 → 返回函数体。"""
+    func = _find_func_by_hash(func_id)
+    if not func:
+        print(f"NOT_FOUND: func_id '{func_id}' 不在函数库")
+        return
+    _log_trajectory(func, func["name"])
+    body = _read_body(func)
+    print(f"function: {func['name']}")
+    print(f"file: {func['file']}")
+    print(f"lines: {func['start_line']}-{func['end_line']}")
+    print(f"signature: {func['signature']}")
+    print(f"func_id: {func['func_id']}")
+    print(f"---")
+    print(body)
+
+
 def _read_body(func: dict) -> str:
-    """从原源文件按 start_line/end_line 读取函数体。"""
+    """从原源文件按 start_line/end_line 读取函数体, 带行号前缀。"""
     src = Path(_source_root()) / func["file"]
     if not src.is_file():
         return f"// 源文件不可读: {func['file']}"
@@ -83,7 +108,11 @@ def _read_body(func: dict) -> str:
         lines = src.read_text(encoding="utf-8", errors="replace").splitlines()
         start = max(0, func["start_line"] - 1)
         end = min(len(lines), func["end_line"])
-        return "\n".join(lines[start:end])
+        result = []
+        for i in range(start, end):
+            ln = i + 1  # 文件绝对行号
+            result.append(f"{ln:>5}│ {lines[i]}")
+        return "\n".join(result)
     except OSError as e:
         return f"// 读取失败: {e}"
 
@@ -408,6 +437,8 @@ def main():
         cmd_orchestration(sys.argv[2])
     elif cmd == "index" and len(sys.argv) >= 3:
         cmd_index(sys.argv[2])
+    elif cmd == "lookup_hash" and len(sys.argv) >= 3:
+        cmd_lookup_by_hash(sys.argv[2])
     elif cmd == "symbol" and len(sys.argv) >= 3:
         cmd_symbol(sys.argv[2])
     else:
