@@ -121,8 +121,11 @@ class DataflowV2Runner:
             # 2) 根污点参数
             #    EA 给了具体 taint_params → 直接用
             #    EA 没给 → 标记为 "auto", prompt 告知 LLM 自行分析所有入参 + 内部调用产生的污点
-            if cfg.taint_params:
-                tp_names = cfg.taint_params
+            #    EA 传了非法值 (纯数字/非标识符) → 回退 auto, 防 LLM 找不到变量导致 0 传播
+            import re as _re
+            _VALID_IDENT = _re.compile(r'^[A-Za-z_][\w:.<>\[\]*-]*$')
+            if cfg.taint_params and all(_VALID_IDENT.match(str(p).strip()) for p in cfg.taint_params):
+                tp_names = [str(p).strip() for p in cfg.taint_params]
                 root_taint = TaintParamInfo(
                     positions=list(range(len(tp_names))),
                     signature=",".join(tp_names),
