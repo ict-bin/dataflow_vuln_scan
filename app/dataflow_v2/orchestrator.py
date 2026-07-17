@@ -261,7 +261,7 @@ class DfsOrchestrator:
             result = self._run_llm(
                 self.cbs.analyze_function, self.store, func, taint_params, pre_validations, base_session, ctx)
         except BaseException:
-            self.store.delete_processed_taint(func.func_id, _nts, pre_val_sig)
+            self.store.delete_processed_taint(func.func_id, _nts)
             raise
         for t in result.taints:
             self.store.upsert_taint(t)

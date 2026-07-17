@@ -370,11 +370,11 @@ def build_v2_trace_tree(run_root: str | Path) -> dict[str, Any] | None:
                     root_fid = e["source_func_id"]
                     break
 
+    _global_visited: set[str] = set()
+
     def _build(fid: str, depth: int, followup_status: str, followup_reason: str,
-               callee_line: str = "", visited: set | None = None) -> dict[str, Any]:
-        if visited is None:
-            visited = set()
-        if fid in visited:
+               callee_line: str = "") -> dict[str, Any]:
+        if fid in _global_visited:
             return {
                 "run_id": fid, "function_name": func_map.get(fid, {}).get("name", fid),
                 "source_file": func_map.get(fid, {}).get("file", ""), "line_hint": callee_line,
@@ -383,7 +383,7 @@ def build_v2_trace_tree(run_root: str | Path) -> dict[str, Any] | None:
                 "findings_count": 0, "termination_reasons": [], "children": [],
                 "pruned": True, "prune_reason": "recursion",
             }
-        visited = visited | {fid}
+        _global_visited.add(fid)
         f = func_map.get(fid, {})
         fname = f.get("name", fid)
         ffile = f.get("file", "")
@@ -420,7 +420,7 @@ def build_v2_trace_tree(run_root: str | Path) -> dict[str, Any] | None:
                 })
             else:
                 children.append(_build(cfid, depth + 1, c_status,
-                                       f"path order={child_edge['edge_order']}", cline, visited))
+                                       f"path order={child_edge['edge_order']}", cline))
 
         return {
             "run_id": fid, "function_name": fname, "source_file": ffile,

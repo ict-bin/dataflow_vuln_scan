@@ -109,7 +109,8 @@ def persist_finding(
     # intake 上报 (退避: 父任务 → 自身; 失败不影响)
     _intake_report(run_id, task_id, source_root, fdir, rec, finding_id,
                    cfg_project_id, cfg_task_name, cfg_parent_task_name,
-                   cfg_parent_task_id, cfg_parent_task_type, cfg_task_origin_type, on_event)
+                   cfg_parent_task_id, cfg_parent_task_type, cfg_task_origin_type, on_event,
+                   graph_store=graph_store)
 
     # MySQL 漏洞计数同步
     _sync_vuln_count_mysql(graph_store, run_id, task_id)
@@ -118,7 +119,8 @@ def persist_finding(
 
 def _intake_report(run_id, task_id, source_root, fdir, rec, finding_id,
                    cfg_project_id, cfg_task_name, cfg_parent_task_name,
-                   cfg_parent_task_id, cfg_parent_task_type, cfg_task_origin_type, on_event):
+                   cfg_parent_task_id, cfg_parent_task_type, cfg_task_origin_type, on_event,
+                   graph_store=None):
     try:
         res = report_finding_to_intake(
             project_id=cfg_project_id, task_id=task_id,
@@ -131,7 +133,7 @@ def _intake_report(run_id, task_id, source_root, fdir, rec, finding_id,
             taint_path_report_path=str(fdir / "taint-path-report.md"),
             use_self_task_id=False)
         if str(res.get("status") or "") == "reported":
-            _record_intake_result(graph_store=None, run_id=run_id, finding_id=finding_id, rec=rec, res=res, on_event=on_event)
+            _record_intake_result(graph_store=graph_store, run_id=run_id, finding_id=finding_id, rec=rec, res=res, on_event=on_event)
             return
         if _is_task_id_rejection(res):
             res2 = report_finding_to_intake(
@@ -142,9 +144,9 @@ def _intake_report(run_id, task_id, source_root, fdir, rec, finding_id,
                 report_path=str(fdir / "vulnerability-report.md"),
                 taint_path_report_path=str(fdir / "taint-path-report.md"),
                 use_self_task_id=True)
-            _record_intake_result(graph_store=None, run_id=run_id, finding_id=finding_id, rec=rec, res=res2, on_event=on_event)
+            _record_intake_result(graph_store=graph_store, run_id=run_id, finding_id=finding_id, rec=rec, res=res2, on_event=on_event)
             return
-        _record_intake_result(graph_store=None, run_id=run_id, finding_id=finding_id, rec=rec, res=res, on_event=on_event)
+        _record_intake_result(graph_store=graph_store, run_id=run_id, finding_id=finding_id, rec=rec, res=res, on_event=on_event)
     except Exception as exc:
         logger.warning("persist_finding intake failed for %s: %s", finding_id, exc, exc_info=True)
 
@@ -161,8 +163,14 @@ def _is_task_id_rejection(res: dict) -> bool:
 def _record_intake_result(*, graph_store, run_id, finding_id, rec, res, on_event):
     status = str(res.get("status") or "")
     case_id = str(res.get("case_id") or res.get("report_id") or "")
+    # 回写 report_status 到 vuln-scan.sqlite (findings 表)
+    if graph_store is not None:
+        try:
+            graph_store.update_finding_report_status(
+                finding_id, status=status, case_id=case_id)
+        except Exception:
+            logger.debug("finding_store update_finding_report_status failed for %s", finding_id, exc_info=True)
     try:
-        # 回写 report_status (graph_store 由调用方传 None 时跳过; 自主脚本用 VulnScanStore 单独回写)
         if on_event:
             on_event("vuln_intake_result", finding_id=finding_id,
                      function=rec.function_name, status=status, case_id=case_id)

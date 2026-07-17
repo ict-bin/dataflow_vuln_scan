@@ -63,7 +63,7 @@ _DDL = {
             pre_validation_signature TEXT NOT NULL DEFAULT '',
             taint_params             TEXT DEFAULT '[]',
             sessions_path            TEXT DEFAULT '',
-            PRIMARY KEY (func_id, taint_signature, pre_validation_signature)
+            PRIMARY KEY (func_id, taint_signature)
         );
         CREATE INDEX IF NOT EXISTS idx_pt_func ON processed_taints(func_id);
         CREATE TABLE IF NOT EXISTS include_index (
@@ -188,6 +188,43 @@ class DataflowStore:
         self._migrate_columns("propagations", [
             "escape_kind", "carrier", "escape_via",
         ])
+        # 迁移 processed_taints PK: (func_id, taint_sig, pre_val) → (func_id, taint_sig)
+        self._migrate_processed_taints_pk()
+
+    def _migrate_processed_taints_pk(self) -> None:
+        """迁移 processed_taints PK: (func_id, taint_sig, pre_val_sig) → (func_id, taint_sig)。
+
+        旧表 PK 含 pre_validation_signature, 导致同 (func, taint) 不同 pre_val 产生多行。
+        新 PK 只用 (func_id, taint_signature), 保证每个 (func, taint) 只有一条记录。
+        SQLite 不支持 ALTER TABLE DROP CONSTRAINT, 所以重建表。
+        """
+        with self._locks["functions"]:
+            c = self._conns["functions"]
+            try:
+                cols = c.execute("PRAGMA table_info(processed_taints)").fetchall()
+                pk_cols = sorted(r["name"] for r in cols if r["pk"] > 0)
+                if pk_cols == ["func_id", "taint_signature"]:
+                    return  # 已是新 schema
+            except Exception:
+                return
+            logger.info("[V2-store] migrating processed_taints PK: (func,taint,pre_val) → (func,taint)")
+            c.executescript("""
+                CREATE TABLE IF NOT EXISTS _pt_new (
+                    func_id TEXT NOT NULL, taint_signature TEXT NOT NULL,
+                    pre_validation_signature TEXT NOT NULL DEFAULT '',
+                    taint_params TEXT DEFAULT '[]', sessions_path TEXT DEFAULT '',
+                    PRIMARY KEY (func_id, taint_signature)
+                );
+                INSERT OR IGNORE INTO _pt_new
+                    (func_id, taint_signature, pre_validation_signature, taint_params, sessions_path)
+                SELECT func_id, taint_signature, pre_validation_signature, taint_params, sessions_path
+                FROM processed_taints ORDER BY func_id, taint_signature, pre_validation_signature;
+                DROP TABLE processed_taints;
+                ALTER TABLE _pt_new RENAME TO processed_taints;
+                CREATE INDEX IF NOT EXISTS idx_pt_func ON processed_taints(func_id);
+            """)
+            c.commit()
+            logger.info("[V2-store] migration done, rows=%d", c.execute("SELECT count(*) FROM processed_taints").fetchone()[0])
 
     def _migrate_columns(self, db: str, cols: list[str]) -> None:
         """为已有表补列 (TEXT, 默认 ''), 已有则跳过。"""
@@ -371,71 +408,54 @@ class DataflowStore:
     def try_reserve_processed_taint(self, func_id: str, pt: ProcessedTaint) -> bool:
         """分析前预留占位 (双检锁防并发重复分析)。
 
-        find-then-analyze-then-add 的竞争窗口: 并发 N 路径同 (func, taint, pre_val) 几乎同时 find
-        (rows=0, 谁都没 add) → 全 None → 全跑 4min LLM → N 份冗余 -taint 文件 → add 时
-        INSERT OR IGNORE 只存 1 行 (防重复存储, 但不防重复分析)。
-        修复: analyze 前先 INSERT OR IGNORE 占位; 若本线程插入成功 (rowcount=1) → 占位成功,
-        继续分析; 若 rowcount=0 (已被并发 peer 占位) → 跳过 (peer 正在分析)。analyze 失败时
-        delete 占位 (可重试)。
+        去重键: (func_id, taint_signature) — 不依赖 pre_validation_signature。
+        先查是否已有记录; 有则跳过 (return False); 无则 INSERT 占位。
+        analyze 失败时 delete 占位 (可重试)。
         """
         ts = _norm_sig(pt.taint_signature or "")
         pvs = pt.pre_validation_signature or ""
         with self._locks["functions"]:
+            row = self._conns["functions"].execute(
+                "SELECT 1 FROM processed_taints WHERE func_id=? AND taint_signature=? LIMIT 1",
+                (func_id, ts)).fetchone()
+            if row is not None:
+                return False
             cur = self._conns["functions"].execute(
                 "INSERT OR IGNORE INTO processed_taints (func_id, taint_signature, pre_validation_signature, taint_params, sessions_path) VALUES (?,?,?,?,?)",
                 (func_id, ts, pvs, json.dumps(pt.taint_params, ensure_ascii=False), pt.sessions_path))
             self._conns["functions"].commit()
             return cur.rowcount == 1
 
-    def delete_processed_taint(self, func_id: str, taint_signature: str, pre_validation_signature: str) -> None:
-        """删除占位 (analyze 失败时, 让后续可重试)。"""
+    def delete_processed_taint(self, func_id: str, taint_signature: str,
+                               pre_validation_signature: str = "") -> None:
+        """删除占位 (analyze 失败时, 让后续可重试)。
+
+        去重键: (func_id, taint_signature) — 删除该组合的所有记录。
+        pre_validation_signature 参数保留兼容但不用于过滤。
+        """
         ts = _norm_sig(taint_signature or "")
-        pvs = pre_validation_signature or ""
         self._exec("functions",
-            "DELETE FROM processed_taints WHERE func_id=? AND taint_signature=? AND pre_validation_signature=?",
-            (func_id, ts, pvs))
+            "DELETE FROM processed_taints WHERE func_id=? AND taint_signature=?",
+            (func_id, ts))
 
     def find_processed_taint(self, func_id: str, taint_signature: str,
-                             pre_validation_signature: str) -> ProcessedTaint | None:
-        """三重去重: (func_id, taint_signature, 前置校验集)。
+                             pre_validation_signature: str = "") -> ProcessedTaint | None:
+        """二重去重: (func_id, taint_signature) — 不依赖前置校验集。
 
-        从 processed_taints 独立表查 (单次锁定 _q, 不再 load 全 list)。
-        前置校验用 (op,value) 规范 token 集做**子集/超集**匹配: 若已存在记录的校验集
-        是当前的**超集** (已含更全校验, 通常因 LLM 某轮漏报一两个校验) -> 当前视为已覆盖, 跳过。
-        当前为空校验集时仅与空集匹配 (避免 空 ⊆ 非空 的误并)。
+        只要同一函数+同一污点已被分析过, 后续任何路径到达都不重分析。
+        pre_validation_signature 参数保留兼容签名但不参与查询。
         """
         ts = _norm_sig(taint_signature)
-        cur = set(_norm_sig(p) for p in (pre_validation_signature or "").split("|") if p)
         rows = self._q("functions",
-            "SELECT taint_signature, pre_validation_signature, taint_params, sessions_path FROM processed_taints WHERE func_id=? AND taint_signature=?",
+            "SELECT taint_signature, pre_validation_signature, taint_params, sessions_path FROM processed_taints WHERE func_id=? AND taint_signature=? LIMIT 1",
             (func_id, ts))
-        result = None
-        for r in rows:
-            existing = set(_norm_sig(p) for p in (r["pre_validation_signature"] or "").split("|") if p)
-            if not cur:
-                # 当前无前置校验: 仅当已存在也无校验才命中 (避免 空 ⊆ 非空 误并不同路径)
-                if not existing:
-                    result = ProcessedTaint(taint_params=json.loads(r["taint_params"] or "[]"),
-                                           taint_signature=r["taint_signature"], pre_validations=[],
-                                           pre_validation_signature=r["pre_validation_signature"],
-                                           sessions_path=r["sessions_path"])
-                    break
-                continue
-            if cur <= existing:  # 当前 ⊆ 已存在 (已存在更完整 -> 已覆盖当前)
-                result = ProcessedTaint(taint_params=json.loads(r["taint_params"] or "[]"),
-                                       taint_signature=r["taint_signature"], pre_validations=[],
-                                       pre_validation_signature=r["pre_validation_signature"],
-                                       sessions_path=r["sessions_path"])
-                break
-        # DEBUG: find 原因定位
-        try:
-            import sys as _sys
-            _sys.stderr.write(f"FINDDBG fid={func_id[:8]} ts={ts!r} cur={cur} rows={len(rows)} "
-                              f"existing={[r['pre_validation_signature'][:30] for r in rows]} matched={result is not None}\n")
-            _sys.stderr.flush()
-        except Exception:
-            pass
-        return result
+        if rows:
+            r = rows[0]
+            return ProcessedTaint(taint_params=json.loads(r["taint_params"] or "[]"),
+                                   taint_signature=r["taint_signature"], pre_validations=[],
+                                   pre_validation_signature=r["pre_validation_signature"],
+                                   sessions_path=r["sessions_path"])
+        return None
 
     # ── 污点库 ──────────────────────────────────────────────────────────────
     def upsert_taint(self, rec: TaintRecord) -> None:
