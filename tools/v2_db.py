@@ -223,6 +223,8 @@ def cmd_lookup(name: str) -> None:
     found = __import__("app.dataflow_v2.function_extractor", fromlist=["find_func_in_source"]).find_func_in_source(name, src_root)
     log.info("find_func_in_source returned %d candidates", len(found))
     if not found:
+        if _try_underscore_fallback(name, src_root):
+            return
         _print_prefix_candidates(name, src_root)
         return
 
@@ -281,7 +283,52 @@ def cmd_lookup(name: str) -> None:
 
     # 所有文件都搜完, 未找到
     log.warning("NOT_FOUND name=%s duration=%.2fs", name, time.time() - _t0)
+    if _try_underscore_fallback(name, src_root):
+        return
     _print_prefix_candidates(name, src_root)
+
+
+def _try_underscore_fallback(name: str, src_root: Path) -> bool:
+    """前导下划线 fallback: 精确查找失败时, 尝试有/无前导 _ 的变体名。
+
+    C 项目常有混合命名: 内部 static 函数带 _ (如 _http_head_parse),
+    公开 API 函数不带 _ (如 http_head_get_url)。LLM 混淆时会用错前缀。
+    此函数在精确查找全流程失败后, 用变体名重试 DB + grep + tree-sitter。
+    找到则打印结果并返回 True; 未找到返回 False (继续走 prefix candidates)。
+    """
+    alt = name[1:] if name.startswith("_") else "_" + name
+    if alt == name or len(alt) < 2:
+        return False
+    log.info("underscore fallback: trying %s -> %s", name, alt)
+    # 1. DB 查变体名
+    func = _find_func(alt)
+    if func:
+        log.info("fallback DB HIT: %s -> %s file=%s", name, alt, func.get("file", ""))
+        _log_trajectory(func, alt)
+        body = _read_body(func)
+        _print_function_result(func["name"], func["file"], func["start_line"],
+                              func["end_line"], func["signature"], body)
+        return True
+    # 2. grep + tree-sitter 查变体名
+    import importlib
+    fe = importlib.import_module("app.dataflow_v2.function_extractor")
+    found = fe.find_func_in_source(alt, src_root)
+    log.info("fallback find_func_in_source: alt=%s candidates=%d", alt, len(found))
+    if not found:
+        return False
+    db_dir = str(_db_dir())
+    for rel_file, _ in found:
+        result = fe.find_function_in_file(str(src_root), rel_file, alt)
+        if result:
+            start_line, end_line, sig = result
+            log.info("fallback found: %s -> %s file=%s lines=%s-%s",
+                     name, alt, rel_file, start_line, end_line)
+            body = _read_body_from_source(src_root, rel_file, start_line, end_line)
+            _print_function_result(alt, rel_file, start_line, end_line, sig, body)
+            _async_index_file(str(src_root), rel_file, db_dir)
+            return True
+        _async_index_file(str(src_root), rel_file, db_dir)
+    return False
 
 
 def _print_prefix_candidates(name: str, src_root) -> None:
@@ -341,6 +388,13 @@ def cmd_taints(func_name: str) -> None:
     if not rows:
         # 尝试模糊匹配
         rows = _query("taints.db", "SELECT * FROM taints WHERE function LIKE ?", (f"%{func_name}",))
+    if not rows:
+        # 前导下划线 fallback
+        alt = func_name[1:] if func_name.startswith("_") else "_" + func_name
+        if alt != func_name and len(alt) >= 2:
+            rows = _query("taints.db", "SELECT * FROM taints WHERE function = ?", (alt,))
+            if rows:
+                log.info("taints underscore fallback: %s -> %s", func_name, alt)
     if rows:
         for r in rows:
             print(f"taint: {r['name']} (signature: {r['signature']})")
@@ -356,6 +410,13 @@ def cmd_propagations(func_name: str) -> None:
     func_rows = _query("functions.db", "SELECT func_id FROM functions WHERE name = ?", (func_name,))
     if not func_rows:
         func_rows = _query("functions.db", "SELECT func_id FROM functions WHERE name LIKE ?", (f"%{func_name}",))
+    if not func_rows:
+        # 前导下划线 fallback
+        alt = func_name[1:] if func_name.startswith("_") else "_" + func_name
+        if alt != func_name and len(alt) >= 2:
+            func_rows = _query("functions.db", "SELECT func_id FROM functions WHERE name = ?", (alt,))
+            if func_rows:
+                log.info("propagations underscore fallback: %s -> %s", func_name, alt)
     if not func_rows:
         print(f"NOT_FOUND: 函数 '{func_name}' 在函数库中未找到。")
         return
