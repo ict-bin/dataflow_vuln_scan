@@ -19,6 +19,13 @@
     "entry_screen_thinking_level": "off",
 
     "branch_pruning_enabled": false,
+    "pi_thinking_format": "qwen-chat-template",
+    "pi_chat_template_kwargs": {
+        "thinking": {
+            "$var": "thinking.enabled"
+        }
+    },
+    "pi_supports_reasoning_effort": false,
 
     "workers": {
         "default_tools": ["read", "bash", "edit", "write", "find"],

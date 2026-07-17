@@ -14,7 +14,13 @@ from sqlalchemy.orm import Session
 
 from app.config import load_service_config
 from app.db.models import AppDvsDebugConfig, AppDvsProjectConfig
-from app.models import normalize_max_rounds_exceeded_review_strategy
+from app.models import (
+    DEFAULT_PI_CHAT_TEMPLATE_KWARGS,
+    normalize_bool,
+    normalize_max_rounds_exceeded_review_strategy,
+    normalize_pi_chat_template_kwargs,
+    normalize_pi_thinking_format,
+)
 
 logger = logging.getLogger("dvs.config_service")
 
@@ -58,6 +64,14 @@ def _normalize_config(data: Dict[str, Any]) -> Dict[str, Any]:
     data = dict(data)
     data["max_rounds_exceeded_review_strategy"] = normalize_max_rounds_exceeded_review_strategy(
         data.get("max_rounds_exceeded_review_strategy")
+    )
+    data["pi_thinking_format"] = normalize_pi_thinking_format(data.get("pi_thinking_format"))
+    data["pi_chat_template_kwargs"] = normalize_pi_chat_template_kwargs(
+        data.get("pi_chat_template_kwargs", DEFAULT_PI_CHAT_TEMPLATE_KWARGS)
+    )
+    data["pi_supports_reasoning_effort"] = normalize_bool(
+        data.get("pi_supports_reasoning_effort"),
+        default=False,
     )
     data["pass_threshold"] = 0
     workers = data.setdefault("workers", {})

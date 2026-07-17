@@ -16,11 +16,14 @@ from typing import Any, Dict, Optional
 import yaml
 
 from .models import (
+    DEFAULT_PI_CHAT_TEMPLATE_KWARGS,
     AgentInstanceConfig,
     RoleConfig,
     ServiceConfig,
     TaskConfig,
     normalize_max_rounds_exceeded_review_strategy,
+    normalize_pi_chat_template_kwargs,
+    normalize_pi_thinking_format,
     normalize_pass_threshold,
 )
 
@@ -224,6 +227,10 @@ def load_service_config(config_path: str) -> ServiceConfig:
         raise FileNotFoundError(f"服务配置文件不存在: {config_path}")
     raw = json.loads(p.read_text(encoding="utf-8"))
     raw["pass_threshold"] = normalize_pass_threshold(raw.get("pass_threshold"))
+    raw["pi_thinking_format"] = normalize_pi_thinking_format(raw.get("pi_thinking_format"))
+    raw["pi_chat_template_kwargs"] = normalize_pi_chat_template_kwargs(raw.get("pi_chat_template_kwargs"))
+    if "pi_supports_reasoning_effort" not in raw:
+        raw["pi_supports_reasoning_effort"] = False
     return ServiceConfig(**raw)
 
 
@@ -264,6 +271,11 @@ def build_task_config(svc: ServiceConfig, prompt: str, cwd: str = None) -> TaskC
         entry_screen_thinking_level=getattr(svc, "entry_screen_thinking_level", "off"),
         branch_pruning_enabled=getattr(svc, "branch_pruning_enabled", False),
         vuln_mining_thinking_level=getattr(svc, "vuln_mining_thinking_level", "high"),
+        pi_thinking_format=getattr(svc, "pi_thinking_format", "qwen-chat-template"),
+        pi_chat_template_kwargs=normalize_pi_chat_template_kwargs(
+            getattr(svc, "pi_chat_template_kwargs", DEFAULT_PI_CHAT_TEMPLATE_KWARGS)
+        ),
+        pi_supports_reasoning_effort=bool(getattr(svc, "pi_supports_reasoning_effort", False)),
         workers=svc.workers.model_copy(deep=True),
         judges=svc.judges.model_copy(deep=True),
         output_dir=svc.output_dir,

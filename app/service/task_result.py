@@ -557,6 +557,7 @@ def _write_models_json_from_db(db: Session) -> None:
             base_url=svc_yaml.configcenter.base_url,
             token=svc_yaml.auth_service.service_machine_token,
             timeout=svc_yaml.configcenter.timeout,
+            db=db,
         )
     except Exception as _exc:
         logger.warning("_write_models_json_from_db failed: %s", _exc, exc_info=True)

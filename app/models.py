@@ -17,12 +17,55 @@ MAX_ROUNDS_EXCEEDED_REVIEW_STRATEGIES = {
     "treat_as_failed",
 }
 
+PI_THINKING_FORMATS = {
+    "reasoning_effort",
+    "openrouter",
+    "deepseek",
+    "together",
+    "zai",
+    "qwen",
+    "chat-template",
+    "qwen-chat-template",
+}
+
+DEFAULT_PI_CHAT_TEMPLATE_KWARGS = {
+    "thinking": {
+        "$var": "thinking.enabled",
+    },
+}
+
 
 def normalize_max_rounds_exceeded_review_strategy(value: str | None) -> str:
     candidate = str(value or "").strip().lower()
     if candidate in MAX_ROUNDS_EXCEEDED_REVIEW_STRATEGIES:
         return candidate
     return "treat_as_passed"
+
+
+def normalize_pi_thinking_format(value: object) -> str:
+    candidate = str(value or "").strip().lower()
+    if candidate in PI_THINKING_FORMATS:
+        return candidate
+    return "qwen-chat-template"
+
+
+def normalize_pi_chat_template_kwargs(value: object) -> dict:
+    if isinstance(value, dict):
+        return value
+    return dict(DEFAULT_PI_CHAT_TEMPLATE_KWARGS)
+
+
+def normalize_bool(value: object, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    candidate = str(value).strip().lower()
+    if candidate in {"1", "true", "yes", "on"}:
+        return True
+    if candidate in {"0", "false", "no", "off"}:
+        return False
+    return default
 
 
 def normalize_pass_threshold(value: object) -> str | None:
@@ -99,6 +142,9 @@ class ServiceConfig(BaseModel):
     entry_screen_thinking_level: str = Field(default="off", description="入口筛查 agent 思考等级，默认 off 以省 token")
     branch_pruning_enabled: bool = Field(default=False, description="分支剪枝开关（智能模式）：开启后在污点分析完成后 fork 会话，由 LLM 判断每个 followup 是否值得跟入。关闭=全面模式，所有 followup 全部追踪")
     vuln_mining_thinking_level: str = Field(default="high", description="漏洞挖掘 agent 思考等级。完整模式下仅 vuln mining 使用思考，其余 LLM 调用强制 off")
+    pi_thinking_format: str = Field(default="qwen-chat-template", description="pi agent thinking 兼容格式")
+    pi_chat_template_kwargs: dict = Field(default_factory=lambda: dict(DEFAULT_PI_CHAT_TEMPLATE_KWARGS), description="thinkingFormat=chat-template 时写入 compat.chatTemplateKwargs")
+    pi_supports_reasoning_effort: bool = Field(default=False, description="thinkingFormat=together 时是否声明 supportsReasoningEffort")
 
     workers: RoleConfig = Field(default_factory=RoleConfig)
     judges: RoleConfig = Field(default_factory=RoleConfig)
@@ -153,6 +199,9 @@ class TaskConfig(BaseModel):
     entry_screen_thinking_level: str = Field(default="off")
     branch_pruning_enabled: bool = Field(default=False)
     vuln_mining_thinking_level: str = Field(default="high")
+    pi_thinking_format: str = Field(default="qwen-chat-template")
+    pi_chat_template_kwargs: dict = Field(default_factory=lambda: dict(DEFAULT_PI_CHAT_TEMPLATE_KWARGS))
+    pi_supports_reasoning_effort: bool = Field(default=False)
     # 任务级 debug 特性开关 (单任务独立启停, 默认全关 = 主线行为)。
     # 已注册键:
     #   clang_mutex    - clang 互斥分支分析 + 幽灵调用点丢弃 (污点跟踪正确性)
