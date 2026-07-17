@@ -38,8 +38,29 @@ class ReaderFinder:
         self.cancel_event = cancel_event
         self._acfg = (config.workers.agents[0] if config.workers.agents else None)
 
+    def _read_func_body(self, func_file: str, start: int, end: int) -> str:
+        """读源文件, 提取函数体, 加行号前缀。"""
+        if not func_file or not start:
+            return ""
+        from pathlib import Path
+        src_path = Path(self.source_root) / func_file
+        if not src_path.is_file():
+            return ""
+        try:
+            lines = src_path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except Exception:
+            return ""
+        s = max(0, start - 1)
+        e = min(len(lines), end) if end else min(len(lines), s + 200)
+        result = []
+        for i in range(s, e):
+            ln = i + 1  # 文件绝对行号 (1-based)
+            result.append(f"{ln:>5}│ {lines[i]}")
+        return "\n".join(result)
+
     def find(self, escape_info: dict) -> list[str]:
-        """escape_info = {escape_subkind, carrier, escape_via, sink_ref, taints, func} -> [reader_name]。"""
+        """escape_info = {escape_subkind, carrier, escape_via, sink_ref, taints,
+        func, func_name, func_file, func_start_line, func_end_line} -> [reader_name]。"""
         if self._acfg is None:
             return []
         from ..runner import run_agent
@@ -48,13 +69,22 @@ class ReaderFinder:
         sp = str(session_path(self.sessions_dir, escape_info.get("func", "?")[:40],
                               escape_info.get("carrier") or escape_info.get("sink_ref") or "esc",
                               kind="track"))
+        # 内嵌源函数体 (行号标记) — LLM 不需要查 v2_db 就能看到逃逸点
+        func_name = escape_info.get('func_name', escape_info.get('func', '?'))
+        func_file = escape_info.get('func_file', '')
+        func_start = escape_info.get('func_start_line', 0)
+        func_end = escape_info.get('func_end_line', 0)
+        body_text = self._read_func_body(func_file, func_start, func_end)
         prompt = (
-            f"## 源函数\n{escape_info.get('func', '?')}\n\n"
+            f"## 源函数\n{func_name} ({func_file}, 行 {func_start}-{func_end})\n\n"
+        )
+        if body_text:
+            prompt += f"## 源函数体 (行号已标记)\n```\n{body_text}\n```\n\n"
+        prompt += (
             f"## 逃逸信息\n"
             f"- escape_subkind: {escape_info.get('escape_subkind', '')}\n"
             f"- carrier: {escape_info.get('carrier', '')}\n"
             f"- escape_via: {escape_info.get('escape_via', '')}\n"
-            f"- sink_ref (外部对象/容器): {escape_info.get('sink_ref', '')}\n"
             f"- taints: {escape_info.get('taints', [])}\n\n"
             f"请按系统提示词策略, 用 v2_db 查找读取这条逃逸污点的下游函数。\n"
         )

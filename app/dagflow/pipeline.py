@@ -214,7 +214,8 @@ class DagflowPipeline:
             fr_ = FunctionResolver(config=self.config, source_root=self.source_root,
                                    v2_db_dir=v2_db_dir, sessions_dir=sessions_dir,
                                    task_id=task_id, on_event=self.on_event,
-                                   cancel_event=self.cancel_event)
+                                   cancel_event=self.cancel_event,
+                                   func_lookup_by_id=func_index.get_by_id)
             dispatcher = TrackerDispatcher(
                 store=store, func_lookup=func_index.get_by_name,
                 on_enqueue=lambda fid, t: orch._wq.put(_make_callee_item(fid, t)),

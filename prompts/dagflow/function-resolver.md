@@ -16,10 +16,12 @@
 
 ## 策略
 
-1. 用 `python3 /opt/dataflow_vuln_scan/tools/v2_db.py lookup <源函数名>` 读源函数体，搞清指针表达式的类型（如 `ctxt->sax` 是某 struct 的字段）。
-2. 用 `python3 /opt/dataflow_vuln_scan/tools/v2_db.py symbol <字段名>` 搜该字段名/类型，找赋值点（谁给该字段赋了函数地址 / 注册了回调）。
-3. 对每个候选用 v2_db lookup 读体，确认是否真把某函数赋给了该指针字段。
-4. 也可能是函数表/vtable/dispatch_map，按语义找注册点。
+源函数体已在 prompt 中提供（带行号）。你可以直接看到间接调用发生的位置和上下文。
+
+1. 看源函数体, 搞清指针表达式的类型（如某 struct 的字段）。
+2. 用 `python3 /opt/dataflow_vuln_scan/tools/v2_db.py symbol <字段名>` 搜该字段名, 找赋值点（谁给该字段赋了函数地址 / 注册了回调）。
+3. 对每个候选用 v2_db lookup 读体, 确认是否真把某函数赋给了该指针字段。
+4. 也可能是函数表/vtable/dispatch_map, 按语义找注册点。
 5. 只报真实注册到该指针的函数；不确定不报。
 
 ## 工具约束

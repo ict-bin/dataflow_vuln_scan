@@ -31,11 +31,19 @@ def resolve(store: DagflowStore, *, origin_func: str, origin_taint: str,
     if src_node is None:
         return 0
     esc_edges = [e for e in src_node.children if e.kind in ("extern", "container")]
+    # 解析源函数信息 (供 reader_finder 内嵌 prompt, 不用 LLM 查 hash)
+    src_func = func_lookup(origin_func) if func_lookup else None
+    src_func_name = getattr(src_func, "name", origin_func) if src_func else origin_func
+    src_func_file = getattr(src_func, "file", "") if src_func else ""
+    src_start = getattr(src_func, "start_line", 0) if src_func else 0
+    src_end = getattr(src_func, "end_line", 0) if src_func else 0
     n_readers = 0
     for e in esc_edges:
         info = {"escape_subkind": e.escape_subkind, "carrier": e.carrier,
                 "escape_via": e.escape_via, "sink_ref": e.sink_ref,
-                "taints": e.taints, "func": origin_func}
+                "taints": e.taints, "func": origin_func,
+                "func_name": src_func_name, "func_file": src_func_file,
+                "func_start_line": src_start, "func_end_line": src_end}
         readers = reader_finder(info) if reader_finder else []
         for r_name in readers:
             callee = func_lookup(r_name)
