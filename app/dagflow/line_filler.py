@@ -143,6 +143,30 @@ def _extract_params(signature: str) -> list[str]:
     return params
 
 
+def _extract_return_expr(fdef: Any, start: int, end: int, source: bytes) -> str | None:
+    """在函数体 AST 找 start行(到end行) 的 return_statement, 返回返回表达式文本。
+
+    e.g. return ret; → "ret"
+         return conn->field; → "conn->field"
+         return -1; → "-1" (调用方判断常量后删边)
+         return callee(args); → "callee(args)"
+    """
+    best = None
+    for n in _walk(fdef):
+        if n.type in ("return_statement", "RETURN_STATEMENT"):
+            nl = n.start_point[0] + 1
+            if nl == start or (start <= nl <= end) or (nl <= start and n.end_point[0] + 1 >= start):
+                # return_statement 的子节点 = 返回表达式 (无 return 关键字)
+                for c in n.children:
+                    if c.type not in ("return_keyword", "RETURN_KEYWORD", ";"):
+                        txt = _node_text(c, source)
+                        if txt:
+                            if best is None or abs(nl - start) < abs(best[1] - start):
+                                best = (txt, nl)
+                            break
+    return best[0] if best else None
+
+
 def fill_lines(dag: TaintDAG, func, source_root: str, func_lookup=None) -> None:
     """后处理: 从 LLM 输出的行号解析源码补全 DAG 字段。
 
@@ -242,3 +266,27 @@ def fill_lines(dag: TaintDAG, func, source_root: str, func_lookup=None) -> None:
     # ── 填 node.is_source (从 source 字段) ──
     for node in dag.nodes:
         node.is_source = bool(node.source)
+
+    # ── return 边: 从源码提取返回表达式 → 填 taints (常量返回删边) ──
+    _CONST_RE = None
+    import re as _re
+    _CONST_RE = _re.compile(r'^\s*(return\s+)?(?:0|-1+|NULL|nullptr|true|false|\d+(?:\.\d+)?[fLuU]*)\s*;?\s*$', _re.IGNORECASE)
+    edges_to_remove = []
+    for node in dag.nodes:
+        for i, e in enumerate(node.children):
+            if e.kind != "return" or not e.line:
+                continue
+            expr = _extract_return_expr(fdef, e.line, e.line_end or e.line, src)
+            if expr is None:
+                # 找不到 return 语句 → 保留边但 taints 为空 (挖掘 LLM 可自行读源码)
+                continue
+            if _CONST_RE.match(f"return {expr};"):
+                # 常量返回 → 无污点传播 → 标记删除
+                edges_to_remove.append((node, i))
+                logger.info("return edge removed: constant return at L%d", e.line)
+            else:
+                e.taints = [expr]
+    # 删除常量返回边
+    for node, i in sorted(edges_to_remove, key=lambda x: -x[1]):
+        if i < len(node.children):
+            node.children.pop(i)

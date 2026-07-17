@@ -77,7 +77,7 @@ def _func_signature(node: Any, source: bytes) -> str:
 
 
 def read_function_body(source_root: str, func: FunctionRecord, max_lines: int = 0) -> str:
-    """从原源文件按 start_line/end_line 读取函数体 (不依赖 body_path 文件)。"""
+    """从原源文件按 start_line/end_line 读取函数体, 带行号前缀。"""
     src_path = Path(source_root) / func.file
     if not src_path.is_file():
         return f"// 源文件不可读: {func.file}\n// 行 {func.start_line}-{func.end_line}"
@@ -88,7 +88,7 @@ def read_function_body(source_root: str, func: FunctionRecord, max_lines: int = 
         body_lines = lines[start:end]
         if max_lines > 0 and len(body_lines) > max_lines:
             body_lines = body_lines[:max_lines]
-        return "\n".join(body_lines)
+        return "\n".join(f"{func.start_line+i:4d} | {line}" for i, line in enumerate(body_lines))
     except OSError as e:
         return f"// 读取失败: {e}\n// 行 {func.start_line}-{func.end_line}"
 
