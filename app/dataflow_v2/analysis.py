@@ -475,9 +475,15 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                                caller=func.name, claimed_line=prop.call_line,
                                reason="exists in function DB, clang may have missed callsite (macro/include)")
                     continue
-                logger.info("drop phantom callee %s in %s (not in body)", prop.target_function, func.name)
-                self.on_event("v2_phantom_callee_dropped", function=prop.target_function,
-                           caller=func.name, claimed_line=prop.call_line)
+                # callee 不在 DB 也不在 clang 体: 保留为未校验传播 (不丢弃)
+                # 之前丢弃导致 _prop_count=0 → “未产出传播边” 误报
+                prop.target_func_id = self._resolve_target_func_id(store, prop)
+                validated_props.append(prop)
+                logger.info("keep unvalidated callee %s in %s (not in DB, not in clang body)",
+                            prop.target_function, func.name)
+                self.on_event("v2_phantom_callee_kept", function=prop.target_function,
+                           caller=func.name, claimed_line=prop.call_line,
+                           reason="not in function DB and not in clang body; kept as unvalidated")
                 continue
             prop.callsite_validated = True
             prop.call_line = int(ci.get("call_line") or prop.call_line)

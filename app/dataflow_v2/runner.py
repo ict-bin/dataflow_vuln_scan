@@ -121,8 +121,11 @@ class DataflowV2Runner:
             # 2) 根污点参数
             #    EA 给了具体 taint_params → 直接用
             #    EA 没给 → 标记为 "auto", prompt 告知 LLM 自行分析所有入参 + 内部调用产生的污点
-            if cfg.taint_params:
-                tp_names = cfg.taint_params
+            #    EA 传了非法值 (纯数字/非标识符) → 回退 auto, 防 LLM 找不到变量导致 0 传播
+            import re as _re
+            _VALID_IDENT = _re.compile(r'^[A-Za-z_][\w:.<>\[\]*-]*$')
+            if cfg.taint_params and all(_VALID_IDENT.match(str(p).strip()) for p in cfg.taint_params):
+                tp_names = [str(p).strip() for p in cfg.taint_params]
                 root_taint = TaintParamInfo(
                     positions=list(range(len(tp_names))),
                     signature=",".join(tp_names),
@@ -169,9 +172,22 @@ class DataflowV2Runner:
                 except Exception:
                     _prop_count = 0
                 if _edge_count == 0 and _prop_count == 0:
-                    # 无传播边也无 propagation 记录 = taint 分析确实失败
-                    status = TaskStatus.COMPLETED_LIMITED
-                    err_msg = "v2: taint 分析未产出传播边 (LLM 输出可能截断或格式错误)"
+                    # 0 传播边 + 0 传播记录: 区分"解析失败" vs "解析成功但无传播"
+                    # taints > 0 说明 LLM 成功分析了函数, 识别了污点, 但未报告任何传播路径
+                    # taints == 0 说明 LLM 解析失败或未识别污点 (真失败)
+                    try:
+                        _taint_count = store._q("taints", "SELECT count(*) FROM taints")
+                        _taint_count = int(_taint_count[0][0]) if _taint_count else 0
+                    except Exception:
+                        _taint_count = 0
+                    if _taint_count > 0:
+                        # 解析成功, 有污点但无传播 = LLM 判定无传播路径 (可能漏报)
+                        status = TaskStatus.COMPLETED_LIMITED
+                        err_msg = "v2: taint 分析未产出传播边 (LLM 识别了污点但未报告传播路径, 可能漏报)"
+                    else:
+                        # 无污点也无传播 = taint 分析确实失败 (解析失败或 LLM 未识别污点)
+                        status = TaskStatus.COMPLETED_LIMITED
+                        err_msg = "v2: taint 分析未产出传播边 (LLM 输出可能截断或格式错误)"
                 # else: 有 propagation 记录但 edge_count=0 (callee 找不到/不跟入) = 正常完成
             final_output = self._build_final_report(tid, cfg, store, graph_db_path)
             vuln_summary = {"functions": len(store.list_functions()),

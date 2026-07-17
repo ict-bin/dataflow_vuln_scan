@@ -166,13 +166,16 @@ class DagflowOrchestrator:
 
     def _emit_return(self, dag, node, e, caller_func_id: str = "", depth: int = 0) -> None:
         """return 边 -> 回传项 (caller_func_id, return_taint_sig)。
-        caller = 触发本 (func,taint) 分析的调用方 (item.origin_func)。根/无 caller 跳过。"""
+        caller = 触发本 (func,taint) 分析的调用方 (item.origin_func)。根/无 caller 跳过。
+        depth 用调用者深度 (depth-1): 当前函数在 depth, 其调用者在 depth-1。
+        之前误用 depth (当前函数深度), 导致调用者被在错误深度重分析。"""
         if not caller_func_id or caller_func_id == "(root)":
             return  # 根无 caller, return 不回传
+        caller_depth = max(0, depth - 1)  # 调用者比当前函数浅一层
         for t in e.taints:
             self._wq.put(WorkItem(kind="return_taint", target_func=caller_func_id,
                                   target_taint=t, origin_func=dag.func_id,
-                                  origin_node=node.id, depth=depth,
+                                  origin_node=node.id, depth=caller_depth,
                                   origin_edge=f"{node.id}->{e.to_node}"))
 
     def _track_stub(self, item: WorkItem) -> None:
