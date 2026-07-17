@@ -1,7 +1,8 @@
-"""dagflow taint 分析器: LLM 产 DAG (无行号) + JSON 解析。
+"""dagflow taint 分析器: LLM 产 DAG (行号引用) + JSON 解析 + 后处理补全。
 
-设计: docs/design-taint-analysis.md §3 (LLM 输出拓扑+语义, 不含行号; 行号由 line_filler 填)。
-独立会话 (func-taint, 不 fork 调用链)。复用 run_agent + read_function_body + _extract_json_object。
+设计: docs/design-taint-analysis.md §3 (行号为桥梁)。
+LLM 读带行号的函数体 → 输出 DAG (含行号) → line_filler 后处理补全 condition/checks/param_taints。
+独立会话 (func-taint, 不 fork 调用链)。复用 run_agent + _extract_json_object。
 """
 from __future__ import annotations
 import json, logging
@@ -22,70 +23,65 @@ def _system_prompt() -> str:
     return _PROMPT_CACHE
 
 
+def _numbered_body(body: str, start_line: int) -> str:
+    """给函数体每行加行号前缀。
+
+    格式: `  765│ code...`
+    start_line 是第一行对应的文件行号。
+    """
+    lines = body.splitlines()
+    result = []
+    for i, line in enumerate(lines):
+        ln = start_line + i
+        result.append(f"{ln:>5}│ {line}")
+    return "\n".join(result)
+
+
 class TaintAnalyzer:
-    """单函数单污点 DAG 分析 (LLM, 无行号)。"""
+    """单函数单污点 DAG 分析 (LLM 输出行号, 脚本后处理)。"""
 
     def __init__(self, *, config: Any, sessions_dir: Path, on_event: Any = None,
-                 task_id: str = "") -> None:
+                 task_id: str = "", func_lookup=None) -> None:
         self.config = config
         self.sessions_dir = Path(sessions_dir)
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
         self.on_event = on_event
         self.task_id = task_id
+        self.func_lookup = func_lookup
         self.source_root = getattr(config, "cwd", "") or getattr(config, "source_root", "")
-        # agent 配置 (复用 workers.agents[0])
         self._acfg = (config.workers.agents[0] if config.workers.agents else None)
         self._default_tools = getattr(config.workers, "default_tools", None)
 
-    def _build_prompt(self, func, body: str, taint_sig: str, is_auto: bool,
-                     clang_facts: dict | None = None) -> tuple[str, str]:
-        """返回 (prompt, session_path)。clang_facts 非空时注入结构事实。"""
-        import json as _json
+    def _build_prompt(self, func, body: str, taint_sig: str, is_auto: bool) -> tuple[str, str]:
+        """返回 (prompt, session_path)。函数体带行号。"""
+        numbered = _numbered_body(body, func.start_line)
         taint_desc = ("自行分析（未指定具体污点参数）。识别本函数内所有外部输入源（入参/内部调用产物/被动传递），"
-                      "每个源作为 source 节点 (is_source=true) 起 DAG。") if is_auto else \
+                      "每个源作为 source 节点起 DAG。") if is_auto else \
                      f"入口污点签名: {taint_sig}（从该污点起跟踪传播）"
-        parts = [
-            f"# 阶段：单函数污点传播 DAG 分析\n\n",
-            f"目标函数: `{func.file}::{func.name}` (行 {func.start_line}-{func.end_line})\n",
-            f"{taint_desc}\n\n",
-        ]
-        if clang_facts:
-            parts.append("## clang 结构事实（权威，必须使用，不要自己猜）\n")
-            parts.append(f"```json\n{_json.dumps(clang_facts, ensure_ascii=False, indent=2)[:15000]}\n```\n\n")
-            parts.append("- condition: 用 clang 给的调用点 branch 字段\n")
-            parts.append("- checks: 从 clang 给的 checks 里选约束污点的\n")
-            parts.append("- sink_ref: 用 clang 给的调用点 callee 名\n")
-            parts.append("- param_taints: 用 clang 给的调用点 args 映射\n")
-            parts.append("- line: 用 clang 给的调用点 line\n\n")
-        parts.append(f"## 函数体\n```c\n{body}\n```\n\n")
-        parts.append("按系统提示词要求输出 DAG JSON（顶层唯一一个 ```json 块，最后输出，不含 line）。")
-        prompt = "".join(parts)
+        prompt = (
+            f"# 阶段：单函数污点传播 DAG 分析\n\n"
+            f"目标函数: `{func.file}::{func.name}` (行 {func.start_line}-{func.end_line})\n"
+            f"{taint_desc}\n\n"
+            f"## 函数体 (行号已标记)\n```\n{numbered}\n```\n\n"
+            f"按系统提示词要求输出 DAG JSON（顶层唯一一个 ```json 块，最后输出）。"
+        )
         from .session_naming import session_path
         sp = str(session_path(self.sessions_dir, func.name, taint_sig or "auto",
                               kind="taint", depth=getattr(self, "_cur_depth", -1)))
         return prompt, sp
 
     def analyze(self, func, taint_sig: str, is_auto: bool = False) -> tuple[TaintDAG, str]:
-        """分析 (func, taint) → (DAG 无行号, session_path)。失败 raise (调用方删占位)。"""
+        """分析 (func, taint) → (DAG 含后处理, session_path)。失败 raise (调用方删占位)。"""
         if self._acfg is None:
             raise RuntimeError("no agent configured for dagflow taint_analyzer")
         from ..dataflow_v2.function_extractor import read_function_body
         from ..runner import run_agent
         from ..parsers import _extract_json_object
+        from .line_filler import fill_lines
         import time as _time
         _t0 = _time.time()
         body = read_function_body(self.source_root, func, max_lines=0)
-        # clang 先出事实
-        clang_facts = None
-        try:
-            from .clang_facts import extract_facts
-            clang_facts = extract_facts(self.source_root, func.file, func.name)
-            if clang_facts:
-                logger.info("[dagflow-taint] clang facts: %d callsites, %d checks",
-                            len(clang_facts.get('callsites',[])), len(clang_facts.get('checks',[])))
-        except Exception as e:
-            logger.warning("[dagflow-taint] clang facts failed: %s", e)
-        prompt, sp = self._build_prompt(func, body, taint_sig, is_auto, clang_facts)
+        prompt, sp = self._build_prompt(func, body, taint_sig, is_auto)
         v2_env = {"DVS_SOURCE_ROOT": str(self.source_root),
                   "DVS_V2_DB_DIR": str(self.sessions_dir.parent / "dataflow-v2")}
         logger.info("[dagflow-taint] CALLING run_agent func=%s taint=%s session=%s",
@@ -102,7 +98,7 @@ class TaintAnalyzer:
             timeout_max_retries=getattr(self.config, "agent_timeout_max_retries", 20),
             pi_max_retries=getattr(self.config, "pi_max_retries", 3),
             pi_retry_delay=getattr(self.config, "pi_retry_delay", 10.0),
-            task_context={"task_id": self.task_id, 
+            task_context={"task_id": self.task_id,
                           "task_root": str(self.sessions_dir.parent.parent.parent),
                           "task_run_root": str(self.sessions_dir.parent),
                           "task_pi_dir": self.config.role_pi_dir("workers"),
@@ -114,12 +110,14 @@ class TaintAnalyzer:
             parsed = _greedy_json_object(text)
         if not isinstance(parsed, dict) or not isinstance(parsed.get("nodes"), list):
             raise RuntimeError(f"dagflow taint JSON parse failed for {func.name}/{taint_sig}")
-        # 注入归属 (LLM 不输出 func_id/taint_signature)
         parsed["func_id"] = func.func_id
         parsed["taint_signature"] = taint_sig or "auto"
         dag = TaintDAG.from_dict(parsed)
-        logger.info("[dagflow-taint] DONE func=%s taint=%s duration=%.1fs error=%s output_len=%d",
-                    func.name, taint_sig, _time.time() - _t0, (output.error or "")[:100], len(output.output or ""))
+        # 后处理: 从行号解析源码补全 condition/checks/param_taints/sink_ref
+        fill_lines(dag, func, self.source_root, func_lookup=self.func_lookup)
+        logger.info("[dagflow-taint] DONE func=%s taint=%s duration=%.1fs error=%s output_len=%d nodes=%d",
+                    func.name, taint_sig, _time.time() - _t0, (output.error or "")[:100],
+                    len(output.output or ""), len(dag.nodes))
         if self.on_event:
             try:
                 self.on_event("v2_dagflow_taint_done", function=func.name, taint=taint_sig,
@@ -140,7 +138,6 @@ def _greedy_json_object(text: str) -> dict | None:
             return json.loads(blk.strip())
         except Exception:
             continue
-    # 最外层花括号
     s = text.find("{")
     e = text.rfind("}")
     if s >= 0 and e > s:

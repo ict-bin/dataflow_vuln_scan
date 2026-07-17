@@ -9,7 +9,7 @@
 1. **聚焦单函、单污点、独立会话**：一次分析 = 一个函数 × 一个污点签名，独立会话（不 fork 调用链上下文）。会话键 = `函数-taint`。
 2. **校验只记录、不影响传播**：传播基于代码 def-use，不被调用链前置校验左右；校验供下游（挖掘）消费。
 3. **传播条件 ≠ 污点校验**：边上的 `condition`（路径条件，选分支）与节点上的 `check`（sanitizer，对污点本身的约束）分开。
-4. **clang 先出结构事实，LLM 用事实构建 DAG**：clang 解析函数 AST → 提取调用点/分支/校验等结构事实 → 注入 prompt → LLM 基于事实输出 DAG（condition/checks/sink_ref/param_taints 来自 clang，def-use 流/语义分类来自 LLM）。**不做 LLM 输出 → clang 匹配**（匹配本身不可靠）。
+4. **行号为沟通桥梁**：prompt 函数体带行号 → LLM 输出行号引用 → 脚本 (tree-sitter) 从行号解析源码补全 condition/checks/param_taints/sink_ref。LLM 只输出拓扑+语义+行号，不输出结构化条件/校验对象（避免 JSON 格式错误）。行号支持跨行范围 `[start, end]`。
 5. **去重 = (func_id, 归一化污点签名)**，不含前置校验；func_id 含类/命名空间+签名 → overload 不合并。
 6. **队列驱动跨函数跟踪**：函数分析产出跟入项（callee/return/escape/indirect），去重后入分析队列，多线程并行消费。**编排器不递归遍历 DAG**。
 7. **AI 为中心，无硬编码白名单**：低价值 callee / sanitizer 语义由 LLM 判断，脚本不维护名单。
@@ -24,7 +24,7 @@
 |---|---|
 | `func_id` | 函数标识 = `sha(file, name, signature)`（name 含类/命名空间限定，signature 含参数 → overload 区分） |
 | `taint_signature` | 污点的归一化签名（`_norm_taint_sig`：去 `this->`/尾 `()`/lower） |
-| `entry_line` | 污点传入时对应该文件行号（clang 填） |
+| `entry_line` | 污点传入时对应该文件行号（LLM 输出） |
 
 - **独立会话**：每个 (func_id, taint_signature) 一个独立会话，**不 fork 调用链**。函数内传播自洽，不依赖 caller 上下文。
 - 同函数多入口污点 → 多个独立分析项，各自去重、可并行。
@@ -37,52 +37,60 @@
 
 ```
 TaintNode {
-  id: int                  # 函数内唯一节点编号
-  func_id: str
-  taint_signature: str     # 本次分析的污点签名（归属一次分析）
-  line: int                # 该节点对应代码行【clang 填】
-  taint: str               # 该节点处的污点签名（归一化）
-  parents: [int]           # 父节点 id（DAG；根=[]）
-  children: [TaintEdge]    # 出边
-  checks: [Check]          # 节点 sanitizer（见 2.3）【clang 提取，LLM 判语义】
-  prune: PruneSignal?      # 剪枝信号（见 2.4）【可空】
-  is_source: bool          # 污点源节点（无入口参数、函数内自生：返回值源/被动输入）【可空】
+  id: int                  # 数组下标 (脚本填, 非 LLM 输出)
+  taint: str               # 该节点处污点签名 (归一)【LLM】
+  line: int                # 该节点对应代码行【LLM 输出行号】
+  source: str              # 源函数名 (空=非源节点)【LLM】
+  check_lines: [int|[int,int]]  # if 条件行号列表【LLM】
+  edges: [TaintEdge]        # 出边【LLM】
+  # ── 脚本后处理填 ──
+  parents: [int]           # 从 edges 反推
+  checks: [{line, text}]    # 从 check_lines 解析源码
+  prune: PruneSignal?      # 从 prunes 顶层 dict 解析
+  is_source: bool          # = (source 非空)
 }
 
 TaintEdge {
-  to: int                  # 目标节点 id
-  line: int                # 传播行号【clang 填】
-  condition: [CondTerm]    # 路径条件（见 2.2）【clang 提取】
-  taints: [str]            # 沿该边传播的污点签名列表（单污点时长度 1）
-  kind: enum               # inside | callee | extern | container | return | source
-  sink_ref: str?           # kind∈{callee,extern,container} 的流出目标引用【clang 校准】
-  param_taints: [{param: str, taint: str}]?   # callee 边: callee 形参 ← caller 污点 映射【clang 提取实参】
-  escape_subkind: str?     # extern/global | extern/field_alias | container
-  carrier: str?            # 载体变量名（container/field_alias 常是 alloc 产物）
-  escape_via: str?        # 逃逸调用名（仅记录）
+  to: int                  # 目标节点下标【LLM】
+  line: int                # 传播行号【LLM】
+  kind: enum               # inside | callee | extern | container | return【LLM】
+  taints: [str]            # 沿边传播的污点签名列表【LLM】
+  # ── LLM 输出 (callee 边) ──
+  callee: str              # callee 限定名【LLM】
+  tainted_args: [{i: int, taint: str}]  # 被污实参索引列表【LLM】
+  cond_lines: [int|[int,int]]           # 路径条件行号列表【LLM】
+  # ── LLM 输出 (extern/container 边) ──
+  carrier: str
+  escape_via: str
+  # ── 脚本后处理填 ──
+  sink_ref: str            # = callee 或 escape_via
+  param_taints: [{param, taint}]  # 从 tainted_args + CallExpr args + callee 签名
+  condition: [{line, text}]      # 从 cond_lines 解析 if 条件文本
+  escape_subkind: str       # 从 kind + carrier 推断
 }
 ```
 
+**行号支持跨行范围**: `line: 765` (单行) 或 `line: [765, 767]` (多行)。`cond_lines` / `check_lines` 每个元素同理。脚本解析时按范围查找 AST 节点。
+
 ### 2.2 传播条件 condition（边，路径条件）
 
-**clang AST 精确提取**，不由 LLM 猜。clang 遍历 if/else/switch 分支栈 → 每个 CallExpr 的分支路径精确到代码行。
+**LLM 输出行号，脚本解析源码**。LLM 输出 `cond_lines: [786]` 或 `cond_lines: [[786, 788]]`（多行）。脚本从行号读源码 → tree-sitter 解析 if-statement → 提取条件文本。
 
 ```
-CondTerm =
-  | Atom { left, op, right }                  # clang 提取的条件表达式
-  | Compound { comb: "AND"|"OR", terms: [CondTerm] }   # clang 递归提取布尔结构
+condition = [{line: int, text: str}]   # 脚本从 cond_lines 解析
 ```
+
+不再使用 CondTerm(Atom/Compound) 递归结构——挖掘 LLM 直接读原始条件文本。
 
 ### 2.3 污点校验 check（节点，sanitizer）
 
-**clang AST 提取 if-statement 中的条件**，**LLM 判语义**（是否是对污点本身的约束）。
+**LLM 输出行号，脚本解析源码**。LLM 输出 `check_lines: [786, [746, 748]]`。脚本从行号读源码 → tree-sitter 解析 if-statement → 提取条件文本。
 
 ```
-Check { left: str, op: str, right: str }   # clang 提取条件表达式; LLM 判是否约束污点
+checks = [{line: int, text: str}]   # 脚本从 check_lines 解析
 ```
 
-- clang 提取所有 if-statement 的条件表达式 + 行号。
-- LLM 判：哪些是对污点本身的约束（进 checks），哪些是纯路径条件（上边 condition）。
+- LLM 只需判断"哪些 if 条件约束了污点"，输出行号。
 - **只记录、不影响传播**。
 
 ### 2.4 剪枝信号 PruneSignal（节点）
@@ -103,50 +111,45 @@ PruneSignal { reason: enum, detail: str }   # sanitized | low_value_callee | sin
 
 ## 3. 传播 DAG 的构建分工
 
-### 3.1 两阶段：clang 先出事实 → LLM 用事实构建 DAG
+### 3.1 行号为桥梁：LLM 输出行号 → 脚本解析源码补全
 
-**不用 compile_commands，用 libclang 语法解析**（`index.parse(args=..., options=PARSE_NONE)`，与 V2 相同——V2 已验证上百小时无 hang）。clang parse 失败 → 回退纯 LLM（不阻塞）。
+**prompt 函数体带行号** (如 `765│ code...`)。LLM 读带行号的代码，输出 DAG 时用行号引用所有位置。脚本 (tree-sitter) 从行号读源码解析结构化数据。
 
-#### 阶段 1: clang 提取结构事实
-
-clang 解析函数体 AST → 提取：
-
-| 事实 | clang 怎么提取 | 注入 prompt 什么 |
-|---|---|---|
-| **调用点表** | 遍历 CallExpr → 每个调用: callee 名、call_line、实参表达式列表、**分支路径**（if/else/switch 分支栈） | `callsites: [{callee, line, args, branch: "if(a->cmd==1) then"}]` |
-| **分支结构** | 遍历 if/switch → 每个: condition 表达式文本、condition_line、then_range、else_range | `branches: [{line, condition, type:"if", then:[L1,L2], else:[L3,L4]}]` |
-| **校验点** | 遍历 if-statement → 每个: condition 表达式、line、检查的变量名 | `checks: [{line, condition, checks_var}]` |
-| **幽灵校验** | LLM 只能从 clang 给的调用点列表里选 callee | 不注入——LLM 不可能输出不存在的 callee |
-
-#### 阶段 2: LLM 基于事实构建 DAG
-
-prompt 注入：函数体 + clang 结构事实。
-
-LLM 输出 DAG 的分工：
+#### LLM 输出（简化）
 
 | DAG 字段 | 来源 | 说明 |
 |---|---|---|
-| `condition`（边） | **clang** | 用 clang 给的分支条件，不自己猜 |
-| `checks`（节点） | **clang 提取 + LLM 判语义** | clang 给所有 if 条件；LLM 判哪些约束污点（进 checks）vs 纯路径条件（上 condition） |
-| `sink_ref`（callee 边） | **clang** | 用 clang 给的 callee 名，不自己猜 |
-| `param_taints` | **clang** | 用 clang 给的实参表达式映射 |
-| `line` | **clang** | 精确 CallExpr 行号 |
-| `kind` | **LLM** | 语义分类：inside/callee/extern/container/return/source |
-| `taints`（def-use 流） | **LLM** | 哪些变量被污染、赋值链、派生 |
-| `is_source` | **LLM** | 语义判：是否污点源（被动输入/返回值源） |
-| `self_contained` | **LLM** | 语义判：本函数是否有自身 sink |
-| `prune` | **LLM** | 语义判：sanitized/low_value_callee |
-| `parents`/`children`/DAG 结构 | **LLM** | def-use 拓扑（哪些节点连哪些边） |
+| `node.taint` | **LLM** | 污点签名 |
+| `node.line` | **LLM** | 行号 (读带行号代码) |
+| `node.source` | **LLM** | 源函数名 (null=非源) |
+| `node.check_lines` | **LLM** | if 条件行号列表 |
+| `edge.to/kind/taints/line` | **LLM** | DAG 拓扑 + 行号 |
+| `edge.callee` | **LLM** | callee 名 |
+| `edge.tainted_args` | **LLM** | 被污实参索引 + 污点 |
+| `edge.cond_lines` | **LLM** | 路径条件行号 |
+| `edge.carrier/escape_via` | **LLM** | extern/container 逃逸信息 |
+| `prunes` | **LLM** | 顶层 dict {node下标: reason} |
+| `self_contained/description/taint_failed` | **LLM** | 语义判断 |
 
-### 3.2 clang parse 失败时
+#### 脚本后处理 (tree-sitter 从行号解析)
 
-libclang 不可用 / 文件解析失败 → 无结构事实 → prompt 不注入 clang 段 → LLM 回退到自己猜 condition/checks/sink_ref（和之前一样）。**不阻塞、不崩**。
+| DAG 字段 | 来源 | 说明 |
+|---|---|---|
+| `edge.condition` | **脚本** | cond_lines → if-statement 条件文本 |
+| `node.checks` | **脚本** | check_lines → if-statement 条件文本 |
+| `edge.param_taints` | **脚本** | tainted_args 索引 → CallExpr args → callee 签名形参名 |
+| `edge.sink_ref` | **脚本** | = callee (callee 边) 或 escape_via |
+| `edge.escape_subkind` | **脚本** | 从 kind + carrier 推断 |
+| `node.parents` | **脚本** | 从 edges 反推 |
+| `node.id` | **脚本** | 数组下标 |
+| `node.is_source` | **脚本** | = (source 非空) |
 
-### 3.3 tree-sitter 角色
+### 3.2 tree-sitter 角色
 
-tree-sitter 仍用于：
-- **函数体提取**（function_extractor，已有）。
-- **行号兜底**（clang parse 失败时，best-effort 填行号）。
+tree-sitter 用于：
+- **函数体提取** (function_extractor, 已有)。
+- **后处理解析** (line_filler): 从 LLM 输出的行号解析 if 条件文本 / CallExpr args。
+- 行号范围查找: 支持 `[start, end]` 多行 if/调用。
 
 ## 4. 去重
 

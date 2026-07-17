@@ -128,7 +128,6 @@ class DagflowPipeline:
         from ..models import TaskResult, TaskStatus, TokenUsage
         from .dag_store import DagflowStore
         from .taint_analyzer import TaintAnalyzer
-        from .line_filler import fill_lines
         from .orchestrator import DagflowOrchestrator
         from .trackers import TrackerDispatcher
         from . import trigger
@@ -185,14 +184,14 @@ class DagflowPipeline:
             # ── 阶段 1: taint 跟踪 ──
             logger.info("[dagflow] PHASE 1 START: taint tracking, root=%s", root_name)
             analyzer = TaintAnalyzer(config=self.config, sessions_dir=sessions_dir,
-                                      on_event=self.on_event, task_id=task_id)
+                                      on_event=self.on_event, task_id=task_id,
+                                      func_lookup=func_index.get_by_name)
             analyzer.cancel_event = self.cancel_event
 
             def analyze_fn(func, taint_sig, depth=0):
                 analyzer._cur_depth = depth
                 try:
                     dag, _sp = analyzer.analyze(func, taint_sig, is_auto=(taint_sig == "auto"))
-                    fill_lines(dag, func, self.source_root)
                     return dag
                 except Exception as e:
                     import traceback

@@ -31,7 +31,7 @@ def build_chain(store: DagflowStore, dag: TaintDAG, source_root: str,
     chain.append({"step": 0, "type": "entry", "node": entry.id, "line": entry.line,
                   "taint": entry.taint, "taint_state": state,
                   "is_source": entry.is_source,
-                  "checks": [c.to_dict() for c in entry.checks]})
+                  "checks": list(entry.checks)})
     # 按 call_line 顺序遍历边 (BFS-ish, 简化: 按 edge.line 排序)
     edges_sorted = sorted(
         [(n, e) for n in dag.nodes for e in n.children],
@@ -56,7 +56,7 @@ def build_chain(store: DagflowStore, dag: TaintDAG, source_root: str,
                           "callee": e.sink_ref, "taint": e.taints, "taint_state": state,
                           "effect": effect["effect"], "detail": effect["detail"],
                           "is_indirect": _is_indirect(e.sink_ref),
-                          "condition": [c.to_dict() for c in e.condition]})
+                          "condition": list(e.condition)})
         elif e.kind in ("extern", "container"):
             chain.append({"step": step, "type": "escape", "from": n.id, "line": e.line,
                           "escape_subkind": e.escape_subkind, "carrier": e.carrier,

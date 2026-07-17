@@ -16,7 +16,7 @@
 from __future__ import annotations
 import json, sqlite3, threading
 from pathlib import Path
-from .models import TaintDAG, TaintNode, TaintEdge, Check, PruneSignal, _cond_from_dict
+from .models import TaintDAG, TaintNode, TaintEdge, PruneSignal
 
 
 _DDL = """
@@ -110,7 +110,7 @@ class DagflowStore:
                     "parents_json,checks_json,prune_json,is_source) VALUES (?,?,?,?,?,?,?,?,?)",
                     (fid, ts, n.id, n.line, n.taint,
                      json.dumps(n.parents, ensure_ascii=False),
-                     json.dumps([x.to_dict() for x in n.checks], ensure_ascii=False),
+                     json.dumps(n.checks, ensure_ascii=False),
                      json.dumps(n.prune.to_dict(), ensure_ascii=False) if n.prune else "",
                      1 if n.is_source else 0))
             for n in dag.nodes:
@@ -121,7 +121,7 @@ class DagflowStore:
                         "line,condition_json,taints_json,kind,sink_ref,param_taints_json,"
                         "escape_subkind,carrier,escape_via) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                         (fid, ts, eid, n.id, e.to_node, e.line,
-                         json.dumps([x.to_dict() for x in e.condition], ensure_ascii=False),
+                         json.dumps(e.condition, ensure_ascii=False),
                          json.dumps(e.taints, ensure_ascii=False),
                          e.kind, e.sink_ref,
                          json.dumps(e.param_taints, ensure_ascii=False),
@@ -144,7 +144,7 @@ class DagflowStore:
             n = TaintNode(
                 id=r["node_id"], line=r["line"], taint=r["taint"],
                 parents=json.loads(r["parents_json"] or "[]"),
-                checks=[Check.from_dict(x) for x in json.loads(r["checks_json"] or "[]")],
+                checks=list(json.loads(r["checks_json"] or "[]")),
                 prune=PruneSignal.from_dict(json.loads(r["prune_json"]) if r["prune_json"] else None),
                 is_source=bool(r["is_source"]))
             nodes.append(n)
@@ -156,7 +156,7 @@ class DagflowStore:
         for r in rows_e:
             e = TaintEdge(
                 to_node=r["to_node"], line=r["line"],
-                condition=[_cond_from_dict(x) for x in json.loads(r["condition_json"] or "[]")],
+                condition=list(json.loads(r["condition_json"] or "[]")),
                 taints=json.loads(r["taints_json"] or "[]"),
                 kind=r["kind"], sink_ref=r["sink_ref"],
                 param_taints=json.loads(r["param_taints_json"] or "[]"),
