@@ -12,17 +12,15 @@ from .taint_analyzer import _greedy_json_object
 
 logger = logging.getLogger("dvs.dagflow.reader_finder")
 
+_PROMPT_PATH = Path(__file__).resolve().parent.parent.parent / "prompts" / "dagflow" / "reader-finder.md"
+_PROMPT_CACHE: str | None = None
 
-_SYSTEM = """你是数据流污点分析中的外部逃逸下游读者追踪器。
-目标: 给定一条从源函数逃逸出的污点 (extern/container 边), 找出会读取到该污点的下游函数。
-策略:
-1. 用 v2_db lookup <源函数名> 读源函数体, 搞清逃逸涉及的类型 (如结构体 struct X, 载体挂入哪个字段/容器)。
-2. 用 v2_db 按该结构体类型查所有接收它的函数 (形参为 struct X* 的函数), 也可按字段名/容器名查访问者。
-3. 对每个候选用 v2_db lookup 读体, 判断是否真读取了承载污点的容器/字段 (list_for_each/裸 for/范围 for/索引访问/自定义迭代, 靠语义不靠宏名)。
-4. 只报真正会读到这条逃逸污点的函数; 不确定不报。
-输出 JSON: {"confirmed": [{"function": "...", "taint_param": "...", "reason": "..."}]}
-  function: 读者函数名 (v2_db 里真实存在); taint_param: 读者接收污点的入参名; reason: 为何认为读到。
-"""
+
+def _system_prompt() -> str:
+    global _PROMPT_CACHE
+    if _PROMPT_CACHE is None:
+        _PROMPT_CACHE = _PROMPT_PATH.read_text(encoding="utf-8")
+    return _PROMPT_CACHE
 
 
 class ReaderFinder:
@@ -65,7 +63,7 @@ class ReaderFinder:
             prompt=prompt, model=self._acfg.model,
             tools=self._acfg.tools or self.config.workers.default_tools,
             cwd=str(self.source_root), env=env, session_file=sp,
-            system_prompt=_SYSTEM, cancel_event=self.cancel_event,
+            system_prompt=_system_prompt(), cancel_event=self.cancel_event,
             thinking_level="off",
             run_timeout_seconds=min(getattr(self.config, "agent_run_timeout_seconds", 1500), 1600),
             timeout_retry_enabled=getattr(self.config, "agent_timeout_retry_enabled", True),
@@ -79,13 +77,17 @@ class ReaderFinder:
                           "agent_role": "workers", "fork_purpose": "external_tracking"},
         )
         text = output.output or ""
-        parsed = _extract_json_object(text, "confirmed") or _greedy_json_object(text) or {}
+        parsed = _extract_json_object(text, "readers") or _greedy_json_object(text) or {}
         out = []
-        for item in (parsed.get("confirmed") or []):
+        readers = parsed.get("readers") or parsed.get("confirmed") or []
+        for item in readers:
             if isinstance(item, dict):
                 fn = str(item.get("function", "")).strip()
                 if fn and fn != "NOT_FOUND":
                     out.append(fn)
+            elif isinstance(item, str):
+                if item and item != "NOT_FOUND":
+                    out.append(item)
         if self.on_event:
             try:
                 self.on_event("v2_dagflow_readers_found", func=escape_info.get("func", "")[:40],

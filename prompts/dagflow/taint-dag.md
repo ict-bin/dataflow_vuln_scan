@@ -69,7 +69,7 @@
          "line": 480, "carrier": "conn->last_request_time",
          "escape_via": "_dns_server_client_touch"
         },
-        {"to": -1, "kind": "return", "taints": ["new_taint"], "line": 850}
+        {"to": -1, "kind": "return", "line": 850}
       ]
     }
   ],
@@ -87,13 +87,19 @@
 ### 边字段
 - `to`：目标节点**数组下标**（0-based）。return 边 `to`=-1。
 - `kind`：`inside` | `callee` | `extern` | `container` | `return`。
-- `taints`：沿边传播的污点签名列表。
+- `taints`：沿边传播的污点签名列表。**return 边不需要输出 taints**——脚本会从 return 语句行号读源码自动提取返回表达式。
 - `line`：传播发生的代码行号。多行时 `[start, end]`。
 - `callee`（仅 callee 边）：callee **限定名**（含类/命名空间）；间接调用填指针表达式。
 - `tainted_args`（仅 callee 边）：被污的实参索引列表，每项 `{"i": 索引, "taint": 污点签名}`。索引是调用中实参的位置（0-based，从 callee 名后第一个参数开始）。脚本会从源码提取实参表达式并映射到 callee 签名形参名。
 - `cond_lines`（可选）：路径条件行号列表。每个元素是行号或 `[start, end]`。指向 if-statement 的行号，脚本从源码提取条件文本。省略或空=无条件。
 - `carrier`（仅 extern/container 边）：载体变量名。
 - `escape_via`（仅 extern/container 边）：逃逸调用名。
+
+### return 边规则
+- C/C++ 函数只有一个返回值。**return 边只需输出 `line`（return 语句行号），不需要输出 `taints`**。
+- 脚本会从该行号读源码，提取 `return <表达式>;` 中的返回表达式作为污点名。
+- **返回常量（数值/NULL/0/-1）的 return 语句不发 return 边**——无污点传播。
+- 只有返回**携带污点的变量或表达式**时才发 return 边。
 
 ### prunes
 顶层 dict，key=节点下标（字符串），value=原因。
@@ -109,5 +115,6 @@ true=本函数自身存在 sink（危险操作即触发点）；false=中转/转
 - `tainted_args` 的 `i` 是实参在**调用表达式中的位置**（0=第一个参数），不是 callee 形参位置。脚本会按位置映射到形参名。
 - escape 不清洗污点（同一污点可继续传播到其他 sink）。
 - 多污点参数一条 callee 边（`taints` 多值 + `tainted_args` 多项），不拆边。
+- return 边不输出 `taints`——脚本从行号提取。
 - 本函数无任何污点传播时 `nodes` 只放根节点（无 edges）。
 - JSON 代码块之后不要输出额外内容。

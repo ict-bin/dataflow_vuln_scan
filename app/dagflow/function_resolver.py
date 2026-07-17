@@ -12,19 +12,15 @@ from .taint_analyzer import _greedy_json_object
 
 logger = logging.getLogger("dvs.dagflow.function_resolver")
 
+_PROMPT_PATH = Path(__file__).resolve().parent.parent.parent / "prompts" / "dagflow" / "function-resolver.md"
+_PROMPT_CACHE: str | None = None
 
-_SYSTEM = """你是数据流污点分析中的函数指针/回调间接调用解析器。
-目标: 给定一个间接调用的指针表达式 (如 ctxt->sax->processingInstruction / fp / obj->handler),
-找出该指针被赋值/注册为哪个真实函数。
-策略:
-1. 用 v2_db lookup <源函数名> 读源函数体, 搞清指针表达式的类型 (如 ctxt->sax 是某 struct 的字段)。
-2. 用 v2_db 按该字段名/类型搜赋值点 (谁给该字段赋了函数地址 / 注册了回调)。
-3. 对每个候选用 v2_db lookup 读体, 确认是否真把某函数赋给了该指针字段。
-4. 也可能是函数表/vtable/dispatch_map, 按语义找注册点, 不靠宏名。
-5. 只报真实注册到该指针的函数; 不确定不报。
-输出 JSON: {"resolved": [{"function": "...", "reason": "..."}]}
-  function: 真实处理函数名 (v2_db 里存在); reason: 为何认为该函数注册到此指针。
-"""
+
+def _system_prompt() -> str:
+    global _PROMPT_CACHE
+    if _PROMPT_CACHE is None:
+        _PROMPT_CACHE = _PROMPT_PATH.read_text(encoding="utf-8")
+    return _PROMPT_CACHE
 
 
 class FunctionResolver:
@@ -60,7 +56,7 @@ class FunctionResolver:
             prompt=prompt, model=self._acfg.model,
             tools=self._acfg.tools or self.config.workers.default_tools,
             cwd=str(self.source_root), env=env, session_file=sp,
-            system_prompt=_SYSTEM, cancel_event=self.cancel_event,
+            system_prompt=_system_prompt(), cancel_event=self.cancel_event,
             thinking_level="off",
             run_timeout_seconds=min(getattr(self.config, "agent_run_timeout_seconds", 1500), 1600),
             timeout_retry_enabled=getattr(self.config, "agent_timeout_retry_enabled", True),
@@ -76,11 +72,15 @@ class FunctionResolver:
         text = output.output or ""
         parsed = _extract_json_object(text, "resolved") or _greedy_json_object(text) or {}
         out = []
-        for item in (parsed.get("resolved") or []):
+        resolved = parsed.get("resolved") or []
+        for item in resolved:
             if isinstance(item, dict):
                 fn = str(item.get("function", "")).strip()
                 if fn and fn != "NOT_FOUND":
                     out.append(fn)
+            elif isinstance(item, str):
+                if item and item != "NOT_FOUND":
+                    out.append(item)
         if self.on_event:
             try:
                 self.on_event("v2_dagflow_indirect_resolved_llm", origin=origin_func[:40],
