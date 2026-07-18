@@ -78,6 +78,26 @@ class TestPathBuilding(unittest.TestCase):
         self.assertEqual(len(paths), 1)
         self.assertEqual([s.func.name for s in paths[0]], ["C", "D"])
 
+    def test_direct_call_fans_out_when_tail_lookup_has_multiple_matches(self):
+        alt_c = _func(self.store, "C", file="c_alt.cpp")
+        prop = PropagationRecord(
+            source_func_id=self.A.func_id,
+            source_taint_name="msg",
+            source_taint_signature="msg_t*",
+            target_taint_name="m",
+            target_taint_signature="msg_t*",
+            target_function="Ns::C",
+            call_line=10,
+            condition="always",
+        )
+        paths = self._paths([prop])
+        self.assertEqual(len(paths), 2)
+        resolved = {(path[0].func.name, path[0].func.file) for path in paths}
+        self.assertEqual(
+            {("C", "a.c"), ("C", "c_alt.cpp")},
+            resolved,
+        )
+
     def test_external_fork(self):
         # 外部变量传播 (is_external) + 两个跟入函数 → fork (stub 返回空, 故不分叉)
         # 这里直接验证: is_external 且 stub 无返回 → 不产生路径 (不崩)
@@ -119,6 +139,65 @@ class TestDedupAndFeedback(unittest.TestCase):
                Validation(left="c", op="==", right="d")]
         out = _dedup_validations(vs)
         self.assertEqual(len(out), 2)
+
+
+class TestResolvedTraceCallees(unittest.TestCase):
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        self.store = DataflowStore(Path(self.td.name) / "run")
+        self.root = _func(self.store, "Root")
+        self.callee = _func(self.store, "OnSharedManager", file="module_template.cpp")
+        self.events: list[tuple[str, dict]] = []
+
+        class _Cbs(AnalysisCallbacks):
+            pass
+
+        self.cbs = _Cbs()
+        self.cbs.sessions_dir = Path(self.td.name) / "sessions"
+        self.cbs.sessions_dir.mkdir(parents=True, exist_ok=True)
+        self.cbs.source_root = ""
+        self.cbs.cfg = type("Cfg", (), {"source_root": ""})()
+        self.cbs.analyze_function = self._analyze
+        self.cbs.mine_vulns = lambda *args, **kwargs: 0
+        self.cbs.on_event = self._on_event
+        self.orch = DfsOrchestrator(self.store, self.cbs, concurrent=False, max_depth=2)
+
+    def tearDown(self):
+        self.store.close()
+        self.td.cleanup()
+
+    def _on_event(self, etype, **data):
+        self.events.append((etype, data))
+
+    def _analyze(self, store, func, taint_params, pre_validations, base_session, ctx):
+        from app.dataflow_v2.orchestrator import AnalysisResult
+        if func.name == "Root":
+            return AnalysisResult(
+                propagations=[
+                    PropagationRecord(
+                        source_func_id=func.func_id,
+                        source_taint_name="msg",
+                        source_taint_signature="msg_t*",
+                        target_taint_name="mgr",
+                        target_taint_signature="mgr_t*",
+                        target_function="ModuleTemplate::OnSharedManager",
+                        call_line=10,
+                        condition="always",
+                    )
+                ],
+                self_contained=False,
+                description="root",
+            )
+        return AnalysisResult(self_contained=True, description=func.name)
+
+    def test_resolved_trace_callees_only_emits_resolved_name(self):
+        self.orch.run(self.root, TaintParamInfo([0], "msg_t*", ["msg"]))
+        resolved_events = [
+            data for etype, data in self.events
+            if etype == "trace_callees" and data.get("resolved")
+        ]
+        self.assertEqual(1, len(resolved_events))
+        self.assertEqual(["OnSharedManager"], resolved_events[0]["callees"])
 
 
 class _MockCbs(AnalysisCallbacks):

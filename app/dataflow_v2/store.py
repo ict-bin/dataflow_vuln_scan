@@ -279,25 +279,68 @@ class DataflowStore:
     def find_function(self, name: str, file: str = "") -> FunctionRecord | None:
         """按名查找函数。C++ 方法: LLM 报短名 (ReadDataTask), 库存限定名
         (Class::ReadDataTask) → 先精确匹配, 再后缀匹配 (::短名 或 =短名)。"""
-        rows = self._q("functions", "SELECT * FROM functions WHERE name=? ORDER BY start_line",
-                       (name,)) if not file else self._q("functions",
-                       "SELECT * FROM functions WHERE name=? AND file=? ORDER BY start_line", (name, file))
-        if rows:
-            return _row_to_function(rows[0])
+        matches = self.find_functions(name, file)
+        return matches[0] if matches else None
+
+    def find_functions(self, name: str, file: str = "") -> list[FunctionRecord]:
+        """按名查找全部候选函数。
+
+        解析顺序保持与 find_function 一致, 但不在多匹配时丢弃候选:
+        1. 原始名称精确匹配
+        2. 限定名退回尾名精确匹配
+        3. 尾名后缀匹配 `%::tail`
+
+        一旦某一层有命中, 仅返回该层结果, 不再混入后续回退层, 避免把
+        精确匹配和宽松匹配揉成一锅。
+        """
+        seen: set[str] = set()
+
+        def _rows(sql: str, args: tuple) -> list[FunctionRecord]:
+            out: list[FunctionRecord] = []
+            for row in self._q("functions", sql, args):
+                rec = _row_to_function(row)
+                if rec.func_id in seen:
+                    continue
+                seen.add(rec.func_id)
+                out.append(rec)
+            return out
+
+        exact = _rows(
+            "SELECT * FROM functions WHERE name=? ORDER BY start_line",
+            (name,),
+        ) if not file else _rows(
+            "SELECT * FROM functions WHERE name=? AND file=? ORDER BY start_line",
+            (name, file),
+        )
+        if exact:
+            return exact
+
+        tail = ""
         if "::" in name:
             tail = name.split("::")[-1].strip()
             if tail:
-                rows = self._q("functions", "SELECT * FROM functions WHERE name=? ORDER BY start_line",
-                               (tail,)) if not file else self._q("functions",
-                               "SELECT * FROM functions WHERE name=? AND file=? ORDER BY start_line", (tail, file))
-                if rows:
-                    return _row_to_function(rows[0])
-        # 后缀匹配: 短名 ReadDataTask 匹配 Class::ReadDataTask
-        suf = "%::" + name
-        rows = self._q("functions",
-                       "SELECT * FROM functions WHERE name LIKE ? ORDER BY start_line", (suf,)) if not file \
-            else self._q("functions", "SELECT * FROM functions WHERE name LIKE ? AND file=? ORDER BY start_line", (suf, file))
-        return _row_to_function(rows[0]) if rows else None
+                tail_exact = _rows(
+                    "SELECT * FROM functions WHERE name=? ORDER BY start_line",
+                    (tail,),
+                ) if not file else _rows(
+                    "SELECT * FROM functions WHERE name=? AND file=? ORDER BY start_line",
+                    (tail, file),
+                )
+                if tail_exact:
+                    return tail_exact
+        else:
+            tail = name
+
+        if not tail:
+            return []
+        suf = "%::" + tail
+        return _rows(
+            "SELECT * FROM functions WHERE name LIKE ? ORDER BY start_line",
+            (suf,),
+        ) if not file else _rows(
+            "SELECT * FROM functions WHERE name LIKE ? AND file=? ORDER BY start_line",
+            (suf, file),
+        )
 
     def list_functions(self) -> list[FunctionRecord]:
         return [_row_to_function(r) for r in self._q("functions", "SELECT * FROM functions")]

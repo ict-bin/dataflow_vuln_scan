@@ -68,6 +68,32 @@ class DataflowV2FunctionResolutionTests(unittest.TestCase):
         self.assertEqual("module_template.cpp", resolved.file)
         self.assertEqual("OnSharedManager", resolved.name)
 
+    def test_find_functions_returns_all_tail_matches_when_exact_qualified_missing(self):
+        first = FunctionRecord(
+            file="module_template.cpp",
+            name="OnSharedManager",
+            signature="int OnSharedManager()",
+            start_line=1,
+            end_line=3,
+            func_hash="hash-on-shared-manager-1",
+        )
+        second = FunctionRecord(
+            file="other_template.cpp",
+            name="OnSharedManager",
+            signature="int OnSharedManager()",
+            start_line=10,
+            end_line=12,
+            func_hash="hash-on-shared-manager-2",
+        )
+        self.store.upsert_function(first)
+        self.store.upsert_function(second)
+
+        matches = self.store.find_functions("ModuleTemplate::OnSharedManager")
+        self.assertEqual(
+            {"module_template.cpp", "other_template.cpp"},
+            {match.file for match in matches},
+        )
+
     def test_incremental_indexing_can_be_triggered_for_search_results(self):
         def_file = self.source_root / "module_template.cpp"
         def_file.write_text(

@@ -303,18 +303,19 @@ class DfsOrchestrator:
         else:
             paths = []
 
-        # 5b) 发 trace_callees_resolved: 用解析后的函数名 (tracker 解析间接调用后)
-        # 第一次 trace_callees 用原始 callee 表达式 (如 ctxt->sax->cdataBlock)
-        # 这里发解析后的真实函数名 (如 xmlSAX2CDataBlock), 前端 buildDfaTree 能匹配 trace_start
+        # 5b) 发 trace_callees_resolved: 仅发真正被解析并继续跟入的目标集合。
+        # 原始 callee 名称由第一次 trace_callees 保留; resolved 事件避免把原始名和
+        # 规范化后的真实函数名混在一起。
         resolved_callees: list[str] = []
+        resolved_seen: set[str] = set()
         for path_steps in paths:
-            if path_steps and path_steps[0].func:
-                resolved_callees.append(path_steps[0].func.name)
-        # 也加上直接调用 (非间接/非外部) 的 target_function
-        for p in result.propagations:
-            if p.target_function and not p.is_indirect_call and not p.is_external:
-                if p.target_function not in resolved_callees:
-                    resolved_callees.append(p.target_function)
+            if not path_steps or not path_steps[0].func:
+                continue
+            rec = path_steps[0].func
+            if rec.func_id in resolved_seen:
+                continue
+            resolved_seen.add(rec.func_id)
+            resolved_callees.append(rec.name)
         if resolved_callees:
             self.cbs.on_event("trace_callees", function=func.name,
                               callees=resolved_callees, depth=depth,
@@ -451,7 +452,7 @@ class DfsOrchestrator:
                 new_paths: list[list[ChainStep]] = []
                 for base in paths:
                     for arm, arm_props in arms.items():
-                        steps = [s for s in (self._prop_to_step(ap) for ap in arm_props) if s]
+                        steps = [s for ap in arm_props for s in self._prop_to_steps(ap)]
                         if steps:
                             new_paths.append(base + steps)
                 if new_paths:
@@ -485,30 +486,37 @@ class DfsOrchestrator:
                     # callee 定义不在源码树 — 记录传播但不跟入, 不走 tracker
                     # propagation 已存 DB, 调用树显示但不可展开
                     continue
-                step = self._prop_to_step(p)
-                if step is None:
+                steps = self._prop_to_steps(p)
+                if not steps:
                     continue  # callee 解析失败, 跳过
-                for path in paths:
-                    path.append(step)
+                new_paths = []
+                for base in paths:
+                    for step in steps:
+                        new_paths.append(base + [step])
+                if new_paths:
+                    paths = new_paths
         return [p for p in paths if p]  # 剔除空链
 
-    def _prop_to_step(self, p: PropagationRecord) -> ChainStep | None:
-        """callee 传播 → ChainStep (解析 target_func_id 拿 FunctionRecord, 由 actual_args 位置)。
+    def _prop_to_steps(self, p: PropagationRecord) -> list[ChainStep]:
+        """callee 传播 → ChainStep 列表 (唯一命中或多候选 fan-out)。
 
         三级回退解析 callee 定义, 让 DFS 能跟入跨 TU 的 callee:
           1) target_func_id 直查 (最快)
           2) 按名+后缀(::method) 回查 (修 LLM 未填 func_id 但函数已索引)
           3) on-demand: find_func_in_source 在源码树定位定义文件 → ensure_file_indexed
              增量索引 → 再查 (修跨 TU 未索引, 根因 1)
-        仍找不到 → None (真外部/libc, 如 recv/BIO_*)。
+        若回退层返回多个候选, 为避免漏跟, 每个候选都 fork 一条子链。
+        仍找不到 → [] (真外部/libc, 如 recv/BIO_*)。
         """
-        rec = None
+        recs: list[FunctionRecord] = []
         if p.target_func_id:
             rec = self.store.get_function(p.target_func_id)
-        if rec is None and p.target_function:
+            if rec is not None:
+                recs = [rec]
+        if not recs and p.target_function:
             # 按名 (+ Class::method 后缀) 回查 — 覆盖 func_id 未填但已索引的情况
-            rec = self.store.find_function(p.target_function)
-        if rec is None and p.target_function:
+            recs = self.store.find_functions(p.target_function)
+        if not recs and p.target_function:
             # on-demand: 在源码树定位 callee 定义文件并增量索引
             try:
                 from .function_extractor import find_func_in_source, ensure_file_indexed
@@ -518,21 +526,31 @@ class DfsOrchestrator:
                     if found:
                         for rel_file, _ in found:
                             ensure_file_indexed(src_root, rel_file, self.store)
-                        rec = self.store.find_function(p.target_function)
-                        if rec:
+                        recs = self.store.find_functions(p.target_function)
+                        if recs:
                             self.cbs.on_event("v2_callee_indexed_ondemand",
                                               function=p.target_function,
                                               callee=p.target_function,
                                               indexed_file=found[0])
             except Exception:
                 pass
-        if rec is None:
-            return None
+        if not recs:
+            return []
+        unique_recs: list[FunctionRecord] = []
+        seen: set[str] = set()
+        for rec in recs:
+            if rec.func_id in seen:
+                continue
+            seen.add(rec.func_id)
+            unique_recs.append(rec)
         positions = _derive_positions(p.actual_args, p.target_taint_name, p.source_taint_name)
         tp = TaintParamInfo(positions=positions,
                             signature=p.target_taint_signature, names=[p.target_taint_name])
-        return ChainStep(rec, tp, list(p.validations), p.call_line, p.prop_id,
-                         p.branch_group_id, p.branch_arm_id)
+        return [
+            ChainStep(rec, tp, list(p.validations), p.call_line, p.prop_id,
+                      p.branch_group_id, p.branch_arm_id)
+            for rec in unique_recs
+        ]
 
 
 def _derive_positions(actual_args: list[str], target_taint_name: str,
