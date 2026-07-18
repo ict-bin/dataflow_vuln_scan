@@ -382,6 +382,10 @@ class TaskPropagationItemResponse(BaseModel):
     propagation_method: str = ""
     orchestration_followed: bool = False
     orchestration_status: str | None = None
+    unfollowed_reason: str | None = None
+    unfollowed_reason_source: str | None = None
+    followup_status: str | None = None
+    followup_reason_raw: str | None = None
 
 
 class TaskPropagationsResponse(BaseModel):

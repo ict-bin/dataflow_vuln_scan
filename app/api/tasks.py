@@ -24,7 +24,12 @@ from app.service.worker_snapshot import build_worker_cluster_snapshot
 from app.service.session_index import build_session_catalog
 from app.service.task_service import generate_prompt_from_path, get_task_service
 from app.vuln_graph_service import load_vuln_scan_graph, summarize_graph, build_trace_tree
-from app.dataflow_v2.graph_export import load_dataflow_v2_graph, build_v2_trace_tree, summarize_v2_graph
+from app.dataflow_v2.graph_export import (
+    load_dataflow_v2_graph,
+    build_v2_trace_tree,
+    summarize_v2_graph,
+    _find_vuln_sqlite,
+)
 from .deps import ensure_admin_user, ensure_project_access, get_current_user
 from .task_models import (
     TaskCreateRequest,
@@ -659,11 +664,97 @@ def _propagation_method(row: sqlite3.Row) -> str:
     return "直接调用"
 
 
+def _derive_unfollowed_reason_from_propagation(row: sqlite3.Row) -> tuple[str, str]:
+    if bool(row["is_external"]):
+        escape_kind = str(row["escape_kind"] or "").strip()
+        if escape_kind:
+            return f"external_escape_{escape_kind}", "propagation"
+        return "external_escape_not_followed", "propagation"
+    if bool(row["is_indirect_call"]):
+        dispatch_kind = str(row["dispatch_kind"] or "").strip()
+        if dispatch_kind:
+            return f"indirect_call_unresolved:{dispatch_kind}", "propagation"
+        return "indirect_call_unresolved", "propagation"
+    if bool(row["is_external_callee"]):
+        return "external_callee_not_followed", "propagation"
+    if not str(row["target_func_id"] or "").strip():
+        return "target_missing_not_followed", "derived"
+    return "not_scheduled_into_orchestration", "derived"
+
+
+def _load_followup_rows(vuln_sqlite: Path | None) -> list[dict[str, Any]]:
+    if vuln_sqlite is None or not vuln_sqlite.exists():
+        return []
+    try:
+        columns = _sqlite_table_columns(vuln_sqlite, "followups")
+        if not columns:
+            return []
+        select_cols = [
+            "followup_id",
+            "edge_id",
+            "callee_function",
+            "status",
+            "reason",
+        ]
+        if "tracker_type" in columns:
+            select_cols.append("tracker_type")
+        else:
+            select_cols.append("'' AS tracker_type")
+        if "tracker_status" in columns:
+            select_cols.append("tracker_status")
+        else:
+            select_cols.append("'' AS tracker_status")
+        if "tracker_result_json" in columns:
+            select_cols.append("tracker_result_json")
+        else:
+            select_cols.append("'{}' AS tracker_result_json")
+        return [
+            dict(row)
+            for row in _query_sqlite_rows(
+                vuln_sqlite,
+                f"SELECT {', '.join(select_cols)} FROM followups",
+            )
+        ]
+    except Exception:
+        return []
+
+
+def _build_followup_reason_maps(vuln_sqlite: Path | None) -> tuple[dict[str, dict[str, Any]], dict[tuple[str, str], dict[str, Any]]]:
+    followups = _load_followup_rows(vuln_sqlite)
+    by_edge_id: dict[str, dict[str, Any]] = {}
+    by_callee_name: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in followups:
+        edge_id = str(row.get("edge_id") or "").strip()
+        if edge_id and edge_id not in by_edge_id:
+            by_edge_id[edge_id] = row
+        callee_function = str(row.get("callee_function") or "").strip()
+        if edge_id and callee_function and (edge_id, callee_function) not in by_callee_name:
+            by_callee_name[(edge_id, callee_function)] = row
+    return by_edge_id, by_callee_name
+
+
+def _derive_unfollowed_reason_from_followup(row: dict[str, Any]) -> tuple[str | None, str | None, str | None]:
+    followup_status = str(row.get("status") or "").strip() or None
+    followup_reason = str(row.get("reason") or "").strip() or None
+    tracker_type = str(row.get("tracker_type") or "").strip()
+    tracker_status = str(row.get("tracker_status") or "").strip()
+    if followup_reason:
+        return followup_reason, "followup", followup_status
+    if tracker_status:
+        if tracker_type:
+            return f"{tracker_type}:{tracker_status}", "followup", followup_status
+        return tracker_status, "followup", followup_status
+    if followup_status and followup_status not in {"done", "completed", "analyzed"}:
+        return followup_status, "followup", followup_status
+    return None, None, followup_status
+
+
 def _load_task_propagations(run_root: Path) -> list[dict[str, Any]]:
     v2_root = run_root / "dataflow-v2"
     prop_db = v2_root / "propagations.db"
     fn_db = v2_root / "functions.db"
     orch_db = v2_root / "orchestration.db"
+    vuln_sqlite = _find_vuln_sqlite(run_root)
     if not prop_db.exists():
         return []
 
@@ -694,6 +785,7 @@ def _load_task_propagations(run_root: Path) -> list[dict[str, Any]]:
             followed_pairs[(source_func_id, target_func_id)] = status
         if source_func_id and target_function:
             followed_names[(source_func_id, target_function)] = status
+    followup_by_edge, followup_by_edge_and_name = _build_followup_reason_maps(vuln_sqlite)
 
     prop_columns = _sqlite_table_columns(prop_db, "propagations")
     external_callee_expr = "is_external_callee" if "is_external_callee" in prop_columns else "0 AS is_external_callee"
@@ -721,6 +813,14 @@ def _load_task_propagations(run_root: Path) -> list[dict[str, Any]]:
             orchestration_status = followed_pairs.get((source_func_id, target_func_id))
         if orchestration_status is None and source_func_id and target_function:
             orchestration_status = followed_names.get((source_func_id, target_function))
+        followup_row = followup_by_edge.get(str(row["prop_id"] or ""))
+        if followup_row is None and target_function:
+            followup_row = followup_by_edge_and_name.get((str(row["prop_id"] or ""), target_function))
+        followup_reason, followup_reason_source, followup_status = (None, None, None)
+        if followup_row is not None:
+            followup_reason, followup_reason_source, followup_status = _derive_unfollowed_reason_from_followup(followup_row)
+        if not followup_reason and orchestration_status is None:
+            followup_reason, followup_reason_source = _derive_unfollowed_reason_from_propagation(row)
         items.append({
             "prop_id": str(row["prop_id"] or ""),
             "source_func_id": source_func_id or None,
@@ -752,6 +852,10 @@ def _load_task_propagations(run_root: Path) -> list[dict[str, Any]]:
             "propagation_method": _propagation_method(row),
             "orchestration_followed": orchestration_status is not None,
             "orchestration_status": orchestration_status,
+            "unfollowed_reason": followup_reason,
+            "unfollowed_reason_source": followup_reason_source,
+            "followup_status": followup_status,
+            "followup_reason_raw": str((followup_row or {}).get("reason") or "") or None,
         })
     items.sort(
         key=lambda item: (
