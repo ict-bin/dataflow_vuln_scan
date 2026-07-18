@@ -354,3 +354,103 @@ def test_load_task_propagations_supports_name_fallback_and_external_kinds(tmp_pa
     assert by_id["prop_external"]["carrier"] == "list_node"
     assert by_id["prop_external"]["escape_via"] == "push_back"
     assert by_id["prop_external_callee"]["propagation_method"] == "外部 callee"
+
+
+def test_load_task_propagations_tolerates_legacy_db_without_external_callee_column(tmp_path: Path):
+    run_root = tmp_path / "run"
+    v2_root = run_root / "dataflow-v2"
+    v2_root.mkdir(parents=True, exist_ok=True)
+
+    functions_db = v2_root / "functions.db"
+    propagations_db = v2_root / "propagations.db"
+
+    _exec_sql(
+        functions_db,
+        """
+        CREATE TABLE functions (
+            func_id TEXT PRIMARY KEY,
+            file TEXT,
+            name TEXT
+        )
+        """,
+    )
+    _exec_sql(
+        functions_db,
+        "INSERT INTO functions(func_id, file, name) VALUES (?, ?, ?)",
+        ("src_fn", "src/legacy.c", "Legacy::Entry"),
+    )
+    _exec_sql(
+        propagations_db,
+        """
+        CREATE TABLE propagations (
+            prop_id TEXT PRIMARY KEY,
+            source_func_id TEXT,
+            source_taint_name TEXT,
+            source_taint_signature TEXT,
+            target_taint_name TEXT,
+            target_taint_signature TEXT,
+            target_function TEXT,
+            target_func_id TEXT,
+            target_file TEXT,
+            call_line INTEGER,
+            condition TEXT,
+            is_external INTEGER DEFAULT 0,
+            is_indirect_call INTEGER DEFAULT 0,
+            dispatch_kind TEXT DEFAULT '',
+            escape_kind TEXT DEFAULT '',
+            carrier TEXT DEFAULT '',
+            escape_via TEXT DEFAULT '',
+            callsite_validated INTEGER DEFAULT 0,
+            branch_group_id TEXT DEFAULT '',
+            branch_arm_id TEXT DEFAULT '',
+            mutex_siblings TEXT DEFAULT '[]',
+            validations TEXT DEFAULT '[]',
+            actual_args TEXT DEFAULT '[]',
+            description TEXT DEFAULT ''
+        )
+        """,
+    )
+    _exec_sql(
+        propagations_db,
+        """
+        INSERT INTO propagations(
+            prop_id, source_func_id, source_taint_name, source_taint_signature,
+            target_taint_name, target_taint_signature, target_function, target_func_id,
+            target_file, call_line, condition, is_external, is_indirect_call,
+            dispatch_kind, escape_kind, carrier, escape_via, callsite_validated,
+            branch_group_id, branch_arm_id, mutex_siblings, validations, actual_args, description
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "legacy_prop",
+            "src_fn",
+            "req",
+            "sig_req",
+            "ret",
+            "sig_ret",
+            "LegacyTarget",
+            "",
+            "",
+            7,
+            "",
+            0,
+            0,
+            "",
+            "",
+            "",
+            "",
+            0,
+            "",
+            "",
+            "[]",
+            "[]",
+            "[]",
+            "legacy row",
+        ),
+    )
+
+    items = _load_task_propagations(run_root)
+    assert len(items) == 1
+    assert items[0]["prop_id"] == "legacy_prop"
+    assert items[0]["is_external_callee"] is False
+    assert items[0]["propagation_method"] == "直接调用"

@@ -625,6 +625,16 @@ def _query_sqlite_rows(db_path: Path, sql: str, params: tuple[Any, ...] = ()) ->
         conn.close()
 
 
+def _sqlite_table_columns(db_path: Path, table_name: str) -> set[str]:
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+        return {str(row["name"] or "") for row in rows}
+    finally:
+        conn.close()
+
+
 def _json_list(value: Any) -> list[Any]:
     if isinstance(value, list):
         return value
@@ -685,13 +695,15 @@ def _load_task_propagations(run_root: Path) -> list[dict[str, Any]]:
         if source_func_id and target_function:
             followed_names[(source_func_id, target_function)] = status
 
+    prop_columns = _sqlite_table_columns(prop_db, "propagations")
+    external_callee_expr = "is_external_callee" if "is_external_callee" in prop_columns else "0 AS is_external_callee"
     prop_rows = _query_sqlite_rows(
         prop_db,
-        """
+        f"""
         SELECT prop_id, source_func_id, source_taint_name, source_taint_signature,
                target_taint_name, target_taint_signature, target_function, target_func_id,
                target_file, call_line, condition, is_external, is_indirect_call,
-               is_external_callee, dispatch_kind, escape_kind, carrier, escape_via,
+               {external_callee_expr}, dispatch_kind, escape_kind, carrier, escape_via,
                callsite_validated, branch_group_id, branch_arm_id, mutex_siblings,
                validations, actual_args, description
           FROM propagations
