@@ -351,6 +351,46 @@ class TaskTimelineResponse(BaseModel):
     events: list[TaskTimelineEventResponse] = Field(default_factory=list)
 
 
+class TaskPropagationItemResponse(BaseModel):
+    prop_id: str
+    source_func_id: str | None = None
+    source_function: str | None = None
+    source_file: str | None = None
+    source_taint_name: str = ""
+    source_taint_signature: str = ""
+    target_taint_name: str = ""
+    target_taint_signature: str = ""
+    target_func_id: str | None = None
+    target_function: str | None = None
+    target_file: str | None = None
+    call_line: int | None = None
+    condition: str | None = None
+    description: str | None = None
+    validations: list[dict[str, Any]] = Field(default_factory=list)
+    actual_args: list[str] = Field(default_factory=list)
+    is_external: bool = False
+    is_indirect_call: bool = False
+    is_external_callee: bool = False
+    dispatch_kind: str | None = None
+    escape_kind: str | None = None
+    carrier: str | None = None
+    escape_via: str | None = None
+    callsite_validated: bool = False
+    branch_group_id: str | None = None
+    branch_arm_id: str | None = None
+    mutex_siblings: list[str] = Field(default_factory=list)
+    propagation_method: str = ""
+    orchestration_followed: bool = False
+    orchestration_status: str | None = None
+
+
+class TaskPropagationsResponse(BaseModel):
+    task_id: str
+    run_root: str
+    available: bool = False
+    items: list[TaskPropagationItemResponse] = Field(default_factory=list)
+
+
 class ActionResponse(BaseModel):
     status: str = "ok"
     task_id: str
