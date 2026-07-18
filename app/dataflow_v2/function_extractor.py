@@ -69,6 +69,26 @@ def _parser_cached(kind: str):
     return _PARSER_CACHE[kind]
 
 
+def _function_name_candidates(name: str) -> list[str]:
+    """生成函数名候选集。
+
+    兼容 C++ 命名空间/类限定名: `A::B::func` 会展开为
+    `A::B::func`, `B::func`, `func`，用于高召回的源码树定位。
+    """
+    normalized = str(name or "").strip()
+    if not normalized:
+        return []
+    parts = [part.strip() for part in normalized.split("::") if part.strip()]
+    if len(parts) <= 1:
+        return [normalized]
+    candidates: list[str] = []
+    for idx in range(len(parts)):
+        candidate = "::".join(parts[idx:])
+        if candidate and candidate not in candidates:
+            candidates.append(candidate)
+    return candidates
+
+
 def _func_signature(node: Any, source: bytes) -> str:
     body = node.child_by_field_name("body")
     end = body.start_byte if body is not None else node.end_byte
@@ -472,23 +492,29 @@ def find_func_in_source(name: str, src_root) -> list[tuple[str, str]]:
     import subprocess, re
     from pathlib import Path
     src_root = Path(src_root)
-    pattern = rf'\b{re.escape(name)}\s*\('
     try:
-        r = subprocess.run(
-            ["/usr/bin/grep", "-rl", "-E",
-             "--include=*.c", "--include=*.cpp", "--include=*.cc", "--include=*.cxx",
-             "--include=*.h", "--include=*.hpp", "--include=*.hxx",
-             pattern, str(src_root)],
-            capture_output=True, text=True, timeout=15)
         results: list[tuple[str, str]] = []
-        for line in r.stdout.strip().split("\n"):
-            if not line:
-                continue
-            try:
-                rel = str(Path(line).relative_to(src_root)).replace("\\", "/")
-                results.append((rel, name))
-            except ValueError:
-                continue
+        seen: set[tuple[str, str]] = set()
+        for candidate in _function_name_candidates(name):
+            pattern = rf'\b{re.escape(candidate)}\s*\('
+            r = subprocess.run(
+                ["/usr/bin/grep", "-rl", "-E",
+                 "--include=*.c", "--include=*.cpp", "--include=*.cc", "--include=*.cxx",
+                 "--include=*.h", "--include=*.hpp", "--include=*.hxx",
+                 pattern, str(src_root)],
+                capture_output=True, text=True, timeout=15)
+            for line in r.stdout.strip().split("\n"):
+                if not line:
+                    continue
+                try:
+                    rel = str(Path(line).relative_to(src_root)).replace("\\", "/")
+                except ValueError:
+                    continue
+                key = (rel, candidate)
+                if key in seen:
+                    continue
+                seen.add(key)
+                results.append((rel, candidate))
         return results
     except Exception:
         pass

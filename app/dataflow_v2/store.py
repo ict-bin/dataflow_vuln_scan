@@ -284,6 +284,14 @@ class DataflowStore:
                        "SELECT * FROM functions WHERE name=? AND file=? ORDER BY start_line", (name, file))
         if rows:
             return _row_to_function(rows[0])
+        if "::" in name:
+            tail = name.split("::")[-1].strip()
+            if tail:
+                rows = self._q("functions", "SELECT * FROM functions WHERE name=? ORDER BY start_line",
+                               (tail,)) if not file else self._q("functions",
+                               "SELECT * FROM functions WHERE name=? AND file=? ORDER BY start_line", (tail, file))
+                if rows:
+                    return _row_to_function(rows[0])
         # 后缀匹配: 短名 ReadDataTask 匹配 Class::ReadDataTask
         suf = "%::" + name
         rows = self._q("functions",
