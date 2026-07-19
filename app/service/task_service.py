@@ -824,7 +824,7 @@ def _sync_task_abnormal_reason(row: AppDvsTask) -> tuple[dict | None, bool]:
 
 def _sync_task_vuln_stats(row: AppDvsTask) -> bool:
     """Sync vuln stats from task SQLite to MySQL row. Returns True if changed."""
-    from app.vuln_graph_service import load_vuln_scan_graph
+    from app.vuln_store import VulnScanStore
     root = _task_root(row)
     if not str(root):
         return False
@@ -837,8 +837,11 @@ def _sync_task_vuln_stats(row: AppDvsTask) -> bool:
         run_root = root / "run"
     if not run_root.exists():
         return False
-    graph = load_vuln_scan_graph(run_root)
-    findings = graph.get("vulnerability_findings") or []
+    db_path = run_root / "vuln-scan.sqlite"
+    if not db_path.exists():
+        return False
+    store = VulnScanStore(db_path)
+    findings = list(store.list_task_findings(str(row.task_id or "")))
     total = len(findings)
     reported = sum(1 for f in findings if f.get("report_status") == "reported")
     unreported = total - reported

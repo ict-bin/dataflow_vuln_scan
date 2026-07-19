@@ -6,9 +6,8 @@ import asyncio
 import json
 import logging
 import os
-import sqlite3
-import tempfile
 import httpx
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -21,15 +20,8 @@ from app.db import get_db
 from app.db.models import AppDvsTask
 from app.time_utils import isoformat_local
 from app.service.worker_snapshot import build_worker_cluster_snapshot
-from app.service.session_index import build_session_catalog
 from app.service.task_service import generate_prompt_from_path, get_task_service
-from app.vuln_graph_service import load_vuln_scan_graph, summarize_graph, build_trace_tree
-from app.dataflow_v2.graph_export import (
-    load_dataflow_v2_graph,
-    build_v2_trace_tree,
-    summarize_v2_graph,
-    _find_vuln_sqlite,
-)
+from app.vuln_store import VulnScanStore
 from .deps import ensure_admin_user, ensure_project_access, get_current_user
 from .task_models import (
     TaskCreateRequest,
@@ -52,6 +44,12 @@ from .task_models import (
     AgentRuntimeAggregateResponse,
     TaskTimelineEventResponse,
     TaskTimelineResponse,
+    TaskGraphEdgeResponse,
+    TaskGraphFindingResponse,
+    TaskGraphNodeResponse,
+    TaskGraphSessionResponse,
+    TaskGraphTreeNodeResponse,
+    TaskGraphViewResponse,
     TaskPropagationItemResponse,
     TaskPropagationsResponse,
     ActionResponse,
@@ -621,252 +619,6 @@ def _read_text(path: Path, warnings: List[str], label: str, limit: int = 2_000_0
         return ""
 
 
-def _query_sqlite_rows(db_path: Path, sql: str, params: tuple[Any, ...] = ()) -> list[sqlite3.Row]:
-    conn = sqlite3.connect(str(db_path))
-    conn.row_factory = sqlite3.Row
-    try:
-        return conn.execute(sql, params).fetchall()
-    finally:
-        conn.close()
-
-
-def _sqlite_table_columns(db_path: Path, table_name: str) -> set[str]:
-    conn = sqlite3.connect(str(db_path))
-    conn.row_factory = sqlite3.Row
-    try:
-        rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
-        return {str(row["name"] or "") for row in rows}
-    finally:
-        conn.close()
-
-
-def _json_list(value: Any) -> list[Any]:
-    if isinstance(value, list):
-        return value
-    if not value:
-        return []
-    try:
-        parsed = json.loads(value)
-        return parsed if isinstance(parsed, list) else []
-    except Exception:
-        return []
-
-
-def _propagation_method(row: sqlite3.Row) -> str:
-    if bool(row["is_indirect_call"]):
-        dispatch_kind = str(row["dispatch_kind"] or "").strip()
-        return f"间接调用 / {dispatch_kind}" if dispatch_kind else "间接调用"
-    if bool(row["is_external"]):
-        escape_kind = str(row["escape_kind"] or "").strip()
-        return f"外部逃逸 / {escape_kind}" if escape_kind else "外部逃逸"
-    if bool(row["is_external_callee"]):
-        return "外部 callee"
-    return "直接调用"
-
-
-def _derive_unfollowed_reason_from_propagation(row: sqlite3.Row) -> tuple[str, str]:
-    if bool(row["is_external"]):
-        escape_kind = str(row["escape_kind"] or "").strip()
-        if escape_kind:
-            return f"external_escape_{escape_kind}", "propagation"
-        return "external_escape_not_followed", "propagation"
-    if bool(row["is_indirect_call"]):
-        dispatch_kind = str(row["dispatch_kind"] or "").strip()
-        if dispatch_kind:
-            return f"indirect_call_unresolved:{dispatch_kind}", "propagation"
-        return "indirect_call_unresolved", "propagation"
-    if bool(row["is_external_callee"]):
-        return "external_callee_not_followed", "propagation"
-    if not str(row["target_func_id"] or "").strip():
-        return "target_missing_not_followed", "derived"
-    return "not_scheduled_into_orchestration", "derived"
-
-
-def _load_followup_rows(vuln_sqlite: Path | None) -> list[dict[str, Any]]:
-    if vuln_sqlite is None or not vuln_sqlite.exists():
-        return []
-    try:
-        columns = _sqlite_table_columns(vuln_sqlite, "followups")
-        if not columns:
-            return []
-        select_cols = [
-            "followup_id",
-            "edge_id",
-            "callee_function",
-            "status",
-            "reason",
-        ]
-        if "tracker_type" in columns:
-            select_cols.append("tracker_type")
-        else:
-            select_cols.append("'' AS tracker_type")
-        if "tracker_status" in columns:
-            select_cols.append("tracker_status")
-        else:
-            select_cols.append("'' AS tracker_status")
-        if "tracker_result_json" in columns:
-            select_cols.append("tracker_result_json")
-        else:
-            select_cols.append("'{}' AS tracker_result_json")
-        return [
-            dict(row)
-            for row in _query_sqlite_rows(
-                vuln_sqlite,
-                f"SELECT {', '.join(select_cols)} FROM followups",
-            )
-        ]
-    except Exception:
-        return []
-
-
-def _build_followup_reason_maps(vuln_sqlite: Path | None) -> tuple[dict[str, dict[str, Any]], dict[tuple[str, str], dict[str, Any]]]:
-    followups = _load_followup_rows(vuln_sqlite)
-    by_edge_id: dict[str, dict[str, Any]] = {}
-    by_callee_name: dict[tuple[str, str], dict[str, Any]] = {}
-    for row in followups:
-        edge_id = str(row.get("edge_id") or "").strip()
-        if edge_id and edge_id not in by_edge_id:
-            by_edge_id[edge_id] = row
-        callee_function = str(row.get("callee_function") or "").strip()
-        if edge_id and callee_function and (edge_id, callee_function) not in by_callee_name:
-            by_callee_name[(edge_id, callee_function)] = row
-    return by_edge_id, by_callee_name
-
-
-def _derive_unfollowed_reason_from_followup(row: dict[str, Any]) -> tuple[str | None, str | None, str | None]:
-    followup_status = str(row.get("status") or "").strip() or None
-    followup_reason = str(row.get("reason") or "").strip() or None
-    tracker_type = str(row.get("tracker_type") or "").strip()
-    tracker_status = str(row.get("tracker_status") or "").strip()
-    if followup_reason:
-        return followup_reason, "followup", followup_status
-    if tracker_status:
-        if tracker_type:
-            return f"{tracker_type}:{tracker_status}", "followup", followup_status
-        return tracker_status, "followup", followup_status
-    if followup_status and followup_status not in {"done", "completed", "analyzed"}:
-        return followup_status, "followup", followup_status
-    return None, None, followup_status
-
-
-def _load_task_propagations(run_root: Path) -> list[dict[str, Any]]:
-    v2_root = run_root / "dataflow-v2"
-    prop_db = v2_root / "propagations.db"
-    fn_db = v2_root / "functions.db"
-    orch_db = v2_root / "orchestration.db"
-    vuln_sqlite = _find_vuln_sqlite(run_root)
-    if not prop_db.exists():
-        return []
-
-    func_rows = _query_sqlite_rows(
-        fn_db,
-        "SELECT func_id, name, file FROM functions",
-    ) if fn_db.exists() else []
-    func_map = {
-        str(row["func_id"]): {
-            "name": str(row["name"] or ""),
-            "file": str(row["file"] or ""),
-        }
-        for row in func_rows
-    }
-
-    orchestration_rows = _query_sqlite_rows(
-        orch_db,
-        "SELECT source_func_id, target_func_id, target_function, status FROM orchestration",
-    ) if orch_db.exists() else []
-    followed_pairs: dict[tuple[str, str], str] = {}
-    followed_names: dict[tuple[str, str], str] = {}
-    for row in orchestration_rows:
-        source_func_id = str(row["source_func_id"] or "")
-        target_func_id = str(row["target_func_id"] or "")
-        target_function = str(row["target_function"] or "")
-        status = str(row["status"] or "")
-        if source_func_id and target_func_id:
-            followed_pairs[(source_func_id, target_func_id)] = status
-        if source_func_id and target_function:
-            followed_names[(source_func_id, target_function)] = status
-    followup_by_edge, followup_by_edge_and_name = _build_followup_reason_maps(vuln_sqlite)
-
-    prop_columns = _sqlite_table_columns(prop_db, "propagations")
-    external_callee_expr = "is_external_callee" if "is_external_callee" in prop_columns else "0 AS is_external_callee"
-    prop_rows = _query_sqlite_rows(
-        prop_db,
-        f"""
-        SELECT prop_id, source_func_id, source_taint_name, source_taint_signature,
-               target_taint_name, target_taint_signature, target_function, target_func_id,
-               target_file, call_line, condition, is_external, is_indirect_call,
-               {external_callee_expr}, dispatch_kind, escape_kind, carrier, escape_via,
-               callsite_validated, branch_group_id, branch_arm_id, mutex_siblings,
-               validations, actual_args, description
-          FROM propagations
-         ORDER BY source_func_id, call_line, prop_id
-        """,
-    )
-    items: list[dict[str, Any]] = []
-    for row in prop_rows:
-        source_func_id = str(row["source_func_id"] or "")
-        source_meta = func_map.get(source_func_id, {})
-        target_func_id = str(row["target_func_id"] or "")
-        target_function = str(row["target_function"] or "")
-        orchestration_status = None
-        if source_func_id and target_func_id:
-            orchestration_status = followed_pairs.get((source_func_id, target_func_id))
-        if orchestration_status is None and source_func_id and target_function:
-            orchestration_status = followed_names.get((source_func_id, target_function))
-        followup_row = followup_by_edge.get(str(row["prop_id"] or ""))
-        if followup_row is None and target_function:
-            followup_row = followup_by_edge_and_name.get((str(row["prop_id"] or ""), target_function))
-        followup_reason, followup_reason_source, followup_status = (None, None, None)
-        if followup_row is not None:
-            followup_reason, followup_reason_source, followup_status = _derive_unfollowed_reason_from_followup(followup_row)
-        if not followup_reason and orchestration_status is None:
-            followup_reason, followup_reason_source = _derive_unfollowed_reason_from_propagation(row)
-        items.append({
-            "prop_id": str(row["prop_id"] or ""),
-            "source_func_id": source_func_id or None,
-            "source_function": source_meta.get("name") or None,
-            "source_file": source_meta.get("file") or None,
-            "source_taint_name": str(row["source_taint_name"] or ""),
-            "source_taint_signature": str(row["source_taint_signature"] or ""),
-            "target_taint_name": str(row["target_taint_name"] or ""),
-            "target_taint_signature": str(row["target_taint_signature"] or ""),
-            "target_func_id": target_func_id or None,
-            "target_function": target_function or None,
-            "target_file": str(row["target_file"] or "") or None,
-            "call_line": int(row["call_line"]) if row["call_line"] is not None else None,
-            "condition": str(row["condition"] or "") or None,
-            "description": str(row["description"] or "") or None,
-            "validations": _json_list(row["validations"]),
-            "actual_args": [str(item) for item in _json_list(row["actual_args"])],
-            "is_external": bool(row["is_external"]),
-            "is_indirect_call": bool(row["is_indirect_call"]),
-            "is_external_callee": bool(row["is_external_callee"]),
-            "dispatch_kind": str(row["dispatch_kind"] or "") or None,
-            "escape_kind": str(row["escape_kind"] or "") or None,
-            "carrier": str(row["carrier"] or "") or None,
-            "escape_via": str(row["escape_via"] or "") or None,
-            "callsite_validated": bool(row["callsite_validated"]),
-            "branch_group_id": str(row["branch_group_id"] or "") or None,
-            "branch_arm_id": str(row["branch_arm_id"] or "") or None,
-            "mutex_siblings": [str(item) for item in _json_list(row["mutex_siblings"])],
-            "propagation_method": _propagation_method(row),
-            "orchestration_followed": orchestration_status is not None,
-            "orchestration_status": orchestration_status,
-            "unfollowed_reason": followup_reason,
-            "unfollowed_reason_source": followup_reason_source,
-            "followup_status": followup_status,
-            "followup_reason_raw": str((followup_row or {}).get("reason") or "") or None,
-        })
-    items.sort(
-        key=lambda item: (
-            str(item.get("source_function") or ""),
-            int(item.get("call_line") or 0),
-            str(item.get("prop_id") or ""),
-        )
-    )
-    return items
-
-
 def _load_result_json(row, root: Path, warnings: List[str]) -> Dict[str, Any]:
     result_path = root / "run" / "result.json"
     if result_path.exists():
@@ -966,61 +718,6 @@ def _parse_session_file(path: Path) -> Dict[str, Any]:
         obj.setdefault("raw_line", line)
         events.append(obj)
     return {"events": events, "warnings": warnings, "session_meta": session_meta, "line_count": len(path.read_text(encoding="utf-8", errors="replace").splitlines())}
-
-
-def _write_json_atomic(path: Path, payload: Dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(
-        dir=str(path.parent),
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-    )
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload, ensure_ascii=False, indent=2))
-            handle.flush()
-            os.fsync(handle.fileno())
-        Path(tmp_name).replace(path)
-    except Exception:
-        try:
-            os.unlink(tmp_name)
-        except FileNotFoundError:
-            pass
-        raise
-
-
-def _build_task_session_catalog(row) -> Dict[str, Any]:
-    root = _task_root(row)
-    run_root = root / "run" if str(root) else Path()
-    if not run_root.exists():
-        return {
-            "task_id": row.task_id,
-            "status": row.status,
-            "sessions_root": str(run_root / "sessions"),
-            "index_path": str(run_root / "sessions" / "index.json"),
-            "generated_at": None,
-            "items": [],
-            "index": {
-                "version": 1,
-                "generated_at": None,
-                "task_id": row.task_id,
-                "task_status": row.status,
-                "sessions_root": str(run_root / "sessions"),
-                "summary": {},
-                "nodes": [],
-                "edges": [],
-                "groups": [],
-                "warnings": [],
-            },
-        }
-    result_json = _load_result_json(row, root, [])
-    return build_session_catalog(
-        task_id=row.task_id,
-        row_status=row.status,
-        run_root=run_root,
-        result_json=result_json,
-        write_json_atomic=_write_json_atomic,
-    )
 
 
 @router.post("/tasks", status_code=201)
@@ -1751,18 +1448,44 @@ def get_task_vuln_graph(task_id: str, db: Session = Depends(get_db)):
     root = _task_root(row)
     latest_run_root = _latest_epoch_run_root(root) if str(root) else Path()
     run_root = latest_run_root if latest_run_root.exists() else root / "run"
-    # V2 是唯一引擎, 总是用 V2 graph
-    graph = load_dataflow_v2_graph(run_root)
-    trace_tree = build_v2_trace_tree(run_root)
-    summary = summarize_v2_graph(graph)
+    view = _load_task_graph_view(run_root, task_id)
     return {
         "task_id": task_id,
-        "available": bool(graph.get("analysis_runs") or graph.get("taint_nodes") or graph.get("vulnerability_findings")),
-        "run_root": str(run_root),
-        "summary": summary,
-        "trace_tree": trace_tree,
-        "graph": graph,
+        "available": bool(view.get("available")),
+        "mode": "dataflow_v2",
+        "run_root": str(view.get("run_root") or run_root),
+        "summary": _project_vuln_graph_summary_from_graph_view(view),
+        "trace_tree": _project_vuln_trace_tree_from_graph_view(view.get("tree")),
+        "graph": {
+            "analysis_runs": view.get("nodes") or [],
+            "taint_edges": view.get("edges") or [],
+            "followups": view.get("edges") or [],
+            "task_graph_sessions": view.get("sessions") or [],
+            "vulnerability_findings": view.get("findings") or [],
+        },
     }
+
+
+@router.get("/tasks/{task_id}/graph-view", response_model=TaskGraphViewResponse)
+def get_task_graph_view(task_id: str, db: Session = Depends(get_db)):
+    row = _get_task_row(db, task_id)
+    root = _task_root(row)
+    latest_run_root = _latest_epoch_run_root(root) if str(root) else Path()
+    run_root = latest_run_root if latest_run_root.exists() else root / "run"
+    view = _load_task_graph_view(run_root, task_id)
+    return TaskGraphViewResponse(
+        task_id=task_id,
+        epoch=str(view.get("epoch") or ""),
+        available=bool(view.get("available")),
+        summary=view.get("summary") or {},
+        nodes=[TaskGraphNodeResponse(**item) for item in (view.get("nodes") or [])],
+        edges=[TaskGraphEdgeResponse(**item) for item in (view.get("edges") or [])],
+        tree=TaskGraphTreeNodeResponse(**view["tree"]) if view.get("tree") else None,
+        sessions=[TaskGraphSessionResponse(**item) for item in (view.get("sessions") or [])],
+        findings=[TaskGraphFindingResponse(**item) for item in (view.get("findings") or [])],
+        generated_at=view.get("generated_at"),
+        run_root=str(view.get("run_root") or run_root),
+    )
 
 
 @router.get("/tasks/{task_id}/vuln-findings")
@@ -1771,11 +1494,11 @@ def get_task_vuln_findings(task_id: str, db: Session = Depends(get_db)):
     root = _task_root(row)
     latest_run_root = _latest_epoch_run_root(root) if str(root) else Path()
     run_root = latest_run_root if latest_run_root.exists() else root / "run"
-    graph = load_vuln_scan_graph(run_root)
-    findings = graph.get("vulnerability_findings") or []
+    view = _load_task_graph_view(run_root, task_id)
+    findings = list(view.get("findings") or [])
     return {
         "task_id": task_id,
-        "available": bool(findings),
+        "available": bool(view.get("available")),
         "count": len(findings),
         "items": findings,
     }
@@ -1787,11 +1510,12 @@ def get_task_propagations(task_id: str, db: Session = Depends(get_db)):
     root = _task_root(row)
     latest_run_root = _latest_epoch_run_root(root) if str(root) else Path()
     run_root = latest_run_root if latest_run_root.exists() else root / "run"
-    items = _load_task_propagations(run_root) if run_root.exists() else []
+    view = _load_task_graph_view(run_root, task_id)
+    items = _project_propagations_from_graph(view)
     return TaskPropagationsResponse(
         task_id=task_id,
-        run_root=str(run_root),
-        available=bool(items),
+        run_root=str(view.get("run_root") or run_root),
+        available=bool(view.get("available")),
         items=[TaskPropagationItemResponse(**item) for item in items],
     )
 
@@ -1812,8 +1536,7 @@ def report_all_task_vuln_findings(task_id: str, db: Session = Depends(get_db)):
     root = _task_root(row)
     latest_run_root = _latest_epoch_run_root(root) if str(root) else Path()
     run_root = latest_run_root if latest_run_root.exists() else root / "run"
-    graph = load_vuln_scan_graph(run_root)
-    findings = graph.get("vulnerability_findings") or []
+    findings = _load_task_vulnerability_findings(run_root, task_id)
     unreported = [f for f in findings if f.get("report_status") != "reported"]
     results = []
     for f in unreported:
@@ -1843,8 +1566,7 @@ def _do_report_finding(task_id: str, finding_id: str, db: Session):
     else:
         latest_run_root = _latest_epoch_run_root(root) if str(root) else Path()
         run_root = latest_run_root if latest_run_root.exists() else root / "run"
-    graph = load_vuln_scan_graph(run_root)
-    findings = graph.get("vulnerability_findings") or []
+    findings = _load_task_vulnerability_findings(run_root, task_id)
     finding = next((f for f in findings if f.get("finding_id") == finding_id), None)
     if not finding:
         return None
@@ -1956,8 +1678,7 @@ def report_all_project_vuln_findings(project_id: str = Query(...), db: Session =
         root = _task_root(row)
         latest_run_root = _latest_epoch_run_root(root) if str(root) else Path()
         run_root = latest_run_root if latest_run_root.exists() else root / "run"
-        graph = load_vuln_scan_graph(run_root)
-        findings = graph.get("vulnerability_findings") or []
+        findings = _load_task_vulnerability_findings(run_root, task_id)
         for f in findings:
             fid = f.get("finding_id", "")
             if not fid or f.get("report_status") == "reported":
@@ -1988,8 +1709,7 @@ def get_tasks_vuln_stats_batch(task_ids: str = Query(...), db: Session = Depends
         root = _task_root(row)
         latest = _latest_epoch_run_root(root) if str(root) else Path()
         run_root = latest if latest.exists() else root / "run"
-        graph = load_vuln_scan_graph(run_root)
-        findings = graph.get("vulnerability_findings") or []
+        findings = _load_task_vulnerability_findings(run_root, tid)
         total = len(findings)
         reported = sum(1 for f in findings if f.get("report_status") == "reported")
         result[tid] = {"total": total, "reported": reported, "unreported": total - reported}
@@ -2049,18 +1769,16 @@ def get_task_result(task_id: str, db: Session = Depends(get_db)):
         available = False
 
     summary = _summarize_rounds(rounds, result_json)
-    # Enrich summary with vuln-graph data (function_count, total_findings) when
-    # the round-based summary is incomplete for the new SQLite-based architecture.
+    # Keep structured graph counts sourced from the authoritative task graph view.
     try:
         graph_run_root = latest_run_root if latest_run_root.exists() else run_root
-        # V2 是唯一引擎, 总是用 V2 graph
-        graph = load_dataflow_v2_graph(graph_run_root)
-        graph_summary = summarize_v2_graph(graph)
-        if graph_summary.get("runs", 0) > 0:
+        view = _load_task_graph_view(graph_run_root, task_id)
+        if view.get("available"):
+            view_summary = view.get("summary") or {}
             if not summary.get("function_count"):
-                summary["function_count"] = graph_summary["runs"]
-            summary["total_findings"] = graph_summary["findings"]
-            findings = graph.get("vulnerability_findings") or []
+                summary["function_count"] = int(view_summary.get("nodes_total") or len(view.get("nodes") or []))
+            findings = list(view.get("findings") or [])
+            summary["total_findings"] = len(findings) if findings else int(view_summary.get("findings_total") or 0)
             by_severity: dict[str, int] = {}
             for f in findings:
                 sev = str(f.get("severity") or "unknown").upper()
@@ -2089,21 +1807,20 @@ def get_task_result(task_id: str, db: Session = Depends(get_db)):
 @router.get("/tasks/{task_id}/sessions")
 def list_task_sessions(task_id: str, db: Session = Depends(get_db)):
     row = _get_task_row(db, task_id)
-    catalog = _build_task_session_catalog(row)
-    return {"task_id": task_id, "items": catalog.get("items", []), "current_epoch": None}
+    root = _task_root(row)
+    latest_run_root = _latest_epoch_run_root(root) if str(root) else Path()
+    run_root = latest_run_root if latest_run_root.exists() else root / "run"
+    view = _load_task_graph_view(run_root, task_id)
+    return {"task_id": task_id, "items": _project_session_list_from_graph(view), "current_epoch": view.get("epoch") or None}
 
 @router.get("/tasks/{task_id}/sessions/index", response_model=TaskSessionIndexResponse)
 def get_task_session_index(task_id: str, db: Session = Depends(get_db)):
     row = _get_task_row(db, task_id)
-    catalog = _build_task_session_catalog(row)
-    return {
-        "task_id": catalog.get("task_id") or row.task_id,
-        "status": catalog.get("status") or row.status,
-        "sessions_root": catalog.get("sessions_root"),
-        "index_path": catalog.get("index_path"),
-        "generated_at": catalog.get("generated_at"),
-        **(catalog.get("index") or {}),
-    }
+    root = _task_root(row)
+    latest_run_root = _latest_epoch_run_root(root) if str(root) else Path()
+    run_root = latest_run_root if latest_run_root.exists() else root / "run"
+    view = _load_task_graph_view(run_root, task_id)
+    return _project_session_index_from_graph(task_id=task_id, task_status=row.status, run_root=run_root, view=view)
 
 
 @router.get("/tasks/{task_id}/sessions/file")
@@ -2267,3 +1984,273 @@ def get_task_logs(task_id: str, db: Session = Depends(get_db)):
 def generate_prompt(body: GeneratePromptRequest):
     """Auto-generate a data flow analysis prompt from an input path."""
     return {"prompt": generate_prompt_from_path(body.input_path)}
+def _graph_store_for_run_root(run_root: Path) -> VulnScanStore | None:
+    db_path = run_root / "vuln-scan.sqlite"
+    if not db_path.exists():
+        parent_output = run_root.parent / "output" / "vuln-scan.sqlite"
+        if parent_output.exists():
+            db_path = parent_output
+        else:
+            return None
+    return VulnScanStore(db_path)
+
+
+def _load_task_graph_view(run_root: Path, task_id: str) -> dict[str, Any]:
+    store = _graph_store_for_run_root(run_root)
+    if store is None:
+        return {
+            "task_id": task_id,
+            "epoch": "",
+            "available": False,
+            "summary": {},
+            "nodes": [],
+            "edges": [],
+            "tree": None,
+            "sessions": [],
+            "findings": [],
+            "generated_at": None,
+            "run_root": str(run_root),
+        }
+    view = store.export_task_graph_view(task_id)
+    if not view.get("run_root"):
+        view["run_root"] = str(run_root)
+    return view
+
+
+def _load_task_vulnerability_findings(run_root: Path, task_id: str) -> list[dict[str, Any]]:
+    store = _graph_store_for_run_root(run_root)
+    if store is not None:
+        return list(store.list_task_findings(task_id))
+    return []
+
+
+def _project_propagations_from_graph(view: dict[str, Any]) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for edge in view.get("edges") or []:
+        if int(edge.get("visible_in_all_propagations") or 0) != 1:
+            continue
+        status = str(edge.get("status") or "")
+        edge_kind = str(edge.get("edge_kind") or "")
+        propagation_method = {
+            "direct_call": "直接调用",
+            "indirect_call": "间接调用",
+            "external_escape": "外部逃逸",
+            "container_reader": "容器读者跟入",
+            "return_followup": "返回值回溯",
+            "external_callee": "外部 callee",
+            "unresolved_target": "未解析目标",
+        }.get(edge_kind, edge_kind)
+        items.append({
+            "prop_id": str(edge.get("source_prop_id") or edge.get("edge_id") or ""),
+            "edge_id": str(edge.get("edge_id") or ""),
+            "edge_kind": edge_kind,
+            "status": status or None,
+            "source_func_id": str(edge.get("source_func_id") or "") or None,
+            "source_function": str(edge.get("source_function_resolved") or "") or None,
+            "source_file": str(edge.get("source_file") or "") or None,
+            "source_taint_name": str(edge.get("source_taint_name") or ""),
+            "source_taint_signature": "",
+            "target_taint_name": str(edge.get("target_taint_name") or ""),
+            "target_taint_signature": "",
+            "target_func_id": str(edge.get("target_func_id") or "") or None,
+            "target_function": str(edge.get("target_function_resolved") or edge.get("target_function_raw") or "") or None,
+            "target_function_raw": str(edge.get("target_function_raw") or "") or None,
+            "target_function_resolved": str(edge.get("target_function_resolved") or "") or None,
+            "target_file": str(edge.get("target_file") or "") or None,
+            "call_line": edge.get("call_line"),
+            "condition": None,
+            "description": edge.get("reason_message") or None,
+            "validations": json.loads(edge.get("validations_json") or "[]"),
+            "actual_args": json.loads(edge.get("actual_args_json") or "[]"),
+            "is_external": str(edge.get("edge_kind") or "") == "external_escape",
+            "is_indirect_call": str(edge.get("edge_kind") or "") == "indirect_call",
+            "is_external_callee": str(edge.get("edge_kind") or "") == "external_callee",
+            "dispatch_kind": None,
+            "escape_kind": None,
+            "carrier": None,
+            "escape_via": None,
+            "callsite_validated": True,
+            "branch_group_id": None,
+            "branch_arm_id": None,
+            "mutex_siblings": [],
+            "propagation_method": propagation_method,
+            "orchestration_followed": status in {"scheduled", "running", "done", "failed", "cancelled"},
+            "orchestration_status": status or None,
+            "unfollowed_reason": edge.get("reason_code") or None,
+            "unfollowed_reason_source": edge.get("reason_source") or None,
+            "followup_status": status or None,
+            "followup_reason_raw": edge.get("reason_message") or None,
+            "reason_code": edge.get("reason_code") or None,
+            "reason_message": edge.get("reason_message") or None,
+        })
+    return items
+
+
+def _project_session_list_from_graph(view: dict[str, Any]) -> list[dict[str, Any]]:
+    node_by_id = {str(node.get("node_id") or ""): node for node in (view.get("nodes") or [])}
+    items: list[dict[str, Any]] = []
+    for item in (view.get("sessions") or []):
+        relpath = str(item.get("session_relpath") or "")
+        display_name = str(item.get("display_name") or Path(relpath).stem)
+        owner_node = node_by_id.get(str(item.get("node_id") or ""))
+        items.append({
+            "session_id": relpath,
+            "session_name": display_name,
+            "relative_path": relpath,
+            "stage_group": str(item.get("node_id") or "root"),
+            "role_name": str(item.get("session_role") or item.get("session_kind") or "worker"),
+            "size": 0,
+            "mtime": float(item.get("mtime") or 0),
+            "event_count": int(item.get("event_count") or 0),
+            "message_count": int(item.get("event_count") or 0),
+            "is_active": str(item.get("status") or "").lower() == "running",
+            "display_name": display_name,
+            "agent_session": {
+                "node_id": item.get("node_id") or "",
+                "edge_id": item.get("edge_id") or "",
+                "session_kind": item.get("session_kind") or "",
+                "function_name": (owner_node or {}).get("function_name_resolved") or (owner_node or {}).get("function_name_raw") or "",
+            },
+        })
+    return items
+
+
+def _graph_generated_at_to_iso(value: object) -> str | None:
+    if value is None or value == "":
+        return None
+    try:
+        timestamp = float(value)
+    except (TypeError, ValueError):
+        raw = str(value).strip()
+        return raw or None
+    return datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _project_session_index_from_graph(*, task_id: str, task_status: str, run_root: Path, view: dict[str, Any]) -> dict[str, Any]:
+    node_by_id = {str(node.get("node_id") or ""): node for node in (view.get("nodes") or [])}
+    primary_session_by_node: dict[str, dict[str, Any]] = {}
+    nodes: list[dict[str, Any]] = []
+    for item in (view.get("sessions") or []):
+        relpath = str(item.get("session_relpath") or "")
+        display_name = str(item.get("display_name") or Path(relpath).stem)
+        graph_node_id = str(item.get("node_id") or "")
+        owner_node = node_by_id.get(graph_node_id)
+        payload = {
+            "node_id": relpath,
+            "relative_path": relpath,
+            "session_name": display_name,
+            "display_name": display_name,
+            "role": str(item.get("session_kind") or item.get("session_role") or "worker"),
+            "role_label": str(item.get("session_role") or item.get("session_kind") or "worker"),
+            "status": str(item.get("status") or "unknown"),
+            "is_active": str(item.get("status") or "").lower() == "running",
+            "stage_key": "worker",
+            "stage_label": "数据流漏洞挖掘",
+            "stage_order": 10,
+            "stage_group": graph_node_id or "root",
+            "module_name": (owner_node or {}).get("function_name_resolved") or (owner_node or {}).get("function_name_raw") or None,
+            "started_at": item.get("started_at"),
+            "ended_at": item.get("ended_at"),
+            "last_event_at": item.get("ended_at") or item.get("started_at"),
+            "mtime": float(item.get("mtime") or 0),
+            "size": 0,
+            "event_count": int(item.get("event_count") or 0),
+            "line_count": int(item.get("event_count") or 0),
+            "warnings": [],
+            "session_header": {
+                "node_id": graph_node_id,
+                "edge_id": item.get("edge_id") or "",
+                "session_kind": item.get("session_kind") or "",
+            },
+            "round_refs": [],
+            "attempts_seen": [],
+            "flow_kind": "graph",
+        }
+        nodes.append(payload)
+        if graph_node_id and graph_node_id not in primary_session_by_node:
+            primary_session_by_node[graph_node_id] = payload
+    edges: list[dict[str, Any]] = []
+    for edge in (view.get("edges") or []):
+        source = primary_session_by_node.get(str(edge.get("source_node_id") or ""))
+        target = primary_session_by_node.get(str(edge.get("target_node_id") or ""))
+        if not source or not target:
+            continue
+        edges.append({
+            "edge_id": str(edge.get("edge_id") or ""),
+            "source_node_id": str(source.get("node_id") or ""),
+            "target_node_id": str(target.get("node_id") or ""),
+            "kind": str(edge.get("edge_kind") or ""),
+            "label": str(edge.get("edge_kind") or ""),
+        })
+    groups_by_id: dict[str, dict[str, Any]] = {}
+    for node in nodes:
+        group_id = str(node.get("stage_group") or "root")
+        group = groups_by_id.setdefault(group_id, {
+            "group_id": group_id,
+            "kind": "graph-node",
+            "label": str(node.get("module_name") or group_id),
+            "stage_key": node.get("stage_key"),
+            "module_name": node.get("module_name"),
+            "node_ids": [],
+        })
+        group["node_ids"].append(str(node.get("node_id") or ""))
+    graph_run_root = str(view.get("run_root") or run_root)
+    return {
+        "task_id": task_id,
+        "task_status": task_status,
+        "status": task_status,
+        "sessions_root": str(run_root / "sessions"),
+        "index_path": f"{graph_run_root}/graph-view",
+        "generated_at": _graph_generated_at_to_iso(view.get("generated_at")),
+        "version": 1,
+        "summary": view.get("summary") or {},
+        "nodes": nodes,
+        "edges": edges,
+        "groups": list(groups_by_id.values()),
+        "warnings": [],
+    }
+
+
+def _project_vuln_graph_summary_from_graph_view(view: dict[str, Any]) -> dict[str, int]:
+    summary = view.get("summary") or {}
+    edges = view.get("edges") or []
+    active_statuses = {"scheduled", "running", "done", "failed", "cancelled"}
+    return {
+        "runs": int(summary.get("nodes_total") or 0),
+        "nodes": int(summary.get("nodes_total") or 0),
+        "edges": int(summary.get("edges_total") or 0),
+        "followups": int(summary.get("edges_total") or 0),
+        "executed_followups": sum(1 for edge in edges if str(edge.get("status") or "") in active_statuses),
+        "pending_followups": sum(1 for edge in edges if str(edge.get("status") or "") in {"discovered", "scheduled", "running"}),
+        "skipped_followups": sum(1 for edge in edges if str(edge.get("status") or "") in {"not_followed", "unresolved"}),
+        "findings": int(summary.get("findings_total") or 0),
+    }
+
+
+def _project_vuln_trace_tree_from_graph_view(node: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not node:
+        return None
+    children = [_project_vuln_trace_tree_from_graph_view(child) for child in (node.get("children") or [])]
+    children = [child for child in children if child is not None]
+    reason_message = str(node.get("reason_message") or "")
+    status = str(node.get("status") or "discovered")
+    is_pruned = bool(node.get("placeholder")) or status in {"not_followed", "unresolved"} or bool(node.get("cycle"))
+    return {
+        "run_id": str(node.get("node_id") or ""),
+        "function_name": str(node.get("function_name_resolved") or node.get("function_name_raw") or node.get("node_id") or ""),
+        "source_file": str(node.get("source_file") or ""),
+        "line_hint": "",
+        "depth": int(node.get("depth") or 0),
+        "status": status,
+        "taint_inputs": [],
+        "taint_summary": [],
+        "child_count": len(children),
+        "followup_status": status,
+        "followup_reason": reason_message or None,
+        "findings_count": int(node.get("findings_count") or 0),
+        "termination_reasons": [reason_message] if reason_message else [],
+        "children": children,
+        "pruned": is_pruned or None,
+        "prune_reason": str(node.get("reason_code") or "") or None,
+        "taint_constraints": [],
+    }

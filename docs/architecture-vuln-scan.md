@@ -154,7 +154,13 @@ source_file :: function_name :: taint_symbol :: field_path
 
 ## API
 
-新增：
+新增主接口：
+
+```text
+GET /api/app/dataflow-vuln-scan/tasks/{task_id}/graph-view
+```
+
+兼容投影接口：
 
 ```text
 GET /api/app/dataflow-vuln-scan/tasks/{task_id}/vuln-graph

@@ -156,7 +156,7 @@ def load_dataflow_v2_graph(run_root: str | Path) -> dict[str, Any]:
         if vuln_sqlite is not None:
             try:
                 from ..vuln_store import VulnScanStore
-                findings = VulnScanStore(vuln_sqlite).export_json().get("vulnerability_findings") or []
+                findings = VulnScanStore(vuln_sqlite).list_all_findings()
             except Exception:
                 pass
         return {"analysis_runs": [], "taint_nodes": [], "taint_edges": [], "followups": [],
@@ -276,7 +276,7 @@ def load_dataflow_v2_graph(run_root: str | Path) -> dict[str, Any]:
     if vuln_sqlite is not None:
         try:
             from ..vuln_store import VulnScanStore
-            findings = VulnScanStore(vuln_sqlite).export_json().get("vulnerability_findings") or []
+            findings = VulnScanStore(vuln_sqlite).list_all_findings()
         except Exception:
             findings = []
 

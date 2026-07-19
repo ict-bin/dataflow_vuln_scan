@@ -22,9 +22,11 @@ processed_taints 命中 → 跳过重复分析。
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import re
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -35,6 +37,7 @@ from .models import (
 )
 from .store import DataflowStore
 from ..vuln_report_utils import safe_name as _safe_name
+from ..vuln_store import TaskGraphEdgeRecord
 
 logger = logging.getLogger("dvs.dataflow_v2.orchestrator")
 
@@ -185,6 +188,89 @@ class DfsOrchestrator:
             if self._llm_sem is not None:
                 self._llm_sem.release()
 
+    def _graph_store(self):
+        return getattr(self.cbs, "graph_store", None)
+
+    def _cancel_requested(self) -> bool:
+        cancel_event = getattr(self.cbs, "cancel_event", None)
+        return bool(cancel_event is not None and cancel_event.is_set())
+
+    def _graph_node_id(self, func: FunctionRecord) -> str:
+        graph_node_id = getattr(self.cbs, "graph_node_id", None)
+        if callable(graph_node_id):
+            return str(graph_node_id(func) or "")
+        return ""
+
+    def _graph_task_id(self) -> str:
+        return str(getattr(self.cbs, "task_id", "") or "")
+
+    def _graph_epoch(self) -> str:
+        return str(getattr(self.cbs, "graph_epoch", "run") or "run")
+
+    def _return_followup_edge_id(
+        self,
+        *,
+        source_func: FunctionRecord,
+        target_func: FunctionRecord,
+        taint_signature: str,
+        path_id: str,
+        call_line: int,
+    ) -> str:
+        key = f"return|{path_id}|{call_line}|{source_func.func_id}|{target_func.func_id}|{taint_signature}"
+        return f"return::{hashlib.sha1(key.encode()).hexdigest()[:24]}"
+
+    def _upsert_return_followup_edge(
+        self,
+        *,
+        source_func: FunctionRecord,
+        target_func: FunctionRecord,
+        taint_name: str,
+        taint_signature: str,
+        path_id: str,
+        call_line: int,
+        status: str,
+        reason_code: str = "",
+        reason_message: str = "",
+        reason_source: str = "",
+    ) -> str:
+        graph_store = self._graph_store()
+        if graph_store is None:
+            return ""
+        edge_id = self._return_followup_edge_id(
+            source_func=source_func,
+            target_func=target_func,
+            taint_signature=taint_signature,
+            path_id=path_id,
+            call_line=call_line,
+        )
+        graph_store.upsert_task_graph_edge(TaskGraphEdgeRecord(
+            edge_id=edge_id,
+            task_id=self._graph_task_id(),
+            epoch=self._graph_epoch(),
+            source_node_id=self._graph_node_id(source_func),
+            target_node_id=self._graph_node_id(target_func),
+            source_func_id=source_func.func_id,
+            target_func_id=target_func.func_id,
+            source_function_resolved=source_func.name,
+            target_function_resolved=target_func.name,
+            target_function_raw=target_func.name,
+            source_file=source_func.file,
+            target_file=target_func.file,
+            edge_kind="return_followup",
+            status=status,
+            reason_code=reason_code,
+            reason_message=reason_message,
+            reason_source=reason_source,
+            source_prop_id=edge_id,
+            call_line=call_line or None,
+            source_taint_name=taint_name,
+            target_taint_name=taint_name,
+            display_order=max(0, call_line),
+            visible_in_tree=0,
+            visible_in_all_propagations=1,
+        ))
+        return edge_id
+
     def run(self, root_func: FunctionRecord, root_taint: TaintParamInfo,
             base_session: str = "") -> None:
         """从根函数出发 DFS。"""
@@ -231,7 +317,45 @@ class DfsOrchestrator:
                     except OSError:
                         pass
                 caller_ctx = ctx.fork(_path_id(caller.func_id, rt_sig, "-1"))
-                self._process(caller, new_tp, [], new_session, caller_ctx, -1)
+                self._upsert_return_followup_edge(
+                    source_func=func,
+                    target_func=caller,
+                    taint_name=rt.name,
+                    taint_signature=rt_sig,
+                    path_id=caller_ctx.path_id,
+                    call_line=int(getattr(rt, "entry_line", 0) or 0),
+                    status="running",
+                )
+                try:
+                    self._process(caller, new_tp, [], new_session, caller_ctx, -1)
+                except BaseException:
+                    cancelled = self._cancel_requested()
+                    self._upsert_return_followup_edge(
+                        source_func=func,
+                        target_func=caller,
+                        taint_name=rt.name,
+                        taint_signature=rt_sig,
+                        path_id=caller_ctx.path_id,
+                        call_line=int(getattr(rt, "entry_line", 0) or 0),
+                        status="cancelled" if cancelled else "failed",
+                        reason_code="task_cancelled" if cancelled else "return_followup_failed",
+                        reason_message="task cancellation interrupted return followup" if cancelled else "return followup caller analysis failed",
+                        reason_source="cancel" if cancelled else "orchestrator",
+                    )
+                    raise
+                cancelled = self._cancel_requested()
+                self._upsert_return_followup_edge(
+                    source_func=func,
+                    target_func=caller,
+                    taint_name=rt.name,
+                    taint_signature=rt_sig,
+                    path_id=caller_ctx.path_id,
+                    call_line=int(getattr(rt, "entry_line", 0) or 0),
+                    status="cancelled" if cancelled else "done",
+                    reason_code="task_cancelled" if cancelled else "",
+                    reason_message="task cancellation interrupted return followup" if cancelled else "",
+                    reason_source="cancel" if cancelled else "",
+                )
 
     # ── 核心: 处理一个函数 (返回 my_discovered + return_taints) ──────────────
     def _process(self, func: FunctionRecord, taint_params: TaintParamInfo,
@@ -267,6 +391,7 @@ class DfsOrchestrator:
             self.store.upsert_taint(t)
         for p in result.propagations:
             self.store.upsert_propagation(p)
+            self._record_propagation_edge(func, p, depth)
         if result.description:
             func.description = result.description
             self.store.upsert_function(func)
@@ -316,6 +441,7 @@ class DfsOrchestrator:
                 continue
             resolved_seen.add(rec.func_id)
             resolved_callees.append(rec.name)
+            self._mark_path_step_scheduled(func, path_steps[0], ctx, depth)
         if resolved_callees:
             self.cbs.on_event("trace_callees", function=func.name,
                               callees=resolved_callees, depth=depth,
@@ -385,7 +511,46 @@ class DfsOrchestrator:
                 except OSError:
                     pass
             new_tp = TaintParamInfo(positions=[], signature=rt_sig, names=[rt.name])
-            self._process(func, new_tp, list(pre_validations), new_session, ctx, depth)
+            source_func = getattr(rt, "_graph_return_source_func", func)
+            self._upsert_return_followup_edge(
+                source_func=source_func,
+                target_func=func,
+                taint_name=rt.name,
+                taint_signature=rt_sig,
+                path_id=ctx.path_id,
+                call_line=int(getattr(rt, "entry_line", 0) or 0),
+                status="running",
+            )
+            try:
+                self._process(func, new_tp, list(pre_validations), new_session, ctx, depth)
+            except BaseException:
+                cancelled = self._cancel_requested()
+                self._upsert_return_followup_edge(
+                    source_func=source_func,
+                    target_func=func,
+                    taint_name=rt.name,
+                    taint_signature=rt_sig,
+                    path_id=ctx.path_id,
+                    call_line=int(getattr(rt, "entry_line", 0) or 0),
+                    status="cancelled" if cancelled else "failed",
+                    reason_code="task_cancelled" if cancelled else "return_followup_failed",
+                    reason_message="task cancellation interrupted return followup" if cancelled else "return followup re-analysis failed",
+                    reason_source="cancel" if cancelled else "orchestrator",
+                )
+                raise
+            cancelled = self._cancel_requested()
+            self._upsert_return_followup_edge(
+                source_func=source_func,
+                target_func=func,
+                taint_name=rt.name,
+                taint_signature=rt_sig,
+                path_id=ctx.path_id,
+                call_line=int(getattr(rt, "entry_line", 0) or 0),
+                status="cancelled" if cancelled else "done",
+                reason_code="task_cancelled" if cancelled else "",
+                reason_message="task cancellation interrupted return followup" if cancelled else "",
+                reason_source="cancel" if cancelled else "",
+            )
 
         # 8) 返回 (本函数校验, 本函数的 return_taints)
         logger.info("[V2-orch] _process DONE func=%s depth=%d paths=%d return_taints=%d",
@@ -400,20 +565,78 @@ class DfsOrchestrator:
         all_return_taints: list[TaintRecord] = []
         for step in steps:
             incoming = list(accumulated) + list(step.validations)
-            self.store.upsert_edge(OrchestrationEdge(
+            orch_edge = OrchestrationEdge(
                 path_id=ctx.path_id, source_function=func.name,
                 source_signature=func.signature, source_func_id=func.func_id,
                 target_function=step.func.name, target_signature=step.func.signature,
                 target_func_id=step.func.func_id, taint_params=step.taint_params,
-                depth=depth + 1, edge_order=step.call_line, status="done"))
+                depth=depth + 1, edge_order=step.call_line, status="done")
+            self.store.upsert_edge(orch_edge)
+            bridge_edge_id = step.prop_id if step.prop_id.startswith("bridge::") else ""
+            graph_store = self._graph_store()
+            if graph_store is not None:
+                graph_store.update_task_graph_edge(
+                step.prop_id,
+                status="running",
+                target_node_id=self._graph_node_id(step.func),
+                target_func_id=step.func.func_id,
+                target_function_resolved=step.func.name,
+                target_file=step.func.file,
+                reason_code="",
+                reason_message="",
+                reason_source="",
+                )
+                graph_store.update_task_graph_node(
+                    self._graph_node_id(step.func),
+                    status="running",
+                    analysis_status="running",
+                )
             sub_ctx = ctx.fork(_path_id(step.func.func_id, step.taint_params.signature, str(depth + 1)))
             sub_ctx.pre_validations = list(incoming)
-            child_fb, child_rts = self._process(step.func, step.taint_params, incoming,
-                                                 base_session, sub_ctx, depth + 1)
+            try:
+                child_fb, child_rts = self._process(step.func, step.taint_params, incoming,
+                                                    base_session, sub_ctx, depth + 1)
+            except BaseException:
+                if graph_store is not None:
+                    cancelled = self._cancel_requested()
+                    graph_store.update_task_graph_edge(
+                        step.prop_id,
+                        status="cancelled" if cancelled else "failed",
+                        reason_code="task_cancelled" if cancelled else "child_process_failed",
+                        reason_message="task cancellation interrupted child process" if cancelled else f"{step.func.name} child process failed",
+                        reason_source="cancel" if cancelled else "orchestrator",
+                    )
+                    graph_store.update_task_graph_node(
+                        self._graph_node_id(step.func),
+                        status="cancelled" if cancelled else "failed",
+                        analysis_status="cancelled" if cancelled else "failed",
+                        finished_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                    )
+                raise
             accumulated.extend(child_fb)
             for _rt in child_rts:
                 _rt.entry_line = step.call_line  # #11: return_taint 进入 caller 的行 (callee 调用点)
+                setattr(_rt, "_graph_return_source_func", step.func)
             all_return_taints.extend(child_rts)
+            if graph_store is not None:
+                cancelled = self._cancel_requested()
+                graph_store.update_task_graph_edge(
+                    step.prop_id,
+                    status="cancelled" if cancelled else "done",
+                    target_node_id=self._graph_node_id(step.func),
+                    target_func_id=step.func.func_id,
+                    target_function_resolved=step.func.name,
+                    target_file=step.func.file,
+                    reason_code="task_cancelled" if cancelled else "",
+                    reason_message="task cancellation interrupted child completion" if cancelled else "",
+                    reason_source="cancel" if cancelled else "",
+                )
+                graph_store.update_task_graph_node(
+                    self._graph_node_id(step.func),
+                    status="cancelled" if cancelled else "done",
+                    analysis_status="cancelled" if cancelled else "done",
+                    finished_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                )
         return accumulated, all_return_taints
 
     # ── 路径构造: 有序链 + 互斥分叉 + 外部分叉 ───────────────────────────────
@@ -462,23 +685,73 @@ class DfsOrchestrator:
                 targets = self._run_llm(
                     self.cbs.resolve_external_propagation, self.store, func, p, ctx)
                 if not targets:
+                    graph_store = self._graph_store()
+                    if graph_store is not None:
+                        graph_store.update_task_graph_edge(
+                            p.prop_id,
+                            edge_kind="unresolved_target",
+                            status="unresolved",
+                            reason_code="tracker_no_target",
+                            reason_message="external tracker did not resolve target",
+                            reason_source="tracker",
+                            tracker_type="external_escape",
+                            tracker_result_json=json.dumps({"resolved_targets": []}, ensure_ascii=False),
+                        )
                     continue  # TODO stub 未接: 不 fork
                 new_paths = []
                 for base in paths:
                     for tgt_func, tp in targets:
+                        bridge_edge_id = self._graph_bridge_edge_id(
+                            "container_reader", ctx.path_id, p.call_line, tgt_func.func_id, p.prop_id)
+                        self._record_bridge_edge(
+                            func,
+                            p,
+                            tgt_func,
+                            ctx,
+                            depth,
+                            edge_kind="container_reader",
+                            tracker_type="external_escape",
+                            bridge_edge_id=bridge_edge_id,
+                            tracker_result={"resolved_targets": [tgt_func.name for tgt_func, _ in targets]},
+                        )
                         new_paths.append(base + [ChainStep(tgt_func, tp, list(p.validations),
-                                                           p.call_line, p.prop_id)])
+                                                           p.call_line, bridge_edge_id)])
                 paths = new_paths
             elif p.is_indirect_call:
                 # 函数指针/回调间接调用 → function_pointer tracker 搜注册点 → 处理函数
                 targets = self._run_llm(self.cbs.resolve_indirect_call, self.store, func, p, ctx)
                 if not targets:
+                    graph_store = self._graph_store()
+                    if graph_store is not None:
+                        graph_store.update_task_graph_edge(
+                            p.prop_id,
+                            edge_kind="unresolved_target",
+                            status="unresolved",
+                            reason_code="tracker_no_target",
+                            reason_message="indirect-call tracker did not resolve target",
+                            reason_source="tracker",
+                            tracker_type="indirect_call",
+                            tracker_result_json=json.dumps({"resolved_targets": []}, ensure_ascii=False),
+                        )
                     continue  # 无法静态解析注册点, 不 fork
                 new_paths = []
                 for base in paths:
                     for tgt_func, tp in targets:
+                        bridge_edge_id = self._graph_bridge_edge_id(
+                            "indirect_call", ctx.path_id, p.call_line, tgt_func.func_id, p.prop_id)
+                        self._record_bridge_edge(
+                            func,
+                            p,
+                            tgt_func,
+                            ctx,
+                            depth,
+                            edge_kind="indirect_call",
+                            tracker_type="indirect_call",
+                            bridge_edge_id=bridge_edge_id,
+                            tracker_result={"resolved_targets": [tgt_func.name for tgt_func, _ in targets]},
+                        )
                         new_paths.append(base + [ChainStep(tgt_func, tp, list(p.validations),
-                                                           p.call_line, p.prop_id)])
+                                                           p.call_line, bridge_edge_id)])
                 paths = new_paths
             else:
                 # 直接调用
@@ -488,7 +761,45 @@ class DfsOrchestrator:
                     continue
                 steps = self._prop_to_steps(p)
                 if not steps:
+                    graph_store = self._graph_store()
+                    if graph_store is not None:
+                        graph_store.update_task_graph_edge(
+                            p.prop_id,
+                            edge_kind="unresolved_target",
+                            status="unresolved",
+                            reason_code="callee_not_resolved",
+                            reason_message="direct callee could not be resolved",
+                            reason_source="orchestrator",
+                        )
                     continue  # callee 解析失败, 跳过
+                if len(steps) > 1:
+                    new_paths = []
+                    for base in paths:
+                        for step in steps:
+                            bridge_edge_id = self._graph_bridge_edge_id(
+                                "direct_call", ctx.path_id, p.call_line, step.func.func_id, p.prop_id)
+                            self._record_bridge_edge(
+                                func,
+                                p,
+                                step.func,
+                                ctx,
+                                depth,
+                                edge_kind="direct_call",
+                                tracker_type="direct_resolution",
+                                bridge_edge_id=bridge_edge_id,
+                                tracker_result={"resolved_targets": [item.func.name for item in steps]},
+                            )
+                            new_paths.append(base + [ChainStep(
+                                step.func,
+                                step.taint_params,
+                                list(step.validations),
+                                step.call_line,
+                                bridge_edge_id,
+                                step.branch_group_id,
+                                step.branch_arm_id,
+                            )])
+                    paths = new_paths
+                    continue
                 new_paths = []
                 for base in paths:
                     for step in steps:
@@ -496,6 +807,127 @@ class DfsOrchestrator:
                 if new_paths:
                     paths = new_paths
         return [p for p in paths if p]  # 剔除空链
+
+    def _record_propagation_edge(self, func: FunctionRecord, prop: PropagationRecord, depth: int) -> None:
+        graph_store = self._graph_store()
+        if graph_store is None:
+            return
+        source_node_id = self._graph_node_id(func)
+        target_rec = self.store.get_function(prop.target_func_id) if prop.target_func_id else None
+        edge_kind = "external_escape" if prop.is_external else (
+            "indirect_call" if prop.is_indirect_call else (
+                "external_callee" if prop.is_external_callee else "direct_call"
+            )
+        )
+        graph_store.upsert_task_graph_edge(TaskGraphEdgeRecord(
+            edge_id=prop.prop_id,
+            task_id=getattr(self.cbs, "task_id", ""),
+            epoch=getattr(self.cbs, "graph_epoch", "run"),
+            source_node_id=source_node_id,
+            target_node_id=self._graph_node_id(target_rec) if target_rec is not None else "",
+            source_func_id=func.func_id,
+            target_func_id=prop.target_func_id,
+            source_function_resolved=func.name,
+            target_function_resolved=target_rec.name if target_rec is not None else prop.target_function,
+            target_function_raw=prop.target_function,
+            source_file=func.file,
+            target_file=target_rec.file if target_rec is not None else prop.target_file,
+            edge_kind=edge_kind,
+            status="not_followed" if prop.is_external_callee else "discovered",
+            reason_code="external_callee" if prop.is_external_callee else "",
+            reason_message="callee definition is outside source tree" if prop.is_external_callee else "",
+            reason_source="analysis" if prop.is_external_callee else "",
+            source_prop_id=prop.prop_id,
+            call_line=prop.call_line or None,
+            source_taint_name=prop.source_taint_name,
+            target_taint_name=prop.target_taint_name,
+            validations_json=json.dumps([v.to_dict() for v in prop.validations], ensure_ascii=False),
+            actual_args_json=json.dumps(prop.actual_args or [], ensure_ascii=False),
+            display_order=max(depth, 0) * 1000 + int(prop.call_line or 0),
+        ))
+
+    def _graph_bridge_edge_id(
+        self,
+        edge_kind: str,
+        path_id: str,
+        call_line: int,
+        target_func_id: str,
+        source_prop_id: str,
+    ) -> str:
+        key = f"{edge_kind}|{path_id}|{call_line}|{target_func_id}|{source_prop_id}"
+        return f"bridge::{hashlib.sha1(key.encode()).hexdigest()[:24]}"
+
+    def _record_bridge_edge(
+        self,
+        func: FunctionRecord,
+        prop: PropagationRecord,
+        tgt_func: FunctionRecord,
+        ctx: PathContext,
+        depth: int,
+        *,
+        edge_kind: str,
+        tracker_type: str,
+        bridge_edge_id: str,
+        tracker_result: dict[str, Any] | None = None,
+    ) -> None:
+        graph_store = self._graph_store()
+        if graph_store is None:
+            return
+        graph_store.upsert_task_graph_edge(TaskGraphEdgeRecord(
+            edge_id=bridge_edge_id,
+            task_id=getattr(self.cbs, "task_id", ""),
+            epoch=getattr(self.cbs, "graph_epoch", "run"),
+            source_node_id=self._graph_node_id(func),
+            target_node_id=self._graph_node_id(tgt_func),
+            source_func_id=func.func_id,
+            target_func_id=tgt_func.func_id,
+            source_function_resolved=func.name,
+            target_function_resolved=tgt_func.name,
+            target_function_raw=prop.target_function,
+            source_file=func.file,
+            target_file=tgt_func.file,
+            edge_kind=edge_kind,
+            status="scheduled",
+            source_prop_id=prop.prop_id,
+            call_line=prop.call_line or None,
+            source_taint_name=prop.source_taint_name,
+            target_taint_name=prop.target_taint_name,
+            validations_json=json.dumps([v.to_dict() for v in prop.validations], ensure_ascii=False),
+            actual_args_json=json.dumps(prop.actual_args or [], ensure_ascii=False),
+            tracker_type=tracker_type,
+            tracker_result_json=json.dumps(tracker_result or {}, ensure_ascii=False),
+            display_order=max(depth, 0) * 1000 + int(prop.call_line or 0),
+        ))
+        graph_store.update_task_graph_edge(
+            prop.prop_id,
+            visible_in_tree=0,
+            tracker_type=tracker_type,
+            tracker_result_json=json.dumps(tracker_result or {}, ensure_ascii=False),
+        )
+
+    def _mark_path_step_scheduled(self, func: FunctionRecord, step: ChainStep, ctx: PathContext, depth: int) -> None:
+        graph_store = self._graph_store()
+        if graph_store is None:
+            return
+        edge_id = step.prop_id
+        if edge_id.startswith("bridge::"):
+            graph_store.update_task_graph_edge(
+                edge_id,
+                status="scheduled",
+                target_node_id=self._graph_node_id(step.func),
+                target_func_id=step.func.func_id,
+                target_function_resolved=step.func.name,
+                target_file=step.func.file,
+            )
+            return
+        graph_store.update_task_graph_edge(
+            edge_id,
+            status="scheduled",
+            target_node_id=self._graph_node_id(step.func),
+            target_func_id=step.func.func_id,
+            target_function_resolved=step.func.name,
+            target_file=step.func.file,
+        )
 
     def _prop_to_steps(self, p: PropagationRecord) -> list[ChainStep]:
         """callee 传播 → ChainStep 列表 (唯一命中或多候选 fan-out)。

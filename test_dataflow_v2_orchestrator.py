@@ -1,12 +1,18 @@
 """dataflow-v2 编排器路径构造测试 (互斥分叉 + 顺序链)。"""
+import json
 import sys, tempfile, time, unittest
+from threading import Event
 from pathlib import Path
+from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).parent))
 
 from app.dataflow_v2 import (
-    DataflowStore, FunctionRecord, PropagationRecord, TaintParamInfo, Validation,
+    DataflowStore, FunctionRecord, PropagationRecord, TaintParamInfo, TaintRecord, Validation,
 )
-from app.dataflow_v2.orchestrator import DfsOrchestrator, AnalysisCallbacks, PathContext
+from app.dataflow_v2.analysis import TaintAnalysisCallbacks
+from app.dataflow_v2.orchestrator import DfsOrchestrator, AnalysisCallbacks, AnalysisResult, PathContext
+from app.models import AgentInstanceConfig, RoleConfig, TaskConfig
+from app.vuln_store import TaskGraphEdgeRecord, TaskGraphNodeRecord, TaskGraphRunRecord, VulnScanStore
 
 
 class _NoOpCbs(AnalysisCallbacks):
@@ -261,6 +267,682 @@ class TestConcurrentDfs(unittest.TestCase):
         t0 = _t.time(); self._run(True); par = _t.time()-t0
         # 并发应不慢于顺序 (5 个 analyze × 0.05s; 并发路径折叠)
         self.assertLessEqual(par, seq + 0.1, f"par={par} seq={seq}")
+
+
+class TestReturnFollowupGraphEdges(unittest.TestCase):
+    def test_child_return_taint_writes_return_followup_edge(self):
+        with tempfile.TemporaryDirectory() as td:
+            run_dir = Path(td) / "run"
+            graph_store = VulnScanStore(run_dir / "vuln-scan.sqlite")
+            store = DataflowStore(run_dir / "dataflow-v2")
+            root = _func(store, "Root", file="root.c")
+            child = _func(store, "Child", file="child.c")
+
+            graph_store.start_task_graph_run(TaskGraphRunRecord(
+                task_id="task-return",
+                epoch="run",
+                run_root=str(run_dir),
+                root_function="Root",
+            ))
+            for func, depth in ((root, 0), (child, 1)):
+                graph_store.upsert_task_graph_node(TaskGraphNodeRecord(
+                    node_id=f"node::{func.func_id}",
+                    task_id="task-return",
+                    epoch="run",
+                    func_id=func.func_id,
+                    function_name_resolved=func.name,
+                    function_name_raw=func.name,
+                    source_file=func.file,
+                    depth=depth,
+                    status="running",
+                    analysis_status="running",
+                ))
+
+            class _ReturnCbs(AnalysisCallbacks):
+                def __init__(self):
+                    self.graph_store = graph_store
+                    self.task_id = "task-return"
+                    self.graph_epoch = "run"
+                    self.graph_node_id = lambda func: f"node::{func.func_id}"
+                    self.cancel_event = None
+                    self.sessions_dir = run_dir / "sessions"
+                    self.sessions_dir.mkdir(parents=True, exist_ok=True)
+                    self.source_root = td
+                    self.on_event = lambda *args, **kwargs: None
+
+                def analyze_function(self, store, func, taint_params, pre_validations, base_session, ctx):
+                    if func.name == "Root":
+                        return AnalysisResult(
+                            propagations=[
+                                PropagationRecord(
+                                    source_func_id=func.func_id,
+                                    source_taint_name="msg",
+                                    source_taint_signature="msg_t*",
+                                    target_taint_name="child_msg",
+                                    target_taint_signature="msg_t*",
+                                    target_function="Child",
+                                    target_func_id=child.func_id,
+                                    call_line=12,
+                                )
+                            ],
+                            self_contained=False,
+                            description="Root",
+                        )
+                    return AnalysisResult(
+                        self_contained=True,
+                        description="Child",
+                        return_taints=[
+                            TaintRecord(
+                                func_id=func.func_id,
+                                name="ret_msg",
+                                signature="ret_msg",
+                                file=func.file,
+                                function=func.name,
+                            )
+                        ],
+                    )
+
+                def mine_vulns(self, store, func, taint_params, ctx, base_session=""):
+                    return 0
+
+            orch = DfsOrchestrator(store, _ReturnCbs(), concurrent=False, max_depth=2)
+            orch.run(root, TaintParamInfo([0], "msg_t*", ["msg"]))
+
+            view = graph_store.export_task_graph_view("task-return")
+            return_edges = [edge for edge in view["edges"] if edge["edge_kind"] == "return_followup"]
+            self.assertEqual(1, len(return_edges))
+            self.assertEqual("Child", return_edges[0]["source_function_resolved"])
+            self.assertEqual("Root", return_edges[0]["target_function_resolved"])
+            self.assertEqual("done", return_edges[0]["status"])
+            self.assertEqual(0, int(return_edges[0]["visible_in_tree"]))
+
+
+class TestGraphUnresolvedTargetKind(unittest.TestCase):
+    def test_external_tracker_miss_rewrites_edge_kind_to_unresolved_target(self):
+        with tempfile.TemporaryDirectory() as td:
+            run_dir = Path(td) / "run"
+            graph_store = VulnScanStore(run_dir / "vuln-scan.sqlite")
+            store = DataflowStore(run_dir / "dataflow-v2")
+            root = _func(store, "Root", file="root.c")
+
+            class _Cbs(AnalysisCallbacks):
+                def __init__(self):
+                    self.graph_store = graph_store
+                    self.task_id = "task-unresolved-external"
+                    self.graph_epoch = "run"
+                    self.graph_node_id = lambda func: f"node::{func.func_id}"
+
+                def resolve_external_propagation(self, store, func, prop, ctx):
+                    return []
+
+            graph_store.start_task_graph_run(TaskGraphRunRecord(
+                task_id="task-unresolved-external",
+                epoch="run",
+                run_root=str(run_dir),
+                root_function="Root",
+            ))
+            graph_store.upsert_task_graph_node(TaskGraphNodeRecord(
+                node_id=f"node::{root.func_id}",
+                task_id="task-unresolved-external",
+                epoch="run",
+                func_id=root.func_id,
+                function_name_resolved=root.name,
+                function_name_raw=root.name,
+                source_file=root.file,
+                depth=0,
+                status="running",
+                analysis_status="running",
+            ))
+
+            orch = DfsOrchestrator(store, _Cbs(), concurrent=False, max_depth=2)
+            prop = PropagationRecord(
+                source_func_id=root.func_id,
+                source_taint_name="msg",
+                source_taint_signature="msg_t*",
+                target_taint_name="reader",
+                target_taint_signature="reader_t*",
+                target_function="Reader",
+                call_line=10,
+                is_external=True,
+            )
+            orch._record_propagation_edge(root, prop, 0)
+            paths = orch._build_paths([prop], root, PathContext("p0"), 0, ["msg"])
+
+            self.assertEqual([], paths)
+            view = graph_store.export_task_graph_view("task-unresolved-external")
+            edge = view["edges"][0]
+            self.assertEqual("unresolved_target", edge["edge_kind"])
+            self.assertEqual("unresolved", edge["status"])
+            self.assertEqual("tracker_no_target", edge["reason_code"])
+            self.assertEqual("external_escape", edge["tracker_type"])
+
+    def test_direct_resolution_miss_rewrites_edge_kind_to_unresolved_target(self):
+        with tempfile.TemporaryDirectory() as td:
+            run_dir = Path(td) / "run"
+            graph_store = VulnScanStore(run_dir / "vuln-scan.sqlite")
+            store = DataflowStore(run_dir / "dataflow-v2")
+            root = _func(store, "Root", file="root.c")
+
+            class _Cbs(AnalysisCallbacks):
+                def __init__(self):
+                    self.graph_store = graph_store
+                    self.task_id = "task-unresolved-direct"
+                    self.graph_epoch = "run"
+                    self.graph_node_id = lambda func: f"node::{func.func_id}"
+
+            graph_store.start_task_graph_run(TaskGraphRunRecord(
+                task_id="task-unresolved-direct",
+                epoch="run",
+                run_root=str(run_dir),
+                root_function="Root",
+            ))
+            graph_store.upsert_task_graph_node(TaskGraphNodeRecord(
+                node_id=f"node::{root.func_id}",
+                task_id="task-unresolved-direct",
+                epoch="run",
+                func_id=root.func_id,
+                function_name_resolved=root.name,
+                function_name_raw=root.name,
+                source_file=root.file,
+                depth=0,
+                status="running",
+                analysis_status="running",
+            ))
+
+            orch = DfsOrchestrator(store, _Cbs(), concurrent=False, max_depth=2)
+            prop = PropagationRecord(
+                source_func_id=root.func_id,
+                source_taint_name="msg",
+                source_taint_signature="msg_t*",
+                target_taint_name="child_msg",
+                target_taint_signature="child_msg_t*",
+                target_function="Missing::Child",
+                call_line=11,
+            )
+            orch._record_propagation_edge(root, prop, 0)
+            paths = orch._build_paths([prop], root, PathContext("p0"), 0, ["msg"])
+
+            self.assertEqual([], paths)
+            view = graph_store.export_task_graph_view("task-unresolved-direct")
+            edge = view["edges"][0]
+            self.assertEqual("unresolved_target", edge["edge_kind"])
+            self.assertEqual("unresolved", edge["status"])
+            self.assertEqual("callee_not_resolved", edge["reason_code"])
+            self.assertEqual("orchestrator", edge["reason_source"])
+
+
+class TestGraphBridgeVisibility(unittest.TestCase):
+    def test_bridge_edge_keeps_original_propagation_visible_in_all_propagations(self):
+        with tempfile.TemporaryDirectory() as td:
+            run_dir = Path(td) / "run"
+            graph_store = VulnScanStore(run_dir / "vuln-scan.sqlite")
+            store = DataflowStore(run_dir / "dataflow-v2")
+            root = _func(store, "Root", file="root.c")
+            reader = _func(store, "Reader", file="reader.c")
+
+            class _Cbs(AnalysisCallbacks):
+                def __init__(self):
+                    self.graph_store = graph_store
+                    self.task_id = "task-bridge-visibility"
+                    self.graph_epoch = "run"
+                    self.graph_node_id = lambda func: f"node::{func.func_id}"
+
+            graph_store.start_task_graph_run(TaskGraphRunRecord(
+                task_id="task-bridge-visibility",
+                epoch="run",
+                run_root=str(run_dir),
+                root_function="Root",
+            ))
+            for func, depth in ((root, 0), (reader, 1)):
+                graph_store.upsert_task_graph_node(TaskGraphNodeRecord(
+                    node_id=f"node::{func.func_id}",
+                    task_id="task-bridge-visibility",
+                    epoch="run",
+                    func_id=func.func_id,
+                    function_name_resolved=func.name,
+                    function_name_raw=func.name,
+                    source_file=func.file,
+                    depth=depth,
+                    status="running",
+                    analysis_status="running",
+                ))
+
+            orch = DfsOrchestrator(store, _Cbs(), concurrent=False, max_depth=2)
+            prop = PropagationRecord(
+                source_func_id=root.func_id,
+                source_taint_name="msg",
+                source_taint_signature="msg_t*",
+                target_taint_name="reader",
+                target_taint_signature="reader_t*",
+                target_function="Ns::Reader",
+                target_func_id="",
+                call_line=18,
+                is_external=True,
+            )
+            orch._record_propagation_edge(root, prop, 0)
+            bridge_edge_id = orch._graph_bridge_edge_id(
+                "container_reader",
+                "p0",
+                prop.call_line,
+                reader.func_id,
+                prop.prop_id,
+            )
+            orch._record_bridge_edge(
+                root,
+                prop,
+                reader,
+                PathContext("p0"),
+                0,
+                edge_kind="container_reader",
+                tracker_type="external_escape",
+                bridge_edge_id=bridge_edge_id,
+                tracker_result={"resolved_targets": [reader.name]},
+            )
+
+            view = graph_store.export_task_graph_view("task-bridge-visibility")
+            edge_by_id = {edge["edge_id"]: edge for edge in view["edges"]}
+            self.assertEqual(1, int(edge_by_id[prop.prop_id]["visible_in_all_propagations"]))
+            self.assertEqual(0, int(edge_by_id[prop.prop_id]["visible_in_tree"]))
+            self.assertEqual("external_escape", edge_by_id[prop.prop_id]["edge_kind"])
+            self.assertEqual("container_reader", edge_by_id[bridge_edge_id]["edge_kind"])
+            self.assertEqual(1, int(edge_by_id[bridge_edge_id]["visible_in_all_propagations"]))
+
+
+class TestGraphExecutionLifecycle(unittest.TestCase):
+    def test_external_callee_propagation_stays_not_followed_in_authoritative_graph(self):
+        with tempfile.TemporaryDirectory() as td:
+            run_dir = Path(td) / "run"
+            graph_store = VulnScanStore(run_dir / "vuln-scan.sqlite")
+            store = DataflowStore(run_dir / "dataflow-v2")
+            root = _func(store, "Root", file="root.c")
+
+            class _ExternalCalleeCbs(AnalysisCallbacks):
+                def __init__(self):
+                    self.graph_store = graph_store
+                    self.task_id = "task-external-callee"
+                    self.graph_epoch = "run"
+                    self.graph_node_id = lambda func: f"node::{func.func_id}"
+                    self.cancel_event = None
+                    self.sessions_dir = run_dir / "sessions"
+                    self.sessions_dir.mkdir(parents=True, exist_ok=True)
+                    self.source_root = td
+                    self.on_event = lambda *args, **kwargs: None
+
+                def analyze_function(self, store, func, taint_params, pre_validations, base_session, ctx):
+                    self.graph_store.upsert_task_graph_node(TaskGraphNodeRecord(
+                        node_id=self.graph_node_id(func),
+                        task_id=self.task_id,
+                        epoch=self.graph_epoch,
+                        func_id=func.func_id,
+                        function_name_resolved=func.name,
+                        function_name_raw=func.name,
+                        source_file=func.file,
+                        depth=max(0, getattr(ctx, "depth", 0)),
+                        status="running",
+                        analysis_status="running",
+                    ))
+                    return AnalysisResult(
+                        propagations=[
+                            PropagationRecord(
+                                source_func_id=func.func_id,
+                                source_taint_name="msg",
+                                source_taint_signature="msg_t*",
+                                target_taint_name="cb",
+                                target_taint_signature="cb_t*",
+                                target_function="ThirdParty::Callback",
+                                target_func_id="",
+                                target_file="third_party/callback.h",
+                                call_line=21,
+                                is_external_callee=True,
+                            )
+                        ],
+                        self_contained=False,
+                        description="Root",
+                    )
+
+                def mine_vulns(self, store, func, taint_params, ctx, base_session=""):
+                    return 0
+
+            orch = DfsOrchestrator(store, _ExternalCalleeCbs(), concurrent=False, max_depth=2)
+            orch.run(root, TaintParamInfo([0], "msg_t*", ["msg"]))
+
+            view = graph_store.export_task_graph_view("task-external-callee")
+            self.assertEqual(1, len(view["nodes"]))
+            self.assertEqual(1, len(view["edges"]))
+            edge = view["edges"][0]
+            self.assertEqual("external_callee", edge["edge_kind"])
+            self.assertEqual("not_followed", edge["status"])
+            self.assertEqual("external_callee", edge["reason_code"])
+            self.assertEqual("analysis", edge["reason_source"])
+            self.assertEqual("ThirdParty::Callback", edge["target_function_raw"])
+            self.assertEqual("ThirdParty::Callback", edge["target_function_resolved"])
+            self.assertEqual(1, len(view["tree"]["children"]))
+            placeholder = view["tree"]["children"][0]
+            self.assertEqual("external_callee", placeholder["edge_kind"])
+            self.assertEqual("not_followed", placeholder["status"])
+            self.assertTrue(placeholder["placeholder"])
+            self.assertEqual("ThirdParty::Callback", placeholder["function_name_resolved"])
+
+    def test_bridge_edge_lifecycle_reaches_done_via_real_external_tracker_path(self):
+        with tempfile.TemporaryDirectory() as td:
+            run_dir = Path(td) / "run"
+            graph_store = VulnScanStore(run_dir / "vuln-scan.sqlite")
+            store = DataflowStore(run_dir / "dataflow-v2")
+            root = _func(store, "Root", file="root.c")
+            reader = _func(store, "Reader", file="reader.c")
+
+            class _BridgeLifecycleCbs(AnalysisCallbacks):
+                def __init__(self):
+                    self.graph_store = graph_store
+                    self.task_id = "task-bridge-lifecycle"
+                    self.graph_epoch = "run"
+                    self.graph_node_id = lambda func: f"node::{func.func_id}"
+                    self.cancel_event = None
+                    self.sessions_dir = run_dir / "sessions"
+                    self.sessions_dir.mkdir(parents=True, exist_ok=True)
+                    self.source_root = td
+                    self.on_event = lambda *args, **kwargs: None
+
+                def analyze_function(self, store, func, taint_params, pre_validations, base_session, ctx):
+                    self.graph_store.upsert_task_graph_node(TaskGraphNodeRecord(
+                        node_id=self.graph_node_id(func),
+                        task_id=self.task_id,
+                        epoch=self.graph_epoch,
+                        func_id=func.func_id,
+                        function_name_resolved=func.name,
+                        function_name_raw=func.name,
+                        source_file=func.file,
+                        depth=max(0, getattr(ctx, "depth", 0)),
+                        status="running",
+                        analysis_status="running",
+                    ))
+                    if func.func_id == root.func_id:
+                        return AnalysisResult(
+                            propagations=[
+                                PropagationRecord(
+                                    source_func_id=func.func_id,
+                                    source_taint_name="msg",
+                                    source_taint_signature="msg_t*",
+                                    target_taint_name="reader",
+                                    target_taint_signature="reader_t*",
+                                    target_function="Ns::Reader",
+                                    target_func_id="",
+                                    call_line=18,
+                                    is_external=True,
+                                    escape_kind="container",
+                                    carrier="callbacks",
+                                    escape_via="list_add_tail",
+                                )
+                            ],
+                            self_contained=False,
+                            description="Root",
+                        )
+                    return AnalysisResult(
+                        self_contained=True,
+                        description="Reader",
+                    )
+
+                def resolve_external_propagation(self, store, func, prop, ctx):
+                    return [(reader, TaintParamInfo([0], "head", ["head"]))]
+
+                def mine_vulns(self, store, func, taint_params, ctx, base_session=""):
+                    return 0
+
+            orch = DfsOrchestrator(store, _BridgeLifecycleCbs(), concurrent=False, max_depth=2)
+            orch.run(root, TaintParamInfo([0], "msg_t*", ["msg"]))
+
+            view = graph_store.export_task_graph_view("task-bridge-lifecycle")
+            edge_by_id = {edge["edge_id"]: edge for edge in view["edges"]}
+            self.assertEqual(2, len(edge_by_id))
+
+            original_edge = next(edge for edge in edge_by_id.values() if edge["edge_kind"] == "external_escape")
+            bridge_edge = next(edge for edge in edge_by_id.values() if edge["edge_kind"] == "container_reader")
+            reader_node = next(node for node in view["nodes"] if node["node_id"] == f"node::{reader.func_id}")
+
+            self.assertEqual("discovered", original_edge["status"])
+            self.assertEqual(0, int(original_edge["visible_in_tree"]))
+            self.assertEqual(1, int(original_edge["visible_in_all_propagations"]))
+            self.assertEqual("external_escape", original_edge["tracker_type"])
+
+            self.assertEqual("done", bridge_edge["status"])
+            self.assertEqual(f"node::{reader.func_id}", bridge_edge["target_node_id"])
+            self.assertEqual(reader.func_id, bridge_edge["target_func_id"])
+            self.assertEqual("external_escape", bridge_edge["tracker_type"])
+            self.assertEqual(1, int(bridge_edge["visible_in_tree"]))
+            self.assertEqual(1, int(bridge_edge["visible_in_all_propagations"]))
+
+            self.assertEqual("done", reader_node["status"])
+            self.assertEqual("done", reader_node["analysis_status"])
+            self.assertEqual([child["edge_id"] for child in view["tree"]["children"]], [bridge_edge["edge_id"]])
+            self.assertEqual([child["node_id"] for child in view["tree"]["children"]], [f"node::{reader.func_id}"])
+
+
+class TestGraphCancellationWrites(unittest.TestCase):
+    def test_analyze_function_marks_graph_node_and_session_cancelled(self):
+        with tempfile.TemporaryDirectory() as td:
+            run_dir = Path(td) / "run"
+            sessions_dir = run_dir / "sessions"
+            vuln_root = run_dir / "vulnerabilities"
+            graph_db_path = run_dir / "vuln-scan.sqlite"
+            store = DataflowStore(run_dir / "dataflow-v2")
+            func = FunctionRecord(
+                file="src/root.c",
+                name="Root",
+                signature="void Root(msg_t* msg)",
+                start_line=1,
+                end_line=10,
+                func_hash="root",
+            )
+            store.upsert_function(func)
+
+            cancel_event = Event()
+            cfg = TaskConfig(
+                task="test",
+                source_file="src/root.c",
+                function_name="Root",
+                cwd=td,
+                workers=RoleConfig(
+                    agents=[AgentInstanceConfig(model="fake-model")],
+                ),
+            )
+            cbs = TaintAnalysisCallbacks(
+                cfg=cfg,
+                source_root=td,
+                run_dir=run_dir,
+                sessions_dir=sessions_dir,
+                graph_db_path=graph_db_path,
+                vuln_root=vuln_root,
+                run_id="run-cancel",
+                task_id="task-cancel",
+                cancel_event=cancel_event,
+                on_event=lambda *args, **kwargs: None,
+            )
+            cbs.graph_store.start_task_graph_run(TaskGraphRunRecord(
+                task_id="task-cancel",
+                epoch=cbs.graph_epoch,
+                run_root=str(run_dir),
+                root_function="Root",
+            ))
+            ctx = PathContext(path_id="path-cancel")
+            ctx.depth = 0
+
+            class _FakeAgentResult:
+                output = json.dumps({"description": "cancelled", "self_contained": True, "taints": [], "propagations": []})
+                error = ""
+                messages: list[dict] = []
+
+            with patch("app.dataflow_v2.analysis.ensure_file_indexed", lambda *args, **kwargs: None), \
+                 patch("app.dataflow_v2.analysis.run_agent", side_effect=lambda *args, **kwargs: (cancel_event.set() or _FakeAgentResult())):
+                cbs._read_body = lambda _func: "void Root(msg_t* msg) { return; }"  # type: ignore[method-assign]
+                cbs.analyze_function(store, func, TaintParamInfo([0], "msg_t*", ["msg"]), [], "", ctx)
+
+            view = VulnScanStore(graph_db_path).export_task_graph_view("task-cancel")
+            self.assertEqual("cancelled", view["nodes"][0]["status"])
+            self.assertEqual("cancelled", view["nodes"][0]["analysis_status"])
+            self.assertEqual("cancelled", view["sessions"][0]["status"])
+
+    def test_run_path_marks_child_edge_and_node_cancelled_when_cancel_requested(self):
+        with tempfile.TemporaryDirectory() as td:
+            run_dir = Path(td) / "run"
+            graph_store = VulnScanStore(run_dir / "vuln-scan.sqlite")
+            store = DataflowStore(run_dir / "dataflow-v2")
+            parent = _func(store, "Parent")
+            child = _func(store, "Child", file="child.c")
+            cancel_event = Event()
+
+            class _GraphCbs(AnalysisCallbacks):
+                def __init__(self):
+                    self.cancel_event = cancel_event
+                    self.graph_store = graph_store
+                    self.task_id = "task-cancel-path"
+                    self.graph_epoch = "run"
+                    self.graph_node_id = lambda func: f"node::{func.func_id}"
+
+            cbs = _GraphCbs()
+            graph_store.start_task_graph_run(TaskGraphRunRecord(
+                task_id="task-cancel-path",
+                epoch="run",
+                run_root=str(run_dir),
+                root_function="Parent",
+            ))
+            graph_store.upsert_task_graph_node(TaskGraphNodeRecord(
+                node_id=f"node::{parent.func_id}",
+                task_id="task-cancel-path",
+                epoch="run",
+                func_id=parent.func_id,
+                function_name_resolved=parent.name,
+                function_name_raw=parent.name,
+                source_file=parent.file,
+                depth=0,
+                status="running",
+                analysis_status="running",
+            ))
+            graph_store.upsert_task_graph_node(TaskGraphNodeRecord(
+                node_id=f"node::{child.func_id}",
+                task_id="task-cancel-path",
+                epoch="run",
+                func_id=child.func_id,
+                function_name_resolved=child.name,
+                function_name_raw=child.name,
+                source_file=child.file,
+                depth=1,
+                status="running",
+                analysis_status="running",
+            ))
+            graph_store.upsert_task_graph_edge(TaskGraphEdgeRecord(
+                edge_id="prop-child",
+                task_id="task-cancel-path",
+                epoch="run",
+                source_node_id=f"node::{parent.func_id}",
+                target_node_id=f"node::{child.func_id}",
+                source_func_id=parent.func_id,
+                target_func_id=child.func_id,
+                source_function_resolved=parent.name,
+                target_function_resolved=child.name,
+                target_function_raw=child.name,
+                source_file=parent.file,
+                target_file=child.file,
+                edge_kind="direct_call",
+                status="scheduled",
+                source_prop_id="prop-child",
+            ))
+
+            orch = DfsOrchestrator(store, cbs, concurrent=False, max_depth=2)
+            original_process = orch._process
+
+            def _cancelled_process(*args, **kwargs):
+                cancel_event.set()
+                return [], []
+
+            orch._process = _cancelled_process  # type: ignore[method-assign]
+            try:
+                step = type("Step", (), {
+                    "func": child,
+                    "taint_params": TaintParamInfo([0], "msg_t*", ["msg"]),
+                    "validations": [],
+                    "call_line": 12,
+                    "prop_id": "prop-child",
+                })()
+                orch._run_path([step], [], parent, "", PathContext("path"), 0)
+            finally:
+                orch._process = original_process  # type: ignore[method-assign]
+
+            view = graph_store.export_task_graph_view("task-cancel-path")
+            edge = next(item for item in view["edges"] if item["edge_id"] == "prop-child")
+            child_node = next(item for item in view["nodes"] if item["node_id"] == f"node::{child.func_id}")
+            self.assertEqual("cancelled", edge["status"])
+            self.assertEqual("task_cancelled", edge["reason_code"])
+            self.assertEqual("cancelled", child_node["status"])
+            self.assertEqual("cancelled", child_node["analysis_status"])
+
+
+class TestGraphFailureWrites(unittest.TestCase):
+    def test_run_path_marks_child_edge_and_node_failed_when_child_analysis_raises(self):
+        with tempfile.TemporaryDirectory() as td:
+            run_dir = Path(td) / "run"
+            graph_store = VulnScanStore(run_dir / "vuln-scan.sqlite")
+            store = DataflowStore(run_dir / "dataflow-v2")
+            parent = _func(store, "Parent")
+            child = _func(store, "Child", file="child.c")
+
+            class _GraphCbs(AnalysisCallbacks):
+                def __init__(self):
+                    self.graph_store = graph_store
+                    self.task_id = "task-failed-path"
+                    self.graph_epoch = "run"
+                    self.graph_node_id = lambda func: f"node::{func.func_id}"
+                    self.cancel_event = None
+                    self.sessions_dir = run_dir / "sessions"
+                    self.sessions_dir.mkdir(parents=True, exist_ok=True)
+                    self.source_root = td
+                    self.on_event = lambda *args, **kwargs: None
+
+                def analyze_function(self, store, func, taint_params, pre_validations, base_session, ctx):
+                    self.graph_store.upsert_task_graph_node(TaskGraphNodeRecord(
+                        node_id=self.graph_node_id(func),
+                        task_id=self.task_id,
+                        epoch=self.graph_epoch,
+                        func_id=func.func_id,
+                        function_name_resolved=func.name,
+                        function_name_raw=func.name,
+                        source_file=func.file,
+                        depth=max(0, getattr(ctx, "depth", 0)),
+                        status="running",
+                        analysis_status="running",
+                    ))
+                    if func.func_id == parent.func_id:
+                        self.prop = PropagationRecord(
+                            source_func_id=func.func_id,
+                            source_taint_name="msg",
+                            source_taint_signature="msg_t*",
+                            target_taint_name="child_msg",
+                            target_taint_signature="child_msg_t*",
+                            target_function="Child",
+                            target_func_id=child.func_id,
+                            call_line=12,
+                        )
+                        return AnalysisResult(
+                            propagations=[self.prop],
+                            self_contained=False,
+                            description="Parent",
+                        )
+                    raise RuntimeError("child analysis failed")
+
+                def mine_vulns(self, store, func, taint_params, ctx, base_session=""):
+                    return 0
+
+            cbs = _GraphCbs()
+            orch = DfsOrchestrator(store, cbs, concurrent=False, max_depth=2)
+            with self.assertRaises(RuntimeError):
+                orch.run(parent, TaintParamInfo([0], "msg_t*", ["msg"]))
+
+            view = graph_store.export_task_graph_view("task-failed-path")
+            edge = next(item for item in view["edges"] if item["edge_id"] == cbs.prop.prop_id)
+            child_node = next(item for item in view["nodes"] if item["node_id"] == f"node::{child.func_id}")
+            self.assertEqual("failed", edge["status"])
+            self.assertEqual("child_process_failed", edge["reason_code"])
+            self.assertEqual("failed", child_node["status"])
+            self.assertEqual("failed", child_node["analysis_status"])
 
 
 if __name__ == "__main__":

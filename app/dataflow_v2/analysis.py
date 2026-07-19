@@ -31,7 +31,12 @@ from ..vuln_report_utils import (EMBEDDED_VULN_MINING_SKILL as _EMBEDDED_VULN_MI
                                   build_v2_system_prompt as _build_v2_system_prompt,
                                   format_vuln_report_md as _format_vuln_report_md,
                                   read_prompt as _read_prompt, safe_name as _safe_name)
-from ..vuln_store import VulnFindingRecord, VulnScanStore
+from ..vuln_store import (
+    TaskGraphNodeRecord,
+    TaskGraphSessionRecord,
+    VulnFindingRecord,
+    VulnScanStore,
+)
 from .function_extractor import ensure_file_indexed
 from .finding_store import persist_finding
 from .models import (
@@ -182,6 +187,79 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
         self._vuln_miner_prompt = _read_prompt("prompts/vuln-miners/default.md")
         self._tracking_prompt = _read_prompt("prompts/v2/external-tracking.md")
 
+    def _cancel_requested(self) -> bool:
+        return bool(self.cancel_event is not None and self.cancel_event.is_set())
+
+    def _graph_terminal_status(self, *, failed_status: str = "failed", success_status: str = "done") -> str:
+        if self._cancel_requested():
+            return "cancelled"
+        return failed_status if failed_status == "failed" and success_status != "done" else success_status
+
+    @property
+    def graph_epoch(self) -> str:
+        parts = self.run_dir.parts
+        if "epochs" in parts:
+            idx = parts.index("epochs")
+            if idx + 1 < len(parts):
+                return parts[idx + 1]
+        return "run"
+
+    def graph_node_id(self, func: FunctionRecord) -> str:
+        return f"node::{self.task_id}::{self.graph_epoch}::{func.func_id}"
+
+    def graph_session_relpath(self, session_path: str | Path) -> str:
+        session = Path(session_path)
+        try:
+            return str(session.resolve().relative_to(self.run_dir.parent.resolve())).replace("\\", "/")
+        except Exception:
+            try:
+                return str(session.relative_to(self.run_dir.parent)).replace("\\", "/")
+            except Exception:
+                return str(session).replace("\\", "/")
+
+    def record_graph_node(self, func: FunctionRecord, *, depth: int, status: str, analysis_status: str) -> str:
+        node_id = self.graph_node_id(func)
+        self.graph_store.upsert_task_graph_node(TaskGraphNodeRecord(
+            node_id=node_id,
+            task_id=self.task_id,
+            epoch=self.graph_epoch,
+            func_id=func.func_id,
+            function_name_resolved=func.name,
+            function_name_raw=func.name,
+            source_file=func.file,
+            depth=depth,
+            status=status,
+            analysis_status=analysis_status,
+            started_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            session_group_key=f"d{depth:02d}::{func.name}",
+        ))
+        return node_id
+
+    def record_graph_session(
+        self,
+        *,
+        session_path: str | Path,
+        node_id: str = "",
+        edge_id: str = "",
+        session_role: str,
+        session_kind: str,
+        status: str,
+    ) -> str:
+        relpath = self.graph_session_relpath(session_path)
+        self.graph_store.upsert_task_graph_session(TaskGraphSessionRecord(
+            session_relpath=relpath,
+            task_id=self.task_id,
+            epoch=self.graph_epoch,
+            node_id=node_id,
+            edge_id=edge_id,
+            session_role=session_role,
+            session_kind=session_kind,
+            display_name=Path(session_path).stem,
+            status=status,
+            started_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        ))
+        return relpath
+
     # ── 主入口 ─────────────────────────────────────────────────────────────
     def analyze_function(self, store: DataflowStore, func: FunctionRecord,
                          taint_params: TaintParamInfo, pre_validations: list[Validation],
@@ -201,6 +279,20 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                 safe_copyfile(base_session, str(fork_session))
         except OSError:
             pass
+        node_id = self.record_graph_node(
+            func,
+            depth=getattr(ctx, "depth", 0),
+            status="running",
+            analysis_status="running",
+        )
+        session_relpath = self.record_graph_session(
+            session_path=fork_session,
+            node_id=node_id,
+            session_role="worker",
+            session_kind="taint",
+            status="running",
+        )
+        self.graph_store.update_task_graph_node(node_id, primary_session_relpath=session_relpath)
 
         # 3) 构造 prompt
         prompt = self._build_prompt(func, body, taint_params, pre_validations)
@@ -338,6 +430,21 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
         logger.info("[V2-taint] DONE func=%s::%s duration=%.1fs taint_failed=%s self_contained=%s propagations=%d",
                     func.file, func.name, time.time() - _t0, taint_failed, parsed.get("self_contained", False),
                     len(parsed.get("propagations") or []))
+        terminal_status = "cancelled" if self._cancel_requested() else ("done" if not taint_failed else "failed")
+        terminal_analysis_status = "cancelled" if self._cancel_requested() else ("done" if not taint_failed else "failed")
+        self.graph_store.update_task_graph_node(
+            node_id,
+            status=terminal_status,
+            analysis_status=terminal_analysis_status,
+            finished_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            primary_session_relpath=session_relpath,
+        )
+        self.graph_store.update_task_graph_session(
+            session_relpath,
+            node_id=node_id,
+            status=terminal_status,
+            ended_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        )
         return self._build_result(store, func, taint_params, parsed, fork_session, body, taint_failed=taint_failed)
 
     # ── 结果构造 + clang 标注 ───────────────────────────────────────────────
@@ -762,6 +869,14 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                 safe_copyfile(base_session, str(fork_session))
         except OSError:
             pass
+        node_id = self.graph_node_id(func)
+        session_relpath = self.record_graph_session(
+            session_path=fork_session,
+            node_id=node_id,
+            session_role="worker",
+            session_kind="vuln",
+            status="running",
+        )
         taints = store.list_taints_in_function(func.func_id)
         props = store.list_propagations_from(func.func_id)
         dataflow_text = self._format_taint_context(func, taint_params, ctx, taints, props, store)
@@ -843,6 +958,18 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                 _db.close()
         except Exception:
             pass
+        self.graph_store.update_task_graph_node(
+            node_id,
+            findings_count=n,
+            primary_session_relpath=session_relpath,
+        )
+        session_status = "cancelled" if self._cancel_requested() else "done"
+        self.graph_store.update_task_graph_session(
+            session_relpath,
+            node_id=node_id,
+            status=session_status,
+            ended_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        )
         return n
 
     def _report_finding_to_intake(self, finding_id: str, rec: VulnFindingRecord,

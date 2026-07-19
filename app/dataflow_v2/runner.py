@@ -18,7 +18,7 @@ from typing import Any, Callable
 
 from ..copy_utils import safe_copy2
 from ..models import SwarmEvent, TaskConfig, TaskResult, TaskStatus
-from ..vuln_store import VulnScanStore
+from ..vuln_store import TaskGraphRunRecord, VulnScanStore
 from .analysis import TaintAnalysisCallbacks
 from .function_extractor import ensure_file_indexed
 from .models import TaintParamInfo
@@ -143,6 +143,13 @@ class DataflowV2Runner:
                 sessions_dir=sessions_dir, graph_db_path=graph_db_path,
                 vuln_root=vuln_root, run_id=tid, task_id=tid,
                 cancel_event=self._cancel_event, on_event=self.on_event)
+            cbs.graph_store.start_run(tid, tid, cfg.source_file or "", cfg.function_name or "", source_root, {})
+            cbs.graph_store.start_task_graph_run(TaskGraphRunRecord(
+                task_id=tid,
+                epoch=cbs.graph_epoch,
+                run_root=str(root_out_dir),
+                root_function=cfg.function_name or "",
+            ))
             # 配置沿用 v1: deep_trace_enabled=无限深度; callee_concurrency -1=auto(4)/1=串行/N
             _cc = int(getattr(cfg, "callee_concurrency", 4) or 4)
             _concurrent = (_cc != 1)
@@ -192,6 +199,8 @@ class DataflowV2Runner:
             final_output = self._build_final_report(tid, cfg, store, graph_db_path)
             vuln_summary = {"functions": len(store.list_functions()),
                             "findings": self._count_findings(graph_db_path)}
+            graph_run_status = "cancelled" if (self._cancel_event is not None and self._cancel_event.is_set()) else str(status.value if hasattr(status, "value") else status)
+            cbs.graph_store.finish_run(tid, graph_run_status)
             result = TaskResult(task_id=tid, status=status, task=cfg.task,
                                 final_output=final_output, vuln_summary=vuln_summary, error=err_msg or None)
             # 归档: 与 v1 一致的 output/ 件 + v2 四库归档; 不写 flag
@@ -200,6 +209,13 @@ class DataflowV2Runner:
             return result
         except Exception as exc:
             logger.exception("dataflow-v2 runner failed task=%s", tid)
+            try:
+                VulnScanStore(graph_db_path).finish_run(
+                    tid,
+                    "cancelled" if (self._cancel_event is not None and self._cancel_event.is_set()) else "error",
+                )
+            except Exception:
+                pass
             return TaskResult(task_id=tid, status=TaskStatus.ERROR, task=cfg.task, error=str(exc))
 
     # ── 归档 (镜像 v1 output/ 件 + v2 四库归档, 不写 flag) ────────────────────
@@ -271,7 +287,7 @@ class DataflowV2Runner:
         findings = []
         if graph_db_path.exists():
             try:
-                findings = VulnScanStore(graph_db_path).export_json().get("vulnerability_findings") or []
+                findings = VulnScanStore(graph_db_path).list_all_findings()
             except Exception:
                 findings = []
         lines = [
@@ -312,6 +328,6 @@ class DataflowV2Runner:
         if not graph_db_path.exists():
             return 0
         try:
-            return len(VulnScanStore(graph_db_path).export_json().get("vulnerability_findings") or [])
+            return len(VulnScanStore(graph_db_path).list_all_findings())
         except Exception:
             return 0

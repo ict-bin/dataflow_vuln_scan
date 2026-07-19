@@ -26,6 +26,91 @@ SCHEMA_VERSION = 2
 
 
 @dataclass
+class TaskGraphRunRecord:
+    task_id: str
+    epoch: str
+    run_root: str
+    graph_version: int = 1
+    root_function: str = ""
+    generated_at: float = 0.0
+
+
+@dataclass
+class TaskGraphNodeRecord:
+    node_id: str
+    task_id: str
+    epoch: str
+    func_id: str = ""
+    function_name_resolved: str = ""
+    function_name_raw: str = ""
+    source_file: str = ""
+    depth: int = 0
+    status: str = "discovered"
+    analysis_status: str = "pending"
+    findings_count: int = 0
+    started_at: str | None = None
+    finished_at: str | None = None
+    primary_session_relpath: str = ""
+    session_group_key: str = ""
+    visible_in_tree: int = 1
+    visible_in_all_propagations: int = 1
+    extra_json: str = "{}"
+
+
+@dataclass
+class TaskGraphEdgeRecord:
+    edge_id: str
+    task_id: str
+    epoch: str
+    source_node_id: str
+    target_node_id: str = ""
+    source_func_id: str = ""
+    target_func_id: str = ""
+    source_function_resolved: str = ""
+    target_function_resolved: str = ""
+    target_function_raw: str = ""
+    source_file: str = ""
+    target_file: str = ""
+    edge_kind: str = "direct_call"
+    status: str = "discovered"
+    reason_code: str = ""
+    reason_message: str = ""
+    reason_source: str = ""
+    source_prop_id: str = ""
+    source_orchestration_edge_id: str = ""
+    call_line: int | None = None
+    source_taint_name: str = ""
+    target_taint_name: str = ""
+    validations_json: str = "[]"
+    actual_args_json: str = "[]"
+    tracker_type: str = ""
+    tracker_result_json: str = "{}"
+    display_order: int = 0
+    visible_in_tree: int = 1
+    visible_in_all_propagations: int = 1
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+@dataclass
+class TaskGraphSessionRecord:
+    session_relpath: str
+    task_id: str
+    epoch: str
+    node_id: str = ""
+    edge_id: str = ""
+    session_role: str = ""
+    session_kind: str = ""
+    display_name: str = ""
+    status: str = "unknown"
+    started_at: str | None = None
+    ended_at: str | None = None
+    mtime: float | None = None
+    event_count: int = 0
+    extra_json: str = "{}"
+
+
+@dataclass
 class TaintSourceRecord:
     node_id: str
     source_file: str
@@ -293,6 +378,91 @@ class VulnScanStore:
                 );
 
                 CREATE INDEX IF NOT EXISTS ix_container_taints_run ON container_taints(run_id);
+
+                CREATE TABLE IF NOT EXISTS task_graph_runs (
+                  task_id TEXT PRIMARY KEY,
+                  epoch TEXT NOT NULL,
+                  run_root TEXT NOT NULL,
+                  graph_version INTEGER NOT NULL DEFAULT 1,
+                  root_function TEXT NOT NULL DEFAULT '',
+                  generated_at REAL NOT NULL DEFAULT (strftime('%s','now'))
+                );
+
+                CREATE TABLE IF NOT EXISTS task_graph_nodes (
+                  node_id TEXT PRIMARY KEY,
+                  task_id TEXT NOT NULL,
+                  epoch TEXT NOT NULL,
+                  func_id TEXT NOT NULL DEFAULT '',
+                  function_name_resolved TEXT NOT NULL DEFAULT '',
+                  function_name_raw TEXT NOT NULL DEFAULT '',
+                  source_file TEXT NOT NULL DEFAULT '',
+                  depth INTEGER NOT NULL DEFAULT 0,
+                  status TEXT NOT NULL DEFAULT 'discovered',
+                  analysis_status TEXT NOT NULL DEFAULT 'pending',
+                  findings_count INTEGER NOT NULL DEFAULT 0,
+                  started_at TEXT,
+                  finished_at TEXT,
+                  primary_session_relpath TEXT NOT NULL DEFAULT '',
+                  session_group_key TEXT NOT NULL DEFAULT '',
+                  visible_in_tree INTEGER NOT NULL DEFAULT 1,
+                  visible_in_all_propagations INTEGER NOT NULL DEFAULT 1,
+                  extra_json TEXT NOT NULL DEFAULT '{}'
+                );
+
+                CREATE TABLE IF NOT EXISTS task_graph_edges (
+                  edge_id TEXT PRIMARY KEY,
+                  task_id TEXT NOT NULL,
+                  epoch TEXT NOT NULL,
+                  source_node_id TEXT NOT NULL,
+                  target_node_id TEXT NOT NULL DEFAULT '',
+                  source_func_id TEXT NOT NULL DEFAULT '',
+                  target_func_id TEXT NOT NULL DEFAULT '',
+                  source_function_resolved TEXT NOT NULL DEFAULT '',
+                  target_function_resolved TEXT NOT NULL DEFAULT '',
+                  target_function_raw TEXT NOT NULL DEFAULT '',
+                  source_file TEXT NOT NULL DEFAULT '',
+                  target_file TEXT NOT NULL DEFAULT '',
+                  edge_kind TEXT NOT NULL DEFAULT 'direct_call',
+                  status TEXT NOT NULL DEFAULT 'discovered',
+                  reason_code TEXT NOT NULL DEFAULT '',
+                  reason_message TEXT NOT NULL DEFAULT '',
+                  reason_source TEXT NOT NULL DEFAULT '',
+                  source_prop_id TEXT NOT NULL DEFAULT '',
+                  source_orchestration_edge_id TEXT NOT NULL DEFAULT '',
+                  call_line INTEGER,
+                  source_taint_name TEXT NOT NULL DEFAULT '',
+                  target_taint_name TEXT NOT NULL DEFAULT '',
+                  validations_json TEXT NOT NULL DEFAULT '[]',
+                  actual_args_json TEXT NOT NULL DEFAULT '[]',
+                  tracker_type TEXT NOT NULL DEFAULT '',
+                  tracker_result_json TEXT NOT NULL DEFAULT '{}',
+                  display_order INTEGER NOT NULL DEFAULT 0,
+                  visible_in_tree INTEGER NOT NULL DEFAULT 1,
+                  visible_in_all_propagations INTEGER NOT NULL DEFAULT 1,
+                  created_at TEXT,
+                  updated_at TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS task_graph_sessions (
+                  session_relpath TEXT PRIMARY KEY,
+                  task_id TEXT NOT NULL,
+                  epoch TEXT NOT NULL,
+                  node_id TEXT NOT NULL DEFAULT '',
+                  edge_id TEXT NOT NULL DEFAULT '',
+                  session_role TEXT NOT NULL DEFAULT '',
+                  session_kind TEXT NOT NULL DEFAULT '',
+                  display_name TEXT NOT NULL DEFAULT '',
+                  status TEXT NOT NULL DEFAULT 'unknown',
+                  started_at TEXT,
+                  ended_at TEXT,
+                  mtime REAL,
+                  event_count INTEGER NOT NULL DEFAULT 0,
+                  extra_json TEXT NOT NULL DEFAULT '{}'
+                );
+
+                CREATE INDEX IF NOT EXISTS ix_task_graph_nodes_task ON task_graph_nodes(task_id, depth);
+                CREATE INDEX IF NOT EXISTS ix_task_graph_edges_task ON task_graph_edges(task_id, display_order);
+                CREATE INDEX IF NOT EXISTS ix_task_graph_sessions_task ON task_graph_sessions(task_id, session_relpath);
                 """
             )
             for table, column, ddl in [
@@ -318,6 +488,152 @@ class VulnScanStore:
                     conn.execute(ddl)
                 except Exception:
                     pass
+
+    def _upsert_rows(self, table: str, rows: list[dict[str, Any]]) -> None:
+        if not rows:
+            return
+        cols = list(rows[0])
+        with self.connect() as conn:
+            conn.executemany(
+                f"INSERT OR REPLACE INTO {table} ({','.join(cols)}) VALUES ({','.join('?' for _ in cols)})",
+                [[row[c] for c in cols] for row in rows],
+            )
+
+    def start_task_graph_run(self, rec: TaskGraphRunRecord) -> None:
+        data = asdict(rec)
+        if not data.get("generated_at"):
+            data["generated_at"] = time.time()
+        with self.connect() as conn:
+            conn.execute(
+                """INSERT OR REPLACE INTO task_graph_runs
+                   (task_id, epoch, run_root, graph_version, root_function, generated_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (
+                    data["task_id"], data["epoch"], data["run_root"], data["graph_version"],
+                    data["root_function"], data["generated_at"],
+                ),
+            )
+
+    def upsert_task_graph_node(self, rec: TaskGraphNodeRecord) -> None:
+        self._upsert_rows("task_graph_nodes", [asdict(rec)])
+
+    def upsert_task_graph_edge(self, rec: TaskGraphEdgeRecord) -> None:
+        data = asdict(rec)
+        if not data.get("updated_at"):
+            data["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        if not data.get("created_at"):
+            data["created_at"] = data["updated_at"]
+        self._upsert_rows("task_graph_edges", [data])
+
+    def upsert_task_graph_session(self, rec: TaskGraphSessionRecord) -> None:
+        self._upsert_rows("task_graph_sessions", [asdict(rec)])
+
+    def update_task_graph_node(
+        self,
+        node_id: str,
+        *,
+        status: str | None = None,
+        analysis_status: str | None = None,
+        findings_count: int | None = None,
+        finished_at: str | None = None,
+        primary_session_relpath: str | None = None,
+    ) -> None:
+        if not node_id:
+            return
+        assigns: list[str] = []
+        params: list[Any] = []
+        for key, value in [
+            ("status", status),
+            ("analysis_status", analysis_status),
+            ("findings_count", findings_count),
+            ("finished_at", finished_at),
+            ("primary_session_relpath", primary_session_relpath),
+        ]:
+            if value is None:
+                continue
+            assigns.append(f"{key}=?")
+            params.append(value)
+        if not assigns:
+            return
+        params.append(node_id)
+        with self.connect() as conn:
+            conn.execute(f"UPDATE task_graph_nodes SET {', '.join(assigns)} WHERE node_id=?", params)
+
+    def update_task_graph_edge(
+        self,
+        edge_id: str,
+        *,
+        edge_kind: str | None = None,
+        status: str | None = None,
+        target_node_id: str | None = None,
+        target_func_id: str | None = None,
+        target_function_resolved: str | None = None,
+        target_file: str | None = None,
+        reason_code: str | None = None,
+        reason_message: str | None = None,
+        reason_source: str | None = None,
+        tracker_type: str | None = None,
+        tracker_result_json: str | None = None,
+        visible_in_tree: int | None = None,
+        visible_in_all_propagations: int | None = None,
+    ) -> None:
+        if not edge_id:
+            return
+        assigns: list[str] = ["updated_at=?"]
+        params: list[Any] = [time.strftime("%Y-%m-%dT%H:%M:%S%z")]
+        for key, value in [
+            ("edge_kind", edge_kind),
+            ("status", status),
+            ("target_node_id", target_node_id),
+            ("target_func_id", target_func_id),
+            ("target_function_resolved", target_function_resolved),
+            ("target_file", target_file),
+            ("reason_code", reason_code),
+            ("reason_message", reason_message),
+            ("reason_source", reason_source),
+            ("tracker_type", tracker_type),
+            ("tracker_result_json", tracker_result_json),
+            ("visible_in_tree", visible_in_tree),
+            ("visible_in_all_propagations", visible_in_all_propagations),
+        ]:
+            if value is None:
+                continue
+            assigns.append(f"{key}=?")
+            params.append(value)
+        params.append(edge_id)
+        with self.connect() as conn:
+            conn.execute(f"UPDATE task_graph_edges SET {', '.join(assigns)} WHERE edge_id=?", params)
+
+    def update_task_graph_session(
+        self,
+        session_relpath: str,
+        *,
+        node_id: str | None = None,
+        edge_id: str | None = None,
+        status: str | None = None,
+        ended_at: str | None = None,
+        event_count: int | None = None,
+    ) -> None:
+        if not session_relpath:
+            return
+        assigns: list[str] = []
+        params: list[Any] = []
+        for key, value in [
+            ("node_id", node_id),
+            ("edge_id", edge_id),
+            ("status", status),
+            ("ended_at", ended_at),
+            ("event_count", event_count),
+        ]:
+            if value is None:
+                continue
+            assigns.append(f"{key}=?")
+            params.append(value)
+        if not assigns:
+            return
+        params.append(session_relpath)
+        with self.connect() as conn:
+            conn.execute(f"UPDATE task_graph_sessions SET {', '.join(assigns)} WHERE session_relpath=?", params)
 
     def start_run(self, run_id: str, task_id: str, root_file: str, root_function: str, source_root: str, config: dict[str, Any] | None = None) -> None:
         with self.connect() as conn:
@@ -380,6 +696,28 @@ class VulnScanStore:
                 f"INSERT OR REPLACE INTO vulnerability_findings ({','.join(cols)}) VALUES ({','.join('?' for _ in cols)})",
                 [data[c] for c in cols],
             )
+
+    def list_task_findings(self, task_id: str) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            return [dict(r) for r in conn.execute(
+                """SELECT vf.*
+                   FROM vulnerability_findings vf
+                   JOIN analysis_runs ar ON ar.run_id = vf.run_id
+                   WHERE ar.task_id = ?
+                   ORDER BY vf.created_at, vf.finding_id""",
+                (task_id,),
+            ).fetchall()]
+
+    def list_all_findings(self, *, conn: sqlite3.Connection | None = None) -> list[dict[str, Any]]:
+        def _query(active_conn: sqlite3.Connection) -> list[dict[str, Any]]:
+            return [dict(r) for r in active_conn.execute(
+                "SELECT * FROM vulnerability_findings ORDER BY created_at, finding_id"
+            ).fetchall()]
+
+        if conn is not None:
+            return _query(conn)
+        with self.connect() as owned_conn:
+            return _query(owned_conn)
 
     def update_followup_status(self, followup_id: str, status: str, *, reason: str | None = None) -> None:
         if not followup_id:
@@ -623,6 +961,150 @@ class VulnScanStore:
     def export_json(self) -> dict[str, Any]:
         with self.connect() as conn:
             result: dict[str, Any] = {}
-            for table in ["analysis_runs", "taint_nodes", "taint_edges", "followups", "vulnerability_findings", "context_forks", "analysis_contexts", "taint_constraints"]:
+            for table in [
+                "analysis_runs", "taint_nodes", "taint_edges", "followups",
+                "vulnerability_findings", "context_forks", "analysis_contexts",
+                "taint_constraints", "task_graph_runs", "task_graph_nodes",
+                "task_graph_edges", "task_graph_sessions",
+            ]:
                 result[table] = [dict(r) for r in conn.execute(f"SELECT * FROM {table}").fetchall()]
             return result
+
+    def export_task_graph_view(self, task_id: str) -> dict[str, Any]:
+        with self.connect() as conn:
+            run = conn.execute(
+                "SELECT * FROM task_graph_runs WHERE task_id=?",
+                (task_id,),
+            ).fetchone()
+            nodes = [dict(r) for r in conn.execute(
+                "SELECT * FROM task_graph_nodes WHERE task_id=? ORDER BY depth, function_name_resolved, node_id",
+                (task_id,),
+            ).fetchall()]
+            edges = [dict(r) for r in conn.execute(
+                "SELECT * FROM task_graph_edges WHERE task_id=? ORDER BY display_order, source_function_resolved, edge_id",
+                (task_id,),
+            ).fetchall()]
+            sessions = [dict(r) for r in conn.execute(
+                "SELECT * FROM task_graph_sessions WHERE task_id=? ORDER BY session_relpath",
+                (task_id,),
+            ).fetchall()]
+            findings = [dict(r) for r in conn.execute(
+                """SELECT vf.*
+                   FROM vulnerability_findings vf
+                   JOIN analysis_runs ar ON ar.run_id = vf.run_id
+                   WHERE ar.task_id = ?
+                   ORDER BY vf.created_at, vf.finding_id""",
+                (task_id,),
+            ).fetchall()]
+        run_root = Path(str(dict(run).get("run_root") or "")) if run else Path()
+        task_root = run_root.parent.parent if run_root.parts and "epochs" in run_root.parts else run_root.parent
+        for session in sessions:
+            relpath = str(session.get("session_relpath") or "")
+            if not relpath:
+                continue
+            candidates = [
+                task_root / relpath,
+                run_root / relpath,
+                self.db_path.parent / relpath,
+            ]
+            session_path = next((path for path in candidates if path.exists()), None)
+            if session_path is None:
+                continue
+            try:
+                stat = session_path.stat()
+                session["mtime"] = float(stat.st_mtime)
+                if not int(session.get("event_count") or 0):
+                    with session_path.open("r", encoding="utf-8", errors="ignore") as handle:
+                        session["event_count"] = sum(1 for _ in handle)
+            except Exception:
+                continue
+        node_by_id = {str(n["node_id"]): n for n in nodes}
+        edges_by_source: dict[str, list[dict[str, Any]]] = {}
+        for edge in edges:
+            if int(edge.get("visible_in_tree") or 0) != 1:
+                continue
+            edges_by_source.setdefault(str(edge.get("source_node_id") or ""), []).append(edge)
+        for edge_list in edges_by_source.values():
+            edge_list.sort(key=lambda item: (int(item.get("display_order") or 0), str(item.get("edge_id") or "")))
+
+        def _tree_node(node: dict[str, Any], seen: set[str]) -> dict[str, Any]:
+            node_id = str(node.get("node_id") or "")
+            if node_id in seen:
+                return {
+                    "node_id": node_id,
+                    "function_name_resolved": node.get("function_name_resolved") or "",
+                    "function_name_raw": node.get("function_name_raw") or "",
+                    "source_file": node.get("source_file") or "",
+                    "depth": int(node.get("depth") or 0),
+                    "status": node.get("status") or "done",
+                    "children": [],
+                    "cycle": True,
+                }
+            next_seen = set(seen)
+            next_seen.add(node_id)
+            children: list[dict[str, Any]] = []
+            for edge in edges_by_source.get(node_id, []):
+                target_node_id = str(edge.get("target_node_id") or "")
+                target = node_by_id.get(target_node_id)
+                if target is None:
+                    children.append({
+                        "node_id": target_node_id or f"virtual::{edge.get('edge_id')}",
+                        "edge_id": edge.get("edge_id") or "",
+                        "function_name_resolved": edge.get("target_function_resolved") or edge.get("target_function_raw") or "",
+                        "function_name_raw": edge.get("target_function_raw") or "",
+                        "source_file": edge.get("target_file") or "",
+                        "depth": int(node.get("depth") or 0) + 1,
+                        "status": edge.get("status") or "unresolved",
+                        "edge_kind": edge.get("edge_kind") or "",
+                        "reason_code": edge.get("reason_code") or "",
+                        "reason_message": edge.get("reason_message") or "",
+                        "children": [],
+                        "placeholder": True,
+                    })
+                    continue
+                child = _tree_node(target, next_seen)
+                child["edge_id"] = edge.get("edge_id") or ""
+                child["edge_kind"] = edge.get("edge_kind") or ""
+                child["reason_code"] = edge.get("reason_code") or ""
+                child["reason_message"] = edge.get("reason_message") or ""
+                children.append(child)
+            return {
+                "node_id": node_id,
+                "function_name_resolved": node.get("function_name_resolved") or "",
+                "function_name_raw": node.get("function_name_raw") or "",
+                "source_file": node.get("source_file") or "",
+                "depth": int(node.get("depth") or 0),
+                "status": node.get("status") or "discovered",
+                "analysis_status": node.get("analysis_status") or "pending",
+                "findings_count": int(node.get("findings_count") or 0),
+                "primary_session_relpath": node.get("primary_session_relpath") or "",
+                "children": children,
+            }
+
+        root_node = min(nodes, key=lambda item: (int(item.get("depth") or 0), str(item.get("node_id") or ""))) if nodes else None
+        summary = {
+            "nodes_total": len(nodes),
+            "edges_total": len(edges),
+            "edges_discovered": sum(1 for item in edges if item.get("status") == "discovered"),
+            "edges_scheduled": sum(1 for item in edges if item.get("status") == "scheduled"),
+            "edges_done": sum(1 for item in edges if item.get("status") == "done"),
+            "edges_running": sum(1 for item in edges if item.get("status") == "running"),
+            "edges_failed": sum(1 for item in edges if item.get("status") == "failed"),
+            "edges_cancelled": sum(1 for item in edges if item.get("status") == "cancelled"),
+            "edges_unresolved": sum(1 for item in edges if item.get("status") == "unresolved"),
+            "edges_not_followed": sum(1 for item in edges if item.get("status") == "not_followed"),
+            "findings_total": len(findings) if findings else sum(int(item.get("findings_count") or 0) for item in nodes),
+        }
+        return {
+            "task_id": task_id,
+            "epoch": (dict(run).get("epoch") if run else ""),
+            "available": bool(run or nodes or edges or sessions or findings),
+            "summary": summary,
+            "nodes": nodes,
+            "edges": edges,
+            "tree": _tree_node(root_node, set()) if root_node else None,
+            "sessions": sessions,
+            "findings": findings,
+            "generated_at": (dict(run).get("generated_at") if run else None),
+            "run_root": str(run_root) if run_root else (dict(run).get("run_root") if run else ""),
+        }

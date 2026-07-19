@@ -353,6 +353,9 @@ class TaskTimelineResponse(BaseModel):
 
 class TaskPropagationItemResponse(BaseModel):
     prop_id: str
+    edge_id: str | None = None
+    edge_kind: str | None = None
+    status: str | None = None
     source_func_id: str | None = None
     source_function: str | None = None
     source_file: str | None = None
@@ -362,6 +365,8 @@ class TaskPropagationItemResponse(BaseModel):
     target_taint_signature: str = ""
     target_func_id: str | None = None
     target_function: str | None = None
+    target_function_raw: str | None = None
+    target_function_resolved: str | None = None
     target_file: str | None = None
     call_line: int | None = None
     condition: str | None = None
@@ -386,6 +391,8 @@ class TaskPropagationItemResponse(BaseModel):
     unfollowed_reason_source: str | None = None
     followup_status: str | None = None
     followup_reason_raw: str | None = None
+    reason_code: str | None = None
+    reason_message: str | None = None
 
 
 class TaskPropagationsResponse(BaseModel):
@@ -393,6 +400,117 @@ class TaskPropagationsResponse(BaseModel):
     run_root: str
     available: bool = False
     items: list[TaskPropagationItemResponse] = Field(default_factory=list)
+
+
+class TaskGraphNodeResponse(BaseModel):
+    node_id: str
+    func_id: str = ""
+    function_name_resolved: str = ""
+    function_name_raw: str = ""
+    source_file: str = ""
+    depth: int = 0
+    status: str = "discovered"
+    analysis_status: str = "pending"
+    findings_count: int = 0
+    primary_session_relpath: str = ""
+
+
+class TaskGraphEdgeResponse(BaseModel):
+    edge_id: str
+    source_node_id: str
+    target_node_id: str = ""
+    source_func_id: str = ""
+    target_func_id: str = ""
+    source_function_resolved: str = ""
+    target_function_resolved: str = ""
+    target_function_raw: str = ""
+    source_file: str = ""
+    target_file: str = ""
+    edge_kind: str = "direct_call"
+    status: str = "discovered"
+    reason_code: str = ""
+    reason_message: str = ""
+    reason_source: str = ""
+    source_prop_id: str = ""
+    source_orchestration_edge_id: str = ""
+    call_line: int | None = None
+    source_taint_name: str = ""
+    target_taint_name: str = ""
+    validations_json: str = "[]"
+    actual_args_json: str = "[]"
+    tracker_type: str = ""
+    tracker_result_json: str = "{}"
+    display_order: int = 0
+    visible_in_tree: int = 1
+    visible_in_all_propagations: int = 1
+
+
+class TaskGraphSessionResponse(BaseModel):
+    session_relpath: str
+    node_id: str = ""
+    edge_id: str = ""
+    session_role: str = ""
+    session_kind: str = ""
+    display_name: str = ""
+    status: str = "unknown"
+    started_at: str | None = None
+    ended_at: str | None = None
+    mtime: float | None = None
+    event_count: int = 0
+    extra_json: str = "{}"
+
+
+class TaskGraphFindingResponse(BaseModel):
+    finding_id: str
+    run_id: str = ""
+    node_id: str = ""
+    edge_id: str = ""
+    source_file: str = ""
+    function_name: str = ""
+    line: str = ""
+    vuln_type: str = "unknown"
+    severity: str = "unknown"
+    title: str = ""
+    summary: str = ""
+    evidence: str = ""
+    exploitability: str = ""
+    confidence: float | int | str | None = None
+    output_dir: str = ""
+    report_status: str = ""
+    report_case_id: str = ""
+
+
+class TaskGraphTreeNodeResponse(BaseModel):
+    node_id: str
+    edge_id: str | None = None
+    function_name_resolved: str = ""
+    function_name_raw: str = ""
+    source_file: str = ""
+    depth: int = 0
+    status: str = "discovered"
+    analysis_status: str | None = None
+    findings_count: int | None = None
+    edge_kind: str | None = None
+    reason_code: str | None = None
+    reason_message: str | None = None
+    placeholder: bool | None = None
+    cycle: bool | None = None
+    primary_session_relpath: str | None = None
+    children: list["TaskGraphTreeNodeResponse"] = Field(default_factory=list)
+
+
+class TaskGraphViewResponse(BaseModel):
+    task_id: str
+    epoch: str = ""
+    available: bool = False
+    summary: Dict[str, Any] = Field(default_factory=dict)
+    nodes: list[TaskGraphNodeResponse] = Field(default_factory=list)
+    edges: list[TaskGraphEdgeResponse] = Field(default_factory=list)
+    tree: TaskGraphTreeNodeResponse | None = None
+    sessions: list[TaskGraphSessionResponse] = Field(default_factory=list)
+    findings: list[TaskGraphFindingResponse] = Field(default_factory=list)
+    generated_at: float | None = None
+    run_root: str = ""
 
 
 class ActionResponse(BaseModel):
