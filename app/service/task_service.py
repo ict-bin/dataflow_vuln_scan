@@ -45,7 +45,7 @@ from app.service.execution_coordinator import (
 from app.agent_process import cleanup_orphan_pi_processes, cleanup_task_agent_processes, cleanup_worker_runtime_processes
 from app.time_utils import isoformat_local, now_local
 from .task_events import _record_task_event, _task_event_dedupe_key, _build_task_event_response
-from .task_paths import _task_root, _task_run_root, _task_epoch_run_root, _task_result_path, _latest_epoch_run_root, _epoch_label_from_path, _resolve_run_path
+from .task_paths import _task_root, _task_run_root, _task_epoch_run_root, _task_result_path, _latest_epoch_run_root, _epoch_label_from_path, _resolve_run_path, _task_source_root
 from .task_session import _write_json_atomic, _safe_session_file, _parse_session_file, _build_task_session_catalog
 from .task_result import (
     _load_task_result_json, _write_task_result_json, _build_entry_analysis_context,
@@ -1575,6 +1575,19 @@ class TaskService:
                             output_dir_removed = True
                     except Exception as exc:
                         cleanup_errors.append(f"{child_name}: {exc}")
+        # MySQL 共享存储: 清除本任务的分析记录 (不清函数索引, 不影响其他任务)
+        try:
+            from app.db.shared_mysql import create_shared_store
+            source_root = _task_source_root(row)
+            if source_root:
+                for mode in ("complete", "autonomous", "dagflow"):
+                    ms = create_shared_store(
+                        "mysql+pymysql://root:Huawei12%23$@mysql.sothothv2-ns.svc.cluster.local:3306/secflow",
+                        mode, source_root, task_id)
+                    if ms:
+                        ms.clear_task_analysis()
+        except Exception as e:
+            logger.warning("mysql shared store cleanup failed: %s", e)
         # 保留历史时间线事件（app_dvs_task_events）：这些事件已携带
         # execution_epoch / control_version，重启后 epoch 自增，新旧事件天然
         # 可区分（dedupe_key 含 epoch 不会冲突），便于审计与跨重启回溯。
@@ -1645,6 +1658,19 @@ class TaskService:
         # Celery: 先 revoke 杀 worker pod 上的 prefork 子进程 + pi 全树 (task_revoked 信号 killpg)
         _revoke_celery_task(row)
         cancel_cleanup_groups = self._cleanup_worker_runtime(label=f"task_cancel:{task_id}", task_id=task_id, reason="cancel_requested")
+        # MySQL 共享存储: 清除本任务的分析记录
+        try:
+            from app.db.shared_mysql import create_shared_store
+            source_root = _task_source_root(row)
+            if source_root:
+                for mode in ("complete", "autonomous", "dagflow"):
+                    ms = create_shared_store(
+                        "mysql+pymysql://root:Huawei12%23$@mysql.sothothv2-ns.svc.cluster.local:3306/secflow",
+                        mode, source_root, task_id)
+                    if ms:
+                        ms.clear_task_analysis()
+        except Exception as e:
+            logger.warning("mysql shared store cleanup (cancel) failed: %s", e)
         if row.status in ("passed", "failed", "error", "cancelled"):
             return self._row_to_dict(row)
         ctx = _get_running_task_context(task_id)

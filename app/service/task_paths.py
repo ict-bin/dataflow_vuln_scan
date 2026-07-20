@@ -24,6 +24,11 @@ def _task_root(row: AppDvsTask) -> Path | None:
     return Path(row.output_path) / row.task_id
 
 
+def _task_source_root(row: AppDvsTask) -> str:
+    """任务的源码根目录 (用于 MySQL 共享存储 source_dir_id)。"""
+    return str(row.source_root_path or row.input_path or "")
+
+
 def _task_run_root(row: AppDvsTask) -> Path | None:
     root = _task_root(row)
     return root / "run" if root else None
