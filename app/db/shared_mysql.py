@@ -214,13 +214,20 @@ class SharedMysqlStore:
 
     @staticmethod
     def _get_engine(mysql_url: str, db_name: str):
-        """获取/缓存 engine (每 db_name 一个)。"""
+        """获取/缓存 engine (每 db_name 一个)。先建库再连。"""
         with _ENGINES_LOCK:
             if db_name in _ENGINES:
                 return _ENGINES[db_name]
-            # 从 mysql_url 提取 host/port/user/pwd, 替换 database
-            # mysql_url: mysql+pymysql://user:pass@host:port/dbname?charset=...
+            # 先连默认库, 建目标库
             base = mysql_url.rsplit("/", 1)[0]  # 去掉 /dbname?charset=...
+            # base 形如 mysql+pymysql://user:pass@host:port
+            admin_url = f"{base}/mysql?charset=utf8mb4"
+            admin_eng = create_engine(admin_url, pool_pre_ping=True, pool_recycle=3600)
+            with admin_eng.connect() as conn:
+                conn.execute(sa_text(f"CREATE DATABASE IF NOT EXISTS {db_name} DEFAULT CHARSET utf8mb4"))
+                conn.commit()
+            admin_eng.dispose()
+            # 连目标库
             url = f"{base}/{db_name}?charset=utf8mb4"
             eng = create_engine(url, pool_size=3, max_overflow=5, pool_pre_ping=True, pool_recycle=3600)
             _ENGINES[db_name] = eng
