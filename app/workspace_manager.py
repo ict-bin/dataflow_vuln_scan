@@ -157,8 +157,10 @@ class WorkspaceManager:
         to NFS so the API pods (which read from NFS) can serve them to the
         frontend during task execution.
 
-        We sync to {task_root}/.run_nfs/ on NFS — a well-known mirror
-        directory that the API path resolution helpers check as fallback.
+        Sessions now sync directly to {task_root}/output/sessions so the
+        frontend and terminal-state readers use the same authoritative path.
+        The legacy run/sessions mirror remains best-effort temporary state and
+        is cleaned on task completion.
         """
         if not self._enabled or self._local_run_root is None or self._nfs_run_root is None:
             return
@@ -377,9 +379,9 @@ class WorkspaceManager:
     def _periodic_sync_loop(self) -> None:
         """Background thread: periodically sync sessions and result files to NFS.
 
-        Writes directly to run/sessions/ and run/ on NFS — the run/ directory
-        itself is NOT a symlink (only run/epochs/NNNN/ is), so the frontend
-        can always read sessions from run/sessions/.
+        Sessions sync directly to output/sessions/ on NFS so runtime and
+        terminal reads use the same path. Other run/ artifacts still sync to
+        run/ for compatibility with existing task result readers.
         """
         interval = _sync_interval()
         while not self._stop_event.wait(interval):
@@ -392,10 +394,12 @@ class WorkspaceManager:
             # nfs_run_parent = {root}/run/
             nfs_run_parent = self._nfs_run_root.parent.parent
             try:
-                # Sync sessions/ to run/sessions/ on NFS (frontend reads this)
+                # Sync sessions/ to output/sessions/ on NFS (authoritative read path)
                 local_sessions = self._local_run_root / "sessions"
                 if local_sessions.exists():
-                    nfs_sessions = nfs_run_parent / "sessions"
+                    nfs_output = nfs_run_parent / "output"
+                    nfs_output.mkdir(parents=True, exist_ok=True)
+                    nfs_sessions = nfs_output / "sessions"
                     nfs_sessions.mkdir(parents=True, exist_ok=True)
                     self._sync_sessions_incremental(local_sessions, nfs_sessions)
 

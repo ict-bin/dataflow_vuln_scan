@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import threading
 import unittest
@@ -10,6 +11,8 @@ from app import agent_process
 from app import runner
 from app.agent_process import AgentProcessHandle
 from app.agent_runtime_events import emit_agent_runtime_events
+from app.dataflow_v2.runner import DataflowV2Runner
+from app.workspace_manager import WorkspaceManager
 
 
 def _fail_if_real_signal(*args, **kwargs):
@@ -613,6 +616,60 @@ class RunAgentPromptFileTests(unittest.TestCase):
 
         self.assertEqual("fd", inferred["open"]["return_taint"])
         self.assertIn("parent-history", captured["session_text"])
+
+    def test_dataflow_v2_archive_sessions_updates_output_sessions_without_recreating_dir(self):
+        cfg = SimpleNamespace()
+        dv2 = DataflowV2Runner.__new__(DataflowV2Runner)
+        dv2.cfg = cfg
+        with tempfile.TemporaryDirectory() as td:
+            root_out_dir = Path(td) / "run" / "epochs" / "0012"
+            root_output = Path(td) / "output"
+            sessions_src = root_out_dir / "sessions"
+            sessions_dst = root_output / "sessions"
+            sessions_src.mkdir(parents=True, exist_ok=True)
+            sessions_dst.mkdir(parents=True, exist_ok=True)
+            (sessions_dst / "stale.jsonl").write_text("stale\n", encoding="utf-8")
+            (sessions_src / "fresh.jsonl").write_text("fresh\n", encoding="utf-8")
+            (sessions_dst / "keep.jsonl").write_text("old\n", encoding="utf-8")
+            (sessions_src / "keep.jsonl").write_text("new\n", encoding="utf-8")
+
+            dv2._sync_session_tree(sessions_src, sessions_dst)
+
+            self.assertTrue(sessions_dst.exists())
+            self.assertEqual("fresh\n", (sessions_dst / "fresh.jsonl").read_text(encoding="utf-8"))
+            self.assertEqual("new\n", (sessions_dst / "keep.jsonl").read_text(encoding="utf-8"))
+            self.assertFalse((sessions_dst / "stale.jsonl").exists())
+
+    def test_workspace_manager_periodic_sync_writes_sessions_to_output_sessions(self):
+        wm = WorkspaceManager()
+        with tempfile.TemporaryDirectory() as td:
+            local_root = Path(td) / "local" / "epochs" / "0012"
+            nfs_run_root = Path(td) / "task-root" / "run" / "epochs" / "0012"
+            local_sessions = local_root / "sessions"
+            local_sessions.mkdir(parents=True, exist_ok=True)
+            (local_sessions / "live.jsonl").write_text("live\n", encoding="utf-8")
+
+            wm._enabled = True
+            wm._local_run_root = local_root
+            wm._nfs_run_root = nfs_run_root
+
+            class _OneShotStopEvent:
+                def __init__(self):
+                    self.calls = 0
+
+                def wait(self, _interval):
+                    self.calls += 1
+                    return self.calls > 1
+
+            wm._stop_event = _OneShotStopEvent()
+
+            with patch("app.workspace_manager._sync_interval", return_value=5.0):
+                wm._periodic_sync_loop()
+
+            target = nfs_run_root.parent.parent / "output" / "sessions" / "live.jsonl"
+            self.assertTrue(target.exists())
+            self.assertEqual("live\n", target.read_text(encoding="utf-8"))
+            self.assertFalse((nfs_run_root.parent.parent / "sessions" / "live.jsonl").exists())
 
     def test_legacy_dagflow_vuln_mining_is_forced_off(self):
         from app.dagflow.mining_agent import MiningAgent

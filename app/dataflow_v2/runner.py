@@ -268,14 +268,13 @@ class DataflowV2Runner:
                 shutil.copytree(v2_run_dir, dst)
             except OSError as e:
                 logger.warning("v2 archive dataflow-v2 db: %s", e)
-        # output/sessions/ (sessions 现在在 root_out_dir/sessions/, 通过 symlink → 本地)
+        # output/sessions/ — keep the same directory alive during runtime and
+        # reconcile incrementally here instead of deleting/recreating it.
         sessions_src = root_out_dir / "sessions"
         if sessions_src.exists():
             try:
                 dst = root_output_path / "sessions"
-                if dst.exists():
-                    shutil.rmtree(dst)
-                shutil.copytree(sessions_src, dst)
+                self._sync_session_tree(sessions_src, dst)
             except OSError as e:
                 logger.warning("v2 archive sessions: %s", e)
         # output/artifact-manifest.json (v2 件清单)
@@ -292,6 +291,32 @@ class DataflowV2Runner:
         except OSError:
             pass
         # 不写 flag 文件 (已废弃)
+
+    def _sync_session_tree(self, sessions_src: Path, sessions_dst: Path) -> None:
+        sessions_dst.mkdir(parents=True, exist_ok=True)
+        seen: set[Path] = set()
+        for src in sessions_src.rglob("*"):
+            rel = src.relative_to(sessions_src)
+            dst = sessions_dst / rel
+            seen.add(rel)
+            if src.is_dir():
+                dst.mkdir(parents=True, exist_ok=True)
+                continue
+            if not src.is_file():
+                continue
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            safe_copy2(src, dst)
+        for dst in sorted(sessions_dst.rglob("*"), reverse=True):
+            rel = dst.relative_to(sessions_dst)
+            if rel in seen:
+                continue
+            try:
+                if dst.is_dir():
+                    dst.rmdir()
+                else:
+                    dst.unlink()
+            except OSError:
+                logger.debug("v2 archive sessions cleanup skip %s", dst, exc_info=True)
 
     def _build_final_report(self, tid: str, cfg: TaskConfig, store: DataflowStore,
                             graph_db_path: Path) -> str:
