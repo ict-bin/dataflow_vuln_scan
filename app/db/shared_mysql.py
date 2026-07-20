@@ -33,36 +33,36 @@ CREATE TABLE IF NOT EXISTS source_dirs (
 );
 CREATE TABLE IF NOT EXISTS functions (
     source_dir_id  VARCHAR(64) NOT NULL,
-    func_id        TEXT NOT NULL,
-    `file`         TEXT NOT NULL,
-    name           TEXT NOT NULL,
-    signature      TEXT NOT NULL,
+    func_id        VARCHAR(512) NOT NULL,
+    `file`         VARCHAR(512) NOT NULL,
+    name           VARCHAR(512) NOT NULL,
+    signature      VARCHAR(512) NOT NULL,
     start_line     INTEGER NOT NULL,
     end_line       INTEGER NOT NULL,
-    func_hash      TEXT,
-    description    TEXT,
+    func_hash      VARCHAR(512),
+    description    VARCHAR(512),
     PRIMARY KEY (source_dir_id, func_id)
 );
 CREATE INDEX IF NOT EXISTS idx_func_name ON functions(source_dir_id, name);
 CREATE TABLE IF NOT EXISTS include_index (
     source_dir_id  VARCHAR(64) NOT NULL,
-    header         TEXT NOT NULL,
-    `file`         TEXT NOT NULL,
+    header         VARCHAR(512) NOT NULL,
+    `file`         VARCHAR(512) NOT NULL,
     PRIMARY KEY (source_dir_id, header, file)
 );
 CREATE TABLE IF NOT EXISTS class_hierarchy (
     source_dir_id  VARCHAR(64) NOT NULL,
-    class_name     TEXT NOT NULL,
+    class_name     VARCHAR(512) NOT NULL,
     bases          TEXT,
-    `file`         TEXT,
+    `file`         VARCHAR(512),
     PRIMARY KEY (source_dir_id, class_name)
 );
 CREATE TABLE IF NOT EXISTS class_members (
     source_dir_id  VARCHAR(64) NOT NULL,
-    class_name     TEXT NOT NULL,
-    member_name    TEXT NOT NULL,
-    member_type    TEXT,
-    `file`         TEXT,
+    class_name     VARCHAR(512) NOT NULL,
+    member_name    VARCHAR(512) NOT NULL,
+    member_type    VARCHAR(512),
+    `file`         VARCHAR(512),
     PRIMARY KEY (source_dir_id, class_name, member_name)
 );
 """
@@ -70,11 +70,11 @@ CREATE TABLE IF NOT EXISTS class_members (
 _DDL_WITH_TASK_V2 = """
 CREATE TABLE IF NOT EXISTS processed_taints (
     source_dir_id    VARCHAR(64) NOT NULL,
-    func_id          TEXT NOT NULL,
-    taint_signature  TEXT NOT NULL,
+    func_id          VARCHAR(512) NOT NULL,
+    taint_signature  VARCHAR(512) NOT NULL,
     task_id          VARCHAR(64) NOT NULL,
     taint_params     TEXT,
-    sessions_path    TEXT,
+    sessions_path    VARCHAR(512),
     analyzed_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (source_dir_id, func_id, taint_signature, task_id)
 );
@@ -82,34 +82,34 @@ CREATE INDEX IF NOT EXISTS idx_pt_dir_func ON processed_taints(source_dir_id, fu
 CREATE INDEX IF NOT EXISTS idx_pt_task ON processed_taints(task_id);
 CREATE TABLE IF NOT EXISTS taints (
     source_dir_id       VARCHAR(64) NOT NULL,
-    taint_id            TEXT NOT NULL,
-    func_id             TEXT NOT NULL,
-    name                TEXT NOT NULL,
-    signature           TEXT NOT NULL,
-    file                TEXT NOT NULL,
-    function            TEXT NOT NULL,
+    taint_id            VARCHAR(512) NOT NULL,
+    func_id             VARCHAR(512) NOT NULL,
+    name                VARCHAR(512) NOT NULL,
+    signature           VARCHAR(512) NOT NULL,
+    file                VARCHAR(512) NOT NULL,
+    function            VARCHAR(512) NOT NULL,
     next_propagations   TEXT,
-    description         TEXT,
+    description         VARCHAR(512),
     task_id             VARCHAR(64) NOT NULL,
     PRIMARY KEY (source_dir_id, taint_id, task_id)
 );
 CREATE INDEX IF NOT EXISTS idx_taint_func ON taints(source_dir_id, func_id);
 CREATE TABLE IF NOT EXISTS propagations (
     source_dir_id           VARCHAR(64) NOT NULL,
-    prop_id                 TEXT NOT NULL,
-    source_func_id          TEXT,
-    source_taint_signature  TEXT NOT NULL,
-    target_taint_signature  TEXT NOT NULL,
-    target_func_id          TEXT,
-    target_function         TEXT,
-    target_file             TEXT,
+    prop_id                 VARCHAR(512) NOT NULL,
+    source_func_id          VARCHAR(512),
+    source_taint_signature  VARCHAR(512) NOT NULL,
+    target_taint_signature  VARCHAR(512) NOT NULL,
+    target_func_id          VARCHAR(512),
+    target_function         VARCHAR(512),
+    target_file             VARCHAR(512),
     call_line               INTEGER,
-    `condition`              TEXT,
+    `condition`              VARCHAR(512),
     is_external             INTEGER DEFAULT 0,
     is_indirect_call        INTEGER DEFAULT 0,
-    escape_kind             TEXT,
-    carrier                 TEXT,
-    escape_via              TEXT,
+    escape_kind             VARCHAR(512),
+    carrier                 VARCHAR(512),
+    escape_via              VARCHAR(512),
     actual_args             TEXT,
     validations             TEXT,
     task_id                 VARCHAR(64) NOT NULL,
@@ -118,10 +118,10 @@ CREATE TABLE IF NOT EXISTS propagations (
 CREATE INDEX IF NOT EXISTS idx_prop_source ON propagations(source_dir_id, source_func_id);
 CREATE TABLE IF NOT EXISTS orchestration (
     source_dir_id   VARCHAR(64) NOT NULL,
-    edge_id          TEXT NOT NULL,
-    path_id          TEXT NOT NULL,
-    source_func_id   TEXT NOT NULL,
-    target_func_id   TEXT NOT NULL,
+    edge_id          VARCHAR(512) NOT NULL,
+    path_id          VARCHAR(512) NOT NULL,
+    source_func_id   VARCHAR(512) NOT NULL,
+    target_func_id   VARCHAR(512) NOT NULL,
     taint_params     TEXT NOT NULL,
     depth            INTEGER NOT NULL,
     edge_order       INTEGER NOT NULL,
@@ -135,8 +135,8 @@ CREATE INDEX IF NOT EXISTS idx_orch_status ON orchestration(source_dir_id, statu
 _DDL_WITH_TASK_DAG = """
 CREATE TABLE IF NOT EXISTS dag_processed_taints (
     source_dir_id    VARCHAR(64) NOT NULL,
-    func_id          TEXT NOT NULL,
-    taint_signature  TEXT NOT NULL,
+    func_id          VARCHAR(512) NOT NULL,
+    taint_signature  VARCHAR(512) NOT NULL,
     task_id          VARCHAR(64) NOT NULL,
     analyzed_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (source_dir_id, func_id, taint_signature, task_id)
@@ -145,11 +145,11 @@ CREATE INDEX IF NOT EXISTS idx_dpt_dir_func ON dag_processed_taints(source_dir_i
 CREATE INDEX IF NOT EXISTS idx_dpt_task ON dag_processed_taints(task_id);
 CREATE TABLE IF NOT EXISTS dag_nodes (
     source_dir_id    VARCHAR(64) NOT NULL,
-    func_id          TEXT NOT NULL,
-    taint_signature  TEXT NOT NULL,
+    func_id          VARCHAR(512) NOT NULL,
+    taint_signature  VARCHAR(512) NOT NULL,
     node_id          INTEGER NOT NULL,
     line             INTEGER NOT NULL DEFAULT 0,
-    taint            TEXT NOT NULL,
+    taint            VARCHAR(512) NOT NULL,
     parents_json     TEXT,
     checks_json      TEXT,
     prune_json       TEXT,
@@ -159,30 +159,30 @@ CREATE TABLE IF NOT EXISTS dag_nodes (
 );
 CREATE TABLE IF NOT EXISTS dag_edges (
     source_dir_id      VARCHAR(64) NOT NULL,
-    func_id            TEXT NOT NULL,
-    taint_signature    TEXT NOT NULL,
-    edge_id            TEXT NOT NULL,
+    func_id            VARCHAR(512) NOT NULL,
+    taint_signature    VARCHAR(512) NOT NULL,
+    edge_id            VARCHAR(512) NOT NULL,
     from_node          INTEGER NOT NULL,
     to_node            INTEGER NOT NULL,
     line               INTEGER NOT NULL DEFAULT 0,
     condition_json     TEXT,
     taints_json        TEXT,
     kind               VARCHAR(32) NOT NULL DEFAULT 'inside',
-    sink_ref           TEXT,
+    sink_ref           VARCHAR(512),
     param_taints_json  TEXT,
-    escape_subkind     TEXT,
-    carrier            TEXT,
-    escape_via          TEXT,
+    escape_subkind     VARCHAR(512),
+    carrier            VARCHAR(512),
+    escape_via          VARCHAR(512),
     task_id            VARCHAR(64) NOT NULL,
     PRIMARY KEY (source_dir_id, func_id, taint_signature, edge_id, task_id)
 );
 CREATE INDEX IF NOT EXISTS idx_dag_edges_sink ON dag_edges(source_dir_id, sink_ref);
 CREATE TABLE IF NOT EXISTS dag_meta (
     source_dir_id   VARCHAR(64) NOT NULL,
-    func_id         TEXT NOT NULL,
-    taint_signature TEXT NOT NULL,
+    func_id         VARCHAR(512) NOT NULL,
+    taint_signature VARCHAR(512) NOT NULL,
     self_contained  INTEGER NOT NULL DEFAULT 0,
-    description     TEXT,
+    description     VARCHAR(512),
     taint_failed    INTEGER NOT NULL DEFAULT 0,
     task_id         VARCHAR(64) NOT NULL,
     PRIMARY KEY (source_dir_id, func_id, taint_signature, task_id)
