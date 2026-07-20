@@ -1588,6 +1588,15 @@ class TaskService:
                         ms.clear_task_analysis()
         except Exception as e:
             logger.warning("mysql shared store cleanup failed: %s", e)
+        # 清 MySQL 图谱表 (task_graph 双写镜像)
+        try:
+            from app.db.mysql_graph_store import create_mysql_graph_store
+            mgs = create_mysql_graph_store(
+                "mysql+pymysql://root:Huawei12%23$@mysql.sothothv2-ns.svc.cluster.local:3306/secflow")
+            if mgs:
+                mgs.clear_task(task_id)
+        except Exception as e:
+            logger.warning("mysql graph store cleanup failed: %s", e)
         # 保留历史时间线事件（app_dvs_task_events）：这些事件已携带
         # execution_epoch / control_version。显式 restart 从头重跑时会把
         # execution_epoch 归零，由下一次 claim 从 1 重新开始；跨重启审计
@@ -1672,6 +1681,14 @@ class TaskService:
                         ms.clear_task_analysis()
         except Exception as e:
             logger.warning("mysql shared store cleanup (cancel) failed: %s", e)
+        try:
+            from app.db.mysql_graph_store import create_mysql_graph_store
+            mgs = create_mysql_graph_store(
+                "mysql+pymysql://root:Huawei12%23$@mysql.sothothv2-ns.svc.cluster.local:3306/secflow")
+            if mgs:
+                mgs.clear_task(task_id)
+        except Exception as e:
+            logger.warning("mysql graph store cleanup (cancel) failed: %s", e)
         if row.status in ("passed", "failed", "error", "cancelled"):
             return self._row_to_dict(row)
         ctx = _get_running_task_context(task_id)

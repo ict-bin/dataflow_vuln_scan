@@ -50,6 +50,18 @@ class DataflowV2Runner:
             logger.warning("create mysql store failed: %s", e)
             return None
 
+    def _create_mysql_graph_store(self):
+        """创建 MysqlGraphStore (task_graph 双写, 失败返回 None)。"""
+        try:
+            from ..db.mysql_graph_store import create_mysql_graph_store
+            db_cfg = getattr(self.cfg, "db", None)
+            url = db_cfg.url if db_cfg else \
+                "mysql+pymysql://root:Huawei12%23$@mysql.sothothv2-ns.svc.cluster.local:3306/secflow"
+            return create_mysql_graph_store(url)
+        except Exception as e:
+            logger.warning("create mysql graph store failed: %s", e)
+            return None
+
     def _emit(self, etype: str, **data: Any) -> None:
         """适配: (etype, **data) → SwarmEvent → task_service on_event(SwarmEvent)。"""
         try:
@@ -155,6 +167,7 @@ class DataflowV2Runner:
                 sessions_dir=sessions_dir, graph_db_path=graph_db_path,
                 vuln_root=vuln_root, run_id=tid, task_id=tid,
                 cancel_event=self._cancel_event, on_event=self.on_event)
+            cbs.graph_store._mysql = self._create_mysql_graph_store()
             cbs.graph_store.start_run(tid, tid, cfg.source_file or "", cfg.function_name or "", source_root, {})
             cbs.graph_store.start_task_graph_run(TaskGraphRunRecord(
                 task_id=tid,

@@ -1995,7 +1995,29 @@ def get_task_logs(task_id: str, db: Session = Depends(get_db)):
 def generate_prompt(body: GeneratePromptRequest):
     """Auto-generate a data flow analysis prompt from an input path."""
     return {"prompt": generate_prompt_from_path(body.input_path)}
-def _graph_store_for_run_root(run_root: Path) -> VulnScanStore | None:
+_MYSQL_GRAPH_STORE = None
+
+def _get_mysql_graph_store():
+    """获取/缓存 MysqlGraphStore (API 优先读 MySQL)。"""
+    global _MYSQL_GRAPH_STORE
+    if _MYSQL_GRAPH_STORE is not None:
+        return _MYSQL_GRAPH_STORE
+    try:
+        from app.db import _engine
+        if _engine is None:
+            return None
+        url = str(_engine.url)
+        from app.db.mysql_graph_store import create_mysql_graph_store
+        _MYSQL_GRAPH_STORE = create_mysql_graph_store(url)
+        return _MYSQL_GRAPH_STORE
+    except Exception:
+        return None
+
+def _graph_store_for_run_root(run_root: Path):
+    """优先返回 MySQL 图谱存储; 回退 SQLite VulnScanStore。"""
+    mysql_store = _get_mysql_graph_store()
+    if mysql_store is not None:
+        return mysql_store
     db_path = run_root / "vuln-scan.sqlite"
     if not db_path.exists():
         parent_output = run_root.parent / "output" / "vuln-scan.sqlite"
