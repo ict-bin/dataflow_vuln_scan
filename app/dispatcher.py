@@ -183,9 +183,9 @@ class Dispatcher:
                     row.execution_heartbeat_at is None
                     or (now - row.execution_heartbeat_at).total_seconds() > STALE_HEARTBEAT_SECONDS
                 )
-                if in_active and not heartbeat_stale:
-                    continue  # 正常在跑
-                # 孤儿 (不在 active) 或 卡死 (在 active 但无心跳) → 重置
+                if not heartbeat_stale:
+                    continue  # 心跳新鲜时以 DB lease/heartbeat 为准，不因 inspect 短暂漏报误杀
+                # 心跳陈旧时，无论 inspect 是否命中都视为孤儿/卡死 → 重置
                 # 先 revoke 兜底杀残留进程 (best-effort)
                 if cid:
                     try:
