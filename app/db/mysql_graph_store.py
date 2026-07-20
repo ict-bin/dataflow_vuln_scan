@@ -151,7 +151,7 @@ def _get_engine(mysql_url: str) -> Engine:
     with _ENGINE_LOCK:
         if _ENGINE is not None:
             return _ENGINE
-        eng = create_engine(mysql_url, pool_size=3, max_overflow=5,
+        eng = create_engine(mysql_url, pool_size=2, max_overflow=3,
                            pool_pre_ping=True, pool_recycle=3600)
         with eng.connect() as conn:
             for stmt in _DDL.split(";"):

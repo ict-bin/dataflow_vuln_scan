@@ -255,7 +255,7 @@ class SharedMysqlStore(MysqlReadMixin):
                 logger.debug("CREATE DATABASE failed (secflow may lack privilege); trying direct connect")
             # 连目标库
             url = f"{base}/{db_name}?charset=utf8mb4"
-            eng = create_engine(url, pool_size=3, max_overflow=5, pool_pre_ping=True, pool_recycle=3600)
+            eng = create_engine(url, pool_size=2, max_overflow=3, pool_pre_ping=True, pool_recycle=3600)
             _ENGINES[db_name] = eng
             return eng
 
