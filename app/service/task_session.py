@@ -39,23 +39,16 @@ def _safe_session_file(root: Path, relative_path: str) -> Path:
     if rel.is_absolute() or ".." in rel.parts:
         from fastapi import HTTPException
         raise HTTPException(400, "非法会话路径")
-    run_root = (root / "run").resolve()
-    target = (run_root / rel).resolve()
+    output_root = (root / "output").resolve()
+    target = (output_root / rel).resolve()
     try:
-        target.relative_to(run_root)
+        target.relative_to(output_root)
     except ValueError:
         from fastapi import HTTPException
         raise HTTPException(400, "非法会话路径")
     if target.suffix != ".jsonl":
         from fastapi import HTTPException
         raise HTTPException(400, "仅支持 jsonl 会话文件")
-    # NFS sync mirror fallback: if primary path is broken symlink
-    # (worker pod replaced run/ with symlink to local /tmp),
-    # try .run_nfs/ mirror written by periodic sync.
-    if not _path_accessible(target):
-        mirror = root / ".run_nfs" / relative_path
-        if _path_accessible(mirror):
-            return mirror
     return target
 
 
@@ -103,20 +96,18 @@ def _parse_session_file(path: Path) -> dict[str, object]:
 
 
 def _build_task_session_catalog(row: AppDvsTask) -> dict[str, object]:
-    from .task_paths import _task_root, _resolve_run_path
+    from .task_paths import _task_output_sessions_root, _task_root
     from .task_result import _load_task_result_json
     from .session_index import build_session_catalog
 
     root = _task_root(row)
-    # Resolve run_root with NFS mirror fallback (for API pods when
-    # Worker pod has run/ as symlink to local storage)
-    run_root = _resolve_run_path(row) or (root / "run" if root else Path())
-    if not run_root.exists():
+    sessions_root = _task_output_sessions_root(row) or (root / "output" / "sessions" if root else Path())
+    if not sessions_root.exists():
         return {
             "task_id": row.task_id,
             "status": row.status,
-            "sessions_root": str(run_root / "sessions"),
-            "index_path": str(run_root / "sessions" / "index.json"),
+            "sessions_root": str(sessions_root),
+            "index_path": str(sessions_root / "index.json"),
             "generated_at": None,
             "items": [],
             "index": {
@@ -124,7 +115,7 @@ def _build_task_session_catalog(row: AppDvsTask) -> dict[str, object]:
                 "generated_at": None,
                 "task_id": row.task_id,
                 "task_status": row.status,
-                "sessions_root": str(run_root / "sessions"),
+                "sessions_root": str(sessions_root),
                 "summary": {},
                 "nodes": [],
                 "edges": [],
@@ -136,7 +127,7 @@ def _build_task_session_catalog(row: AppDvsTask) -> dict[str, object]:
     return build_session_catalog(
         task_id=row.task_id,
         row_status=row.status,
-        run_root=run_root,
+        sessions_root=sessions_root,
         result_json=result_json,
         write_json_atomic=_write_json_atomic,
     )

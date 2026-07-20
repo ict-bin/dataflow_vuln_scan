@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import json
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -9,6 +10,7 @@ from app.api.tasks import (
     get_task_result,
     get_task_graph_view,
     get_task_propagations,
+    get_task_session_file,
     get_task_session_index,
     get_task_vuln_graph,
     list_task_sessions,
@@ -22,6 +24,7 @@ from app.api.tasks import (
 )
 from app.vuln_store import TaskGraphEdgeRecord, TaskGraphNodeRecord, TaskGraphRunRecord, TaskGraphSessionRecord, VulnFindingRecord, VulnScanStore
 from test_legacy_task_propagations_helper import load_task_propagations_legacy
+from fastapi import HTTPException
 
 
 def _exec_sql(db_path: Path, sql: str, params: tuple = ()) -> None:
@@ -31,6 +34,21 @@ def _exec_sql(db_path: Path, sql: str, params: tuple = ()) -> None:
         conn.commit()
     finally:
         conn.close()
+
+
+def _write_session_file(path: Path, *, session_id: str | None = None, extra_header: dict | None = None, extra_events: list[dict] | None = None) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    header = {
+        "type": "session",
+        "session_id": session_id or path.stem,
+        "timestamp": "2026-07-20T00:00:00Z",
+        "cwd": "/workspace",
+    }
+    if extra_header:
+        header.update(extra_header)
+    events = extra_events or [{"type": "assistant", "timestamp": "2026-07-20T00:00:01Z", "content": "ok"}]
+    lines = [header, *events]
+    path.write_text("\n".join(json.dumps(item, ensure_ascii=False) for item in lines) + "\n", encoding="utf-8")
 
 
 def test_load_task_propagations_includes_followed_and_unfollowed(tmp_path: Path):
@@ -1626,7 +1644,10 @@ def test_route_level_projections_stay_aligned_on_same_authoritative_graph_view(t
     output_root = tmp_path / "output"
     task_root = output_root / task_id
     run_root = task_root / "run"
+    sessions_root = task_root / "output" / "sessions"
     run_root.mkdir(parents=True, exist_ok=True)
+    _write_session_file(sessions_root / "root.jsonl")
+    _write_session_file(sessions_root / "child.jsonl")
 
     store = VulnScanStore(run_root / "vuln-scan.sqlite")
     store.start_task_graph_run(TaskGraphRunRecord(
@@ -1743,22 +1764,10 @@ def test_route_level_projections_stay_aligned_on_same_authoritative_graph_view(t
     assert len(graph_view["edges"]) == vuln_graph["summary"]["edges"] == vuln_graph["summary"]["followups"] == 1
     assert [item["edge_id"] for item in propagations["items"]] == [edge["edge_id"] for edge in graph_view["edges"] if int(edge["visible_in_all_propagations"]) == 1]
     assert {item["relative_path"] for item in sessions["items"]} == {node["node_id"] for node in session_index["nodes"]}
-    graph_node_ids = {node["node_id"] for node in graph_view["nodes"]}
-    graph_edge_ids = {edge["edge_id"] for edge in graph_view["edges"]}
-    for session_node in session_index["nodes"]:
-        session_header = session_node["session_header"]
-        assert session_header["node_id"] in graph_node_ids
-        if session_header["edge_id"]:
-            assert session_header["edge_id"] in graph_edge_ids
-    assert session_index["edges"] == [
-        {
-            "edge_id": "edge-direct",
-            "source_node_id": "sessions/root.jsonl",
-            "target_node_id": "sessions/child.jsonl",
-            "kind": "direct_call",
-            "label": "direct_call",
-        },
-    ]
+    assert session_index["sessions_root"] == str(sessions_root)
+    assert session_index["index_path"] == str(sessions_root / "index.json")
+    assert {node["relative_path"] for node in session_index["nodes"]} == {"sessions/root.jsonl", "sessions/child.jsonl"}
+    assert session_index["edges"] == []
     assert vuln_graph["trace_tree"]["run_id"] == graph_view["tree"]["node_id"]
     assert vuln_graph["trace_tree"]["children"][0]["run_id"] == graph_view["tree"]["children"][0]["node_id"]
 
@@ -1783,7 +1792,11 @@ def test_route_level_projections_preserve_one_to_many_bridge_edges(tmp_path: Pat
     output_root = tmp_path / "output"
     task_root = output_root / task_id
     run_root = task_root / "run"
+    sessions_root = task_root / "output" / "sessions"
     run_root.mkdir(parents=True, exist_ok=True)
+    _write_session_file(sessions_root / "root.jsonl")
+    _write_session_file(sessions_root / "emit.jsonl")
+    _write_session_file(sessions_root / "emit-uv.jsonl")
 
     store = VulnScanStore(run_root / "vuln-scan.sqlite")
     store.start_task_graph_run(TaskGraphRunRecord(
@@ -1909,32 +1922,14 @@ def test_route_level_projections_preserve_one_to_many_bridge_edges(tmp_path: Pat
     assert [child["function_name"] for child in vuln_graph["trace_tree"]["children"]] == ["Emit", "EmitByUvWithoutCheckShared"]
     assert {item["relative_path"] for item in sessions["items"]} == {"sessions/root.jsonl", "sessions/emit.jsonl", "sessions/emit-uv.jsonl"}
     assert {item["relative_path"] for item in sessions["items"]} == {node["node_id"] for node in session_index["nodes"]}
-    assert session_index["index_path"] == f"{run_root}/graph-view"
-    assert session_index["generated_at"] == "2026-05-28T20:45:11Z"
-    assert {node["session_header"]["edge_id"] for node in session_index["nodes"] if node["session_header"]["edge_id"]} == {"edge-bridge-emit", "edge-bridge-emit-uv"}
-    assert {edge["edge_id"] for edge in graph_view["edges"]} == {item["edge_id"] for item in propagations["items"]} == {edge["edge_id"] for edge in session_index["edges"]}
-    assert [edge["source_node_id"] for edge in session_index["edges"]] == ["sessions/root.jsonl", "sessions/root.jsonl"]
-    assert [edge["target_node_id"] for edge in session_index["edges"]] == ["sessions/emit.jsonl", "sessions/emit-uv.jsonl"]
+    assert session_index["sessions_root"] == str(sessions_root)
+    assert session_index["index_path"] == str(sessions_root / "index.json")
+    assert session_index["generated_at"] is not None
     session_nodes_by_path = {node["relative_path"]: node for node in session_index["nodes"]}
-    assert session_nodes_by_path["sessions/root.jsonl"]["module_name"] == "RootMulti"
-    assert session_nodes_by_path["sessions/emit.jsonl"]["module_name"] == "Emit"
-    assert session_nodes_by_path["sessions/emit-uv.jsonl"]["module_name"] == "EmitByUvWithoutCheckShared"
-    assert session_index["edges"] == [
-        {
-            "edge_id": "edge-bridge-emit",
-            "source_node_id": "sessions/root.jsonl",
-            "target_node_id": "sessions/emit.jsonl",
-            "kind": "container_reader",
-            "label": "container_reader",
-        },
-        {
-            "edge_id": "edge-bridge-emit-uv",
-            "source_node_id": "sessions/root.jsonl",
-            "target_node_id": "sessions/emit-uv.jsonl",
-            "kind": "container_reader",
-            "label": "container_reader",
-        },
-    ]
+    assert session_nodes_by_path["sessions/root.jsonl"]["session_name"] == "root"
+    assert session_nodes_by_path["sessions/emit.jsonl"]["session_name"] == "emit"
+    assert session_nodes_by_path["sessions/emit-uv.jsonl"]["session_name"] == "emit-uv"
+    assert session_index["edges"] == []
 
 
 def test_route_level_projections_keep_findings_queryable_when_graph_has_only_findings(tmp_path: Path, monkeypatch):
@@ -2007,7 +2002,11 @@ def test_route_level_session_index_does_not_invent_edges_from_orphan_sessions(tm
     output_root = tmp_path / "output"
     task_root = output_root / task_id
     run_root = task_root / "run"
+    sessions_root = task_root / "output" / "sessions"
     run_root.mkdir(parents=True, exist_ok=True)
+    _write_session_file(sessions_root / "root.jsonl")
+    _write_session_file(sessions_root / "child.jsonl")
+    _write_session_file(sessions_root / "orphan.jsonl")
 
     store = VulnScanStore(run_root / "vuln-scan.sqlite")
     store.start_task_graph_run(TaskGraphRunRecord(
@@ -2106,20 +2105,45 @@ def test_route_level_session_index_does_not_invent_edges_from_orphan_sessions(tm
 
     session_index = get_task_session_index(task_id, db=None)
 
-    assert {node["session_header"]["edge_id"] for node in session_index["nodes"]} == {"", "edge-direct", "edge-missing"}
-    assert session_index["edges"] == [
-        {
-            "edge_id": "edge-direct",
-            "source_node_id": "sessions/root.jsonl",
-            "target_node_id": "sessions/child.jsonl",
-            "kind": "direct_call",
-            "label": "direct_call",
-        },
-    ]
-    assert all(edge["edge_id"] != "edge-missing" for edge in session_index["edges"])
-    orphan_node = next(node for node in session_index["nodes"] if node["session_header"]["edge_id"] == "edge-missing")
-    assert orphan_node["module_name"] is None
-    assert orphan_node["stage_group"] == "node-orphan"
+    assert session_index["sessions_root"] == str(sessions_root)
+    assert session_index["index_path"] == str(sessions_root / "index.json")
+    assert {node["relative_path"] for node in session_index["nodes"]} == {
+        "sessions/root.jsonl",
+        "sessions/child.jsonl",
+        "sessions/orphan.jsonl",
+    }
+    assert session_index["edges"] == []
+    assert all(isinstance(node["session_header"], dict) for node in session_index["nodes"])
+
+
+def test_get_task_session_file_reads_output_sessions_only(tmp_path: Path, monkeypatch):
+    task_id = "task-session-file-output-only"
+    output_root = tmp_path / "output"
+    task_root = output_root / task_id
+    run_sessions = task_root / "run" / "sessions"
+    output_sessions = task_root / "output" / "sessions"
+    _write_session_file(run_sessions / "root.jsonl", session_id="run-root")
+
+    row = SimpleNamespace(
+        task_id=task_id,
+        output_path=str(output_root),
+        result_json={},
+        status="running",
+    )
+    monkeypatch.setattr(tasks_module, "_get_task_row", lambda db, value: row)
+
+    try:
+        get_task_session_file(task_id, path="sessions/root.jsonl", db=None)
+    except HTTPException as exc:
+        assert exc.status_code == 404
+    else:
+        raise AssertionError("expected output-only session read to reject run/sessions fallback")
+
+    _write_session_file(output_sessions / "root.jsonl", session_id="output-root")
+    payload = get_task_session_file(task_id, path="sessions/root.jsonl", db=None)
+    assert payload["path"] == "sessions/root.jsonl"
+    assert payload["session_meta"]["session_id"] == "output-root"
+    assert payload["line_count"] == 2
 
 
 def test_route_level_projections_preserve_terminal_and_hidden_followup_statuses(tmp_path: Path, monkeypatch):
@@ -2973,7 +2997,11 @@ def test_route_level_projections_cover_edge_kind_and_status_matrix(tmp_path: Pat
     output_root = tmp_path / "output"
     task_root = output_root / task_id
     run_root = task_root / "run"
+    sessions_root = task_root / "output" / "sessions"
     run_root.mkdir(parents=True, exist_ok=True)
+    _write_session_file(sessions_root / "root.jsonl")
+    for relname in ["discovered.jsonl", "running.jsonl", "scheduled.jsonl", "done.jsonl", "failed.jsonl", "cancelled.jsonl"]:
+        _write_session_file(sessions_root / relname)
 
     store = VulnScanStore(run_root / "vuln-scan.sqlite")
     store.start_task_graph_run(TaskGraphRunRecord(
@@ -3285,5 +3313,15 @@ def test_route_level_projections_cover_edge_kind_and_status_matrix(tmp_path: Pat
     assert "virtual::edge-not-followed" in trace_child_ids
     assert "virtual::edge-unresolved" in trace_child_ids
 
-    session_edge_ids = {node["session_header"]["edge_id"] for node in session_index["nodes"] if node["session_header"]["edge_id"]}
-    assert {"edge-discovered", "edge-running", "edge-scheduled", "edge-done", "edge-failed", "edge-cancelled"} <= session_edge_ids
+    assert session_index["sessions_root"] == str(sessions_root)
+    assert session_index["index_path"] == str(sessions_root / "index.json")
+    assert {node["relative_path"] for node in session_index["nodes"]} == {
+        "sessions/root.jsonl",
+        "sessions/discovered.jsonl",
+        "sessions/running.jsonl",
+        "sessions/scheduled.jsonl",
+        "sessions/done.jsonl",
+        "sessions/failed.jsonl",
+        "sessions/cancelled.jsonl",
+    }
+    assert session_index["edges"] == []

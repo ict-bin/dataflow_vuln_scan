@@ -29,6 +29,16 @@ def _task_run_root(row: AppDvsTask) -> Path | None:
     return root / "run" if root else None
 
 
+def _task_output_root(row: AppDvsTask) -> Path | None:
+    root = _task_root(row)
+    return root / "output" if root else None
+
+
+def _task_output_sessions_root(row: AppDvsTask) -> Path | None:
+    output_root = _task_output_root(row)
+    return output_root / "sessions" if output_root else None
+
+
 def _resolve_run_path(row: AppDvsTask, relative: str = "") -> Path | None:
     """Resolve a path under run/ with NFS sync mirror fallback.
 

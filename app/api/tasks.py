@@ -680,10 +680,10 @@ def _safe_session_file(root: Path, relative_path: str) -> Path:
     rel = Path(relative_path)
     if rel.is_absolute() or ".." in rel.parts:
         raise HTTPException(400, "非法会话路径")
-    run_root = (root / "run").resolve()
-    target = (run_root / rel).resolve()
+    output_root = (root / "output").resolve()
+    target = (output_root / rel).resolve()
     try:
-        target.relative_to(run_root)
+        target.relative_to(output_root)
     except ValueError:
         raise HTTPException(400, "非法会话路径")
     if target.suffix != ".jsonl":
@@ -1807,12 +1807,10 @@ def get_task_result(task_id: str, db: Session = Depends(get_db)):
 @router.get("/tasks/{task_id}/sessions")
 def list_task_sessions(task_id: str, db: Session = Depends(get_db)):
     if db is None:
+        from app.service.task_session import _build_task_session_catalog
         row = _get_task_row(db, task_id)
-        root = _task_root(row)
-        latest_run_root = _latest_epoch_run_root(root) if str(root) else Path()
-        run_root = latest_run_root if latest_run_root.exists() else root / "run"
-        view = _load_task_graph_view(run_root, task_id)
-        return {"task_id": task_id, "items": _project_session_list_from_graph(view), "current_epoch": view.get("epoch") or None}
+        catalog = _build_task_session_catalog(row)
+        return {"task_id": task_id, "items": catalog.get("items", []), "current_epoch": None}
     return {
         "task_id": task_id,
         "items": get_task_service().list_task_sessions(db, task_id),
@@ -1822,12 +1820,17 @@ def list_task_sessions(task_id: str, db: Session = Depends(get_db)):
 @router.get("/tasks/{task_id}/sessions/index", response_model=TaskSessionIndexResponse)
 def get_task_session_index(task_id: str, db: Session = Depends(get_db)):
     if db is None:
+        from app.service.task_session import _build_task_session_catalog
         row = _get_task_row(db, task_id)
-        root = _task_root(row)
-        latest_run_root = _latest_epoch_run_root(root) if str(root) else Path()
-        run_root = latest_run_root if latest_run_root.exists() else root / "run"
-        view = _load_task_graph_view(run_root, task_id)
-        return _project_session_index_from_graph(task_id=task_id, task_status=row.status, run_root=run_root, view=view)
+        catalog = _build_task_session_catalog(row)
+        return {
+            "task_id": catalog.get("task_id") or row.task_id,
+            "status": catalog.get("status") or row.status,
+            "sessions_root": catalog.get("sessions_root"),
+            "index_path": catalog.get("index_path"),
+            "generated_at": catalog.get("generated_at"),
+            **(catalog.get("index") or {}),
+        }
     return get_task_service().get_task_session_index(db, task_id)
 
 

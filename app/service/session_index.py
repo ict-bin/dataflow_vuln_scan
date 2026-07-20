@@ -245,7 +245,7 @@ def _parse_session_file(path: Path) -> tuple[dict, list[dict], list[str], int]:
     return session_meta, events, warnings, line_count
 
 
-def build_session_catalog(*, task_id: str, row_status: str, run_root: Path, result_json: dict | None, write_json_atomic) -> dict:
+def build_session_catalog(*, task_id: str, row_status: str, sessions_root: Path, result_json: dict | None, write_json_atomic) -> dict:
     refs_by_path = _load_round_refs(result_json)
     now_ts = _time.time()
     warnings: list[str] = []
@@ -253,11 +253,12 @@ def build_session_catalog(*, task_id: str, row_status: str, run_root: Path, resu
     nodes: list[dict] = []
     node_map: dict[str, dict] = {}
 
-    for session_file in sorted(run_root.glob("**/*.jsonl")):
+    for session_file in sorted(sessions_root.glob("**/*.jsonl")):
         if not session_file.is_file():
             continue
         try:
-            relative_path = _normalize_relative_path(str(session_file.relative_to(run_root)))
+            relative_path = _normalize_relative_path(str(session_file.relative_to(sessions_root)))
+            relative_path = f"sessions/{relative_path}"
             if relative_path.endswith("index.jsonl"):
                 continue
             stage_group = relative_path.split("/")[0] if "/" in relative_path else "root"
@@ -378,7 +379,7 @@ def build_session_catalog(*, task_id: str, row_status: str, run_root: Path, resu
         "generated_at": _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime(now_ts)),
         "task_id": task_id,
         "task_status": row_status,
-        "sessions_root": str(run_root / "sessions"),
+        "sessions_root": str(sessions_root),
         "summary": {
             "session_count": len(nodes),
             "active_session_count": sum(1 for node in nodes if node.get("is_active")),
@@ -394,12 +395,12 @@ def build_session_catalog(*, task_id: str, row_status: str, run_root: Path, resu
         "groups": groups,
         "warnings": warnings,
     }
-    index_path = run_root / "sessions" / "index.json"
+    index_path = sessions_root / "index.json"
     write_json_atomic(index_path, payload)
     return {
         "task_id": task_id,
         "status": row_status,
-        "sessions_root": str(run_root / "sessions"),
+        "sessions_root": str(sessions_root),
         "index_path": str(index_path),
         "generated_at": payload["generated_at"],
         "items": items,

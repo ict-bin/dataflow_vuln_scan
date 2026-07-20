@@ -190,6 +190,12 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
     def _cancel_requested(self) -> bool:
         return bool(self.cancel_event is not None and self.cancel_event.is_set())
 
+    def _graph_store_ready(self) -> bool:
+        store = getattr(self, "graph_store", None)
+        if store is None:
+            return False
+        return hasattr(store, "upsert_task_graph_node") and hasattr(store, "upsert_task_graph_session")
+
     def _graph_terminal_status(self, *, failed_status: str = "failed", success_status: str = "done") -> str:
         if self._cancel_requested():
             return "cancelled"
@@ -219,6 +225,8 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
 
     def record_graph_node(self, func: FunctionRecord, *, depth: int, status: str, analysis_status: str) -> str:
         node_id = self.graph_node_id(func)
+        if not self._graph_store_ready():
+            return node_id
         self.graph_store.upsert_task_graph_node(TaskGraphNodeRecord(
             node_id=node_id,
             task_id=self.task_id,
@@ -246,6 +254,8 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
         status: str,
     ) -> str:
         relpath = self.graph_session_relpath(session_path)
+        if not self._graph_store_ready():
+            return relpath
         self.graph_store.upsert_task_graph_session(TaskGraphSessionRecord(
             session_relpath=relpath,
             task_id=self.task_id,
@@ -292,7 +302,8 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
             session_kind="taint",
             status="running",
         )
-        self.graph_store.update_task_graph_node(node_id, primary_session_relpath=session_relpath)
+        if self._graph_store_ready():
+            self.graph_store.update_task_graph_node(node_id, primary_session_relpath=session_relpath)
 
         # 3) 构造 prompt
         prompt = self._build_prompt(func, body, taint_params, pre_validations)
@@ -432,19 +443,20 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                     len(parsed.get("propagations") or []))
         terminal_status = "cancelled" if self._cancel_requested() else ("done" if not taint_failed else "failed")
         terminal_analysis_status = "cancelled" if self._cancel_requested() else ("done" if not taint_failed else "failed")
-        self.graph_store.update_task_graph_node(
-            node_id,
-            status=terminal_status,
-            analysis_status=terminal_analysis_status,
-            finished_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-            primary_session_relpath=session_relpath,
-        )
-        self.graph_store.update_task_graph_session(
-            session_relpath,
-            node_id=node_id,
-            status=terminal_status,
-            ended_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-        )
+        if self._graph_store_ready():
+            self.graph_store.update_task_graph_node(
+                node_id,
+                status=terminal_status,
+                analysis_status=terminal_analysis_status,
+                finished_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                primary_session_relpath=session_relpath,
+            )
+            self.graph_store.update_task_graph_session(
+                session_relpath,
+                node_id=node_id,
+                status=terminal_status,
+                ended_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            )
         return self._build_result(store, func, taint_params, parsed, fork_session, body, taint_failed=taint_failed)
 
     # ── 结果构造 + clang 标注 ───────────────────────────────────────────────
@@ -937,39 +949,41 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                 n += 1
         # 实时同步漏洞计数到 MySQL: running 任务在列表也能显示数量 (不再 "-";
         # vuln_total_count 默认 -1, 之前只在任务完成 _record_terminal_event 时同步)
-        try:
-            with self.graph_store.connect() as _conn:
-                _tot = _conn.execute(
-                    "SELECT count(*) FROM vulnerability_findings WHERE run_id=?", (self.run_id,)).fetchone()[0]
-                _rep = _conn.execute(
-                    "SELECT count(*) FROM vulnerability_findings WHERE run_id=? AND report_status='reported'",
-                    (self.run_id,)).fetchone()[0]
-            from app.db import get_db
-            from app.db.models import AppDvsTask
-            _db = next(get_db())
+        if self._graph_store_ready():
             try:
-                _row = _db.query(AppDvsTask).filter_by(task_id=self.task_id).first()
-                if _row is not None and (_row.vuln_total_count != _tot or _row.vuln_reported_count != _rep):
-                    _row.vuln_total_count = _tot
-                    _row.vuln_reported_count = _rep
-                    _row.vuln_unreported_count = _tot - _rep
-                    _db.commit()
-            finally:
-                _db.close()
-        except Exception:
-            pass
-        self.graph_store.update_task_graph_node(
-            node_id,
-            findings_count=n,
-            primary_session_relpath=session_relpath,
-        )
+                with self.graph_store.connect() as _conn:
+                    _tot = _conn.execute(
+                        "SELECT count(*) FROM vulnerability_findings WHERE run_id=?", (self.run_id,)).fetchone()[0]
+                    _rep = _conn.execute(
+                        "SELECT count(*) FROM vulnerability_findings WHERE run_id=? AND report_status='reported'",
+                        (self.run_id,)).fetchone()[0]
+                from app.db import get_db
+                from app.db.models import AppDvsTask
+                _db = next(get_db())
+                try:
+                    _row = _db.query(AppDvsTask).filter_by(task_id=self.task_id).first()
+                    if _row is not None and (_row.vuln_total_count != _tot or _row.vuln_reported_count != _rep):
+                        _row.vuln_total_count = _tot
+                        _row.vuln_reported_count = _rep
+                        _row.vuln_unreported_count = _tot - _rep
+                        _db.commit()
+                finally:
+                    _db.close()
+            except Exception:
+                pass
+            self.graph_store.update_task_graph_node(
+                node_id,
+                findings_count=n,
+                primary_session_relpath=session_relpath,
+            )
         session_status = "cancelled" if self._cancel_requested() else "done"
-        self.graph_store.update_task_graph_session(
-            session_relpath,
-            node_id=node_id,
-            status=session_status,
-            ended_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-        )
+        if self._graph_store_ready():
+            self.graph_store.update_task_graph_session(
+                session_relpath,
+                node_id=node_id,
+                status=session_status,
+                ended_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            )
         return n
 
     def _report_finding_to_intake(self, finding_id: str, rec: VulnFindingRecord,
@@ -1033,11 +1047,12 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
         """回写 report_status/case_id + 发事件 + 记日志。"""
         status = str(res.get("status") or "")
         case_id = str(res.get("case_id") or res.get("report_id") or "")
-        try:
-            self.graph_store.update_finding_report_status(
-                finding_id, status=status, case_id=case_id)
-        except Exception:
-            logger.debug("v2 update_finding_report_status failed for %s", finding_id, exc_info=True)
+        if self._graph_store_ready():
+            try:
+                self.graph_store.update_finding_report_status(
+                    finding_id, status=status, case_id=case_id)
+            except Exception:
+                logger.debug("v2 update_finding_report_status failed for %s", finding_id, exc_info=True)
         if status == "reported":
             logger.info("v2 intake reported finding %s (case_id=%s)", finding_id, case_id)
             self.on_event("vuln_intake_reported", finding_id=finding_id,
