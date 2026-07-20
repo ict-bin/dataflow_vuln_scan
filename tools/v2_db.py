@@ -190,16 +190,15 @@ def _mysql_is_indexing(rel_file: str) -> bool:
 
 def _find_func(name: str) -> dict | None:
     """查函数库, 支持短名后缀匹配 (C++ Class::Method)。"""
+    # MySQL 优先
+    mrows = _mysql_query_functions(name)
+    if mrows:
+        return mrows[0]
     rows = _query("functions.db", "SELECT * FROM functions WHERE name = ?", (name,))
     if rows:
         return rows[0]
     rows = _query("functions.db", "SELECT * FROM functions WHERE name LIKE ?", (f"%{name}",))
-    if rows:
-        return rows[0]
-    # MySQL fallback
-    mrows = _mysql_query_functions(name)
-    return mrows[0] if mrows else None
-
+    return rows[0] if rows else None
 
 def _read_body(func: dict) -> str:
     """从原源文件按 start_line/end_line 读取函数体, 带行号前缀。"""
@@ -495,19 +494,18 @@ def _print_prefix_candidates(name: str, src_root) -> None:
 
 def cmd_taints(func_name: str) -> None:
     """查污点库: 返回函数的污点变量。"""
-    rows = _query("taints.db", "SELECT * FROM taints WHERE function = ?", (func_name,))
+    # MySQL 优先
+    rows = _mysql_query_taints(func_name)
     if not rows:
-        # 尝试模糊匹配
+        rows = _query("taints.db", "SELECT * FROM taints WHERE function = ?", (func_name,))
+    if not rows:
         rows = _query("taints.db", "SELECT * FROM taints WHERE function LIKE ?", (f"%{func_name}",))
     if not rows:
-        # 前导下划线 fallback
         alt = func_name[1:] if func_name.startswith("_") else "_" + func_name
         if alt != func_name and len(alt) >= 2:
             rows = _query("taints.db", "SELECT * FROM taints WHERE function = ?", (alt,))
             if rows:
                 log.info("taints underscore fallback: %s -> %s", func_name, alt)
-    if not rows:
-        rows = _mysql_query_taints(func_name)
     if rows:
         for r in rows:
             print(f"taint: {r['name']} (signature: {r['signature']})")
@@ -530,6 +528,11 @@ def _print_props(rows: list[dict]) -> None:
 def cmd_propagations(func_name: str) -> None:
     """查传播库: 返回函数的传播路径。"""
     # 先查 functions.db 拿 func_id, 再查 propagations.db (两库分离, 不能跨库子查询)
+    # MySQL 优先: 直接查 propagations
+    mrows = _mysql_query_propagations(func_name)
+    if mrows:
+        _print_props(mrows)
+        return
     func_rows = _query("functions.db", "SELECT func_id FROM functions WHERE name = ?", (func_name,))
     if not func_rows:
         func_rows = _query("functions.db", "SELECT func_id FROM functions WHERE name LIKE ?", (f"%{func_name}",))
@@ -541,22 +544,11 @@ def cmd_propagations(func_name: str) -> None:
             if func_rows:
                 log.info("propagations underscore fallback: %s -> %s", func_name, alt)
     if not func_rows:
-        # MySQL fallback
-        mrows = _mysql_query_propagations(func_name)
-        if mrows:
-            _print_props(mrows)
-            return
         print(f"NOT_FOUND: 函数 '{func_name}' 在函数库中未找到。")
         return
     func_ids = [r["func_id"] for r in func_rows]
     placeholders = ",".join("?" * len(func_ids))
     rows = _query("propagations.db", f"SELECT * FROM propagations WHERE source_func_id IN ({placeholders})", tuple(func_ids))
-    if not rows:
-        # MySQL fallback
-        mrows = _mysql_query_propagations(func_name)
-        if mrows:
-            _print_props(mrows)
-            return
     if rows:
         for r in rows:
             print(f"propagation: {r['source_taint_name']} → {r['target_taint_name']}")
@@ -570,9 +562,10 @@ def cmd_propagations(func_name: str) -> None:
 
 def cmd_orchestration(func_name: str) -> None:
     """查编排库: 返回调用链。"""
-    rows = _query("orchestration.db", "SELECT * FROM orchestration WHERE source_function = ? OR target_function = ?", (func_name, func_name))
+    # MySQL 优先
+    rows = _mysql_query_orchestration(func_name)
     if not rows:
-        rows = _mysql_query_orchestration(func_name)
+        rows = _query("orchestration.db", "SELECT * FROM orchestration WHERE source_function = ? OR target_function = ?", (func_name, func_name))
     if rows:
         for r in rows:
             print(f"edge: {r['source_function']} → {r['target_function']}")

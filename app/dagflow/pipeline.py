@@ -26,6 +26,10 @@ class FuncIndex:
 
     def get_by_name(self, name: str):
         """name (含类限定) -> FunctionRecord|None。"""
+        # MySQL 优先
+        if self._mysql:
+            recs = self._mysql.read_functions(name)
+            if recs: return recs[0]
         if not self.db.is_file():
             return None
         from ..dataflow_v2.models import FunctionRecord
@@ -35,24 +39,18 @@ class FuncIndex:
             rows = conn.execute(
                 "SELECT func_id,file,name,signature,start_line,end_line,description "
                 "FROM functions WHERE name=?", (name,)).fetchall()
-            if rows:
-                return self._row_to_rec(rows[0])
-            # MySQL fallback
-            if self._mysql:
-                recs = self._mysql.read_functions(name)
-                if recs:
-                    from ..dataflow_v2.models import FunctionRecord
-                    return recs[0]
-            return self._ondemand(name)
+            return self._row_to_rec(rows[0]) if rows else self._ondemand(name)
         except sqlite3.Error:
             return None
         finally:
             conn.close()
 
     def get_by_id(self, func_id: str):
+        # MySQL 优先
+        if self._mysql:
+            rec = self._mysql.read_function(func_id)
+            if rec: return rec
         if not self.db.is_file():
-            if self._mysql:
-                return self._mysql.read_function(func_id)
             return None
         conn = sqlite3.connect(str(self.db))
         conn.row_factory = sqlite3.Row
@@ -60,11 +58,7 @@ class FuncIndex:
             rows = conn.execute(
                 "SELECT func_id,file,name,signature,start_line,end_line,description "
                 "FROM functions WHERE func_id=?", (func_id,)).fetchall()
-            if rows:
-                return self._row_to_rec(rows[0])
-            if self._mysql:
-                return self._mysql.read_function(func_id)
-            return None
+            return self._row_to_rec(rows[0]) if rows else None
         except sqlite3.Error:
             return None
         finally:

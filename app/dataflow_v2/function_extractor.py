@@ -179,16 +179,20 @@ def ensure_file_indexed(source_root: str, rel_file: str, store: DataflowStore) -
     """
     existing = [f for f in store.list_functions() if f.file == rel_file]
     # 检查是否正在被另一进程索引
-    is_indexing = store._q("functions", "SELECT 1 FROM indexing_files WHERE file_path=?", (rel_file,))
-    if not is_indexing and store._mysql:
+    # MySQL 优先: 查 indexing 状态
+    if store._mysql:
         is_indexing = [{}] if store._mysql.read_is_indexing(rel_file) else []
+    else:
+        is_indexing = store._q("functions", "SELECT 1 FROM indexing_files WHERE file_path=?", (rel_file,))
     if is_indexing:
         # 另一进程正在索引: 不重复索引, 但告知调用方状态
         return "indexing"
     if existing and not is_indexing:
         return "indexed"  # 已完整索引
+    # MySQL 优先: 查是否已索引
+    if store._mysql and store._mysql.read_is_indexed(rel_file) and not existing:
+        return "indexed"
     if not existing and store._mysql and store._mysql.read_is_indexed(rel_file):
-        # MySQL 说已索引但 SQLite 没有 (新 pod)
         return "indexed"
     # 标记为正在索引
     import time

@@ -279,12 +279,11 @@ class DataflowStore:
             except Exception: pass
 
     def get_function(self, func_id: str) -> FunctionRecord | None:
-        row = self._q("functions", "SELECT * FROM functions WHERE func_id=?", (func_id,))
-        if row:
-            return _row_to_function(row[0])
         if self._mysql:
-            return self._mysql.read_function(func_id)
-        return None
+            rec = self._mysql.read_function(func_id)
+            if rec: return rec
+        row = self._q("functions", "SELECT * FROM functions WHERE func_id=?", (func_id,))
+        return _row_to_function(row[0]) if row else None
 
     def find_function(self, name: str, file: str = "") -> FunctionRecord | None:
         """按名查找函数。C++ 方法: LLM 报短名 (ReadDataTask), 库存限定名
@@ -303,6 +302,10 @@ class DataflowStore:
         一旦某一层有命中, 仅返回该层结果, 不再混入后续回退层, 避免把
         精确匹配和宽松匹配揉成一锅。
         """
+        # MySQL 优先
+        if self._mysql:
+            mrecs = self._mysql.read_functions(name, file)
+            if mrecs: return mrecs
         seen: set[str] = set()
 
         def _rows(sql: str, args: tuple) -> list[FunctionRecord]:
@@ -324,8 +327,6 @@ class DataflowStore:
         )
         if exact:
             return exact
-        if self._mysql:
-            return self._mysql.read_functions(name, file)
 
         tail = ""
         if "::" in name:
@@ -353,17 +354,14 @@ class DataflowStore:
             "SELECT * FROM functions WHERE name LIKE ? AND file=? ORDER BY start_line",
             (suf, file),
         )
-        if not result and self._mysql:
-            return self._mysql.read_functions(name, file)
         return result
 
     def list_functions(self) -> list[FunctionRecord]:
-        rows = self._q("functions", "SELECT * FROM functions")
-        if rows:
-            return [_row_to_function(r) for r in rows]
         if self._mysql:
-            return self._mysql.read_list_functions()
-        return []
+            recs = self._mysql.read_list_functions()
+            if recs: return recs
+        rows = self._q("functions", "SELECT * FROM functions")
+        return [_row_to_function(r) for r in rows] if rows else []
 
     # ── include 索引 (C 作用域) ────────────────────────────────────────
     def add_include(self, header: str, file: str) -> None:
@@ -376,12 +374,11 @@ class DataflowStore:
 
     def get_files_including(self, header: str) -> list[str]:
         """查找所有传递性 include 了指定 header 的 .c/.cpp 文件。"""
-        rows = self._q("functions", "SELECT file FROM include_index WHERE header=?", (header,))
-        if rows:
-            return [r["file"] for r in rows]
         if self._mysql:
-            return self._mysql.read_files_including(header)
-        return []
+            files = self._mysql.read_files_including(header)
+            if files: return files
+        rows = self._q("functions", "SELECT file FROM include_index WHERE header=?", (header,))
+        return [r["file"] for r in rows] if rows else []
 
     # ── class 继承图 (C++ 作用域) ──────────────────────────────────────
     def add_class(self, class_name: str, bases: list[str], file: str = "") -> None:
@@ -404,12 +401,11 @@ class DataflowStore:
 
     def get_bases(self, class_name: str) -> list[str]:
         import json
-        rows = self._q("functions", "SELECT bases FROM class_hierarchy WHERE class_name=?", (class_name,))
-        if rows:
-            return json.loads(rows[0]["bases"] or "[]")
         if self._mysql:
-            return self._mysql.read_bases(class_name)
-        return []
+            bases = self._mysql.read_bases(class_name)
+            if bases: return bases
+        rows = self._q("functions", "SELECT bases FROM class_hierarchy WHERE class_name=?", (class_name,))
+        return json.loads(rows[0]["bases"] or "[]") if rows else []
 
     def get_all_ancestors(self, class_name: str) -> list[str]:
         """传递闭包: class → 所有祖先类 (含间接继承)。"""
@@ -431,9 +427,10 @@ class DataflowStore:
         # 反向遍历: 找所有 bases 含 class_name 的类
         import json
         visited = {class_name}
+        if self._mysql:
+            descs = self._mysql.read_all_descendants(class_name)
+            if descs: return descs
         rows = self._q("functions", "SELECT class_name, bases FROM class_hierarchy")
-        if not rows and self._mysql:
-            return self._mysql.read_all_descendants(class_name)
         changed = True
         while changed:
             changed = False
@@ -454,10 +451,15 @@ class DataflowStore:
             rows = self._q("functions",
                            "SELECT class_name FROM class_members WHERE class_name=? AND member_name=?",
                            (cls, member_name))
+        if self._mysql:
+            result = self._mysql.read_member_declaring_class(class_name, member_name)
+            if result: return result
+        for cls in candidates:
+            rows = self._q("functions",
+                           "SELECT class_name FROM class_members WHERE class_name=? AND member_name=?",
+                           (cls, member_name))
             if rows:
                 return cls
-        if self._mysql:
-            return self._mysql.read_member_declaring_class(class_name, member_name)
         return None
 
     def get_class_scope_methods(self, class_name: str, member_name: str = "") -> list[str]:
@@ -471,6 +473,9 @@ class DataflowStore:
                 declaring_class = class_name
         else:
             declaring_class = class_name
+        if self._mysql:
+            methods = self._mysql.read_class_scope_methods(class_name, member_name)
+            if methods: return methods
         # 声明类 + 所有派生类
         classes = {declaring_class} | set(self.get_all_descendants(declaring_class))
         # 查函数名以 ClassName:: 开头的
@@ -479,19 +484,16 @@ class DataflowStore:
             like_pattern = f"{cls}::%"
             rows = self._q("functions", "SELECT name FROM functions WHERE name LIKE ?", (like_pattern,))
             result.extend(r["name"] for r in rows)
-        if not result and self._mysql:
-            return self._mysql.read_class_scope_methods(class_name, member_name)
         return result
 
     def get_functions_with_type_in_signature(self, type_name: str) -> list[str]:
         """查找签名中包含指定类型的函数 (用于 C struct 字段作用域)。"""
+        if self._mysql:
+            names = self._mysql.read_functions_with_type_in_signature(type_name)
+            if names: return names
         like_pattern = f"%{type_name}%"
         rows = self._q("functions", "SELECT name FROM functions WHERE signature LIKE ?", (like_pattern,))
-        if rows:
-            return [r["name"] for r in rows]
-        if self._mysql:
-            return self._mysql.read_functions_with_type_in_signature(type_name)
-        return []
+        return [r["name"] for r in rows] if rows else []
 
     def add_processed_taint(self, func_id: str, pt: ProcessedTaint) -> None:
         """写入 processed_taint (INSERT OR IGNORE, PRIMARY KEY 去重)。"""
@@ -506,14 +508,30 @@ class DataflowStore:
             except Exception: pass
 
     def try_reserve_processed_taint(self, func_id: str, pt: ProcessedTaint) -> bool:
-        """分析前预留占位 (双检锁防并发重复分析)。
+        """分析前预留占位 (MySQL 优先原子占位, SQLite 为本地缓存)。
 
-        去重键: (func_id, taint_signature) — 不依赖 pre_validation_signature。
-        先查是否已有记录; 有则跳过 (return False); 无则 INSERT 占位。
-        analyze 失败时 delete 占位 (可重试)。
+        去重键: (func_id, taint_signature)。MySQL INSERT IGNORE 是跨 worker
+        原子操作; SQLite 做本地缓存。analyze 失败时 delete 占位 (可重试)。
         """
         ts = _norm_sig(pt.taint_signature or "")
         pvs = pt.pre_validation_signature or ""
+        tp_json = json.dumps(pt.taint_params, ensure_ascii=False)
+        # MySQL 优先: 跨 worker 原子占位
+        if self._mysql:
+            try:
+                reserved = self._mysql.try_reserve_processed_taint(
+                    func_id, ts, tp_json, pt.sessions_path)
+                if reserved:
+                    # 写 SQLite 本地缓存
+                    with self._locks["functions"]:
+                        self._conns["functions"].execute(
+                            "INSERT OR IGNORE INTO processed_taints (func_id, taint_signature, pre_validation_signature, taint_params, sessions_path) VALUES (?,?,?,?,?)",
+                            (func_id, ts, pvs, tp_json, pt.sessions_path))
+                        self._conns["functions"].commit()
+                return reserved
+            except Exception:
+                pass  # MySQL 失败, 回退 SQLite
+        # SQLite fallback (单 pod 内原子)
         with self._locks["functions"]:
             row = self._conns["functions"].execute(
                 "SELECT 1 FROM processed_taints WHERE func_id=? AND taint_signature=? LIMIT 1",
@@ -522,14 +540,9 @@ class DataflowStore:
                 return False
             cur = self._conns["functions"].execute(
                 "INSERT OR IGNORE INTO processed_taints (func_id, taint_signature, pre_validation_signature, taint_params, sessions_path) VALUES (?,?,?,?,?)",
-                (func_id, ts, pvs, json.dumps(pt.taint_params, ensure_ascii=False), pt.sessions_path))
+                (func_id, ts, pvs, tp_json, pt.sessions_path))
             self._conns["functions"].commit()
-            reserved = cur.rowcount == 1
-            if reserved and self._mysql:
-                try: self._mysql.add_processed_taint(func_id, ts,
-                    json.dumps(pt.taint_params, ensure_ascii=False), pt.sessions_path)
-                except Exception: pass
-            return reserved
+            return cur.rowcount == 1
 
     def delete_processed_taint(self, func_id: str, taint_signature: str,
                                pre_validation_signature: str = "") -> None:
@@ -549,6 +562,9 @@ class DataflowStore:
         pre_validation_signature 参数保留兼容签名但不参与查询。
         """
         ts = _norm_sig(taint_signature)
+        if self._mysql:
+            pt = self._mysql.read_processed_taint(func_id, ts)
+            if pt: return pt
         rows = self._q("functions",
             "SELECT taint_signature, pre_validation_signature, taint_params, sessions_path FROM processed_taints WHERE func_id=? AND taint_signature=? LIMIT 1",
             (func_id, ts))
@@ -558,8 +574,6 @@ class DataflowStore:
                                    taint_signature=r["taint_signature"], pre_validations=[],
                                    pre_validation_signature=r["pre_validation_signature"],
                                    sessions_path=r["sessions_path"])
-        if self._mysql:
-            return self._mysql.read_processed_taint(func_id, ts)
         return None
 
     # ── 污点库 ──────────────────────────────────────────────────────────────
@@ -584,12 +598,11 @@ class DataflowStore:
         return _row_to_taint(row[0]) if row else None
 
     def list_taints_in_function(self, func_id: str) -> list[TaintRecord]:
-        rows = self._q("taints", "SELECT * FROM taints WHERE func_id=?", (func_id,))
-        if rows:
-            return [_row_to_taint(r) for r in rows]
         if self._mysql:
-            return self._mysql.read_taints_in_function(func_id)
-        return []
+            recs = self._mysql.read_taints_in_function(func_id)
+            if recs: return recs
+        rows = self._q("taints", "SELECT * FROM taints WHERE func_id=?", (func_id,))
+        return [_row_to_taint(r) for r in rows] if rows else []
 
     def add_propagation_to_taint(self, taint_id: str, prop_id: str) -> None:
         t = self.get_taint(taint_id)
@@ -635,20 +648,18 @@ class DataflowStore:
             except Exception: logger.debug("mysql upsert_propagation failed", exc_info=True)
 
     def get_propagation(self, prop_id: str) -> PropagationRecord | None:
-        row = self._q("propagations", "SELECT * FROM propagations WHERE prop_id=?", (prop_id,))
-        if row:
-            return _row_to_propagation(row[0])
         if self._mysql:
-            return self._mysql.read_propagation(prop_id)
-        return None
+            rec = self._mysql.read_propagation(prop_id)
+            if rec: return rec
+        row = self._q("propagations", "SELECT * FROM propagations WHERE prop_id=?", (prop_id,))
+        return _row_to_propagation(row[0]) if row else None
 
     def list_propagations_from(self, func_id: str) -> list[PropagationRecord]:
-        rows = self._q("propagations", "SELECT * FROM propagations WHERE source_func_id=?", (func_id,))
-        if rows:
-            return [_row_to_propagation(r) for r in rows]
         if self._mysql:
-            return self._mysql.read_propagations_from(func_id)
-        return []
+            recs = self._mysql.read_propagations_from(func_id)
+            if recs: return recs
+        rows = self._q("propagations", "SELECT * FROM propagations WHERE source_func_id=?", (func_id,))
+        return [_row_to_propagation(r) for r in rows] if rows else []
 
     # ── 编排库 ──────────────────────────────────────────────────────────────
     def upsert_edge(self, edge: OrchestrationEdge) -> None:
@@ -675,20 +686,18 @@ class DataflowStore:
         self._exec("orchestration", "UPDATE orchestration SET status=? WHERE edge_id=?", (status, edge_id))
 
     def list_path_edges(self, path_id: str) -> list[OrchestrationEdge]:
-        rows = self._q("orchestration", "SELECT * FROM orchestration WHERE path_id=? ORDER BY edge_order", (path_id,))
-        if rows:
-            return [_row_to_edge(r) for r in rows]
         if self._mysql:
-            return self._mysql.read_path_edges(path_id)
-        return []
+            recs = self._mysql.read_path_edges(path_id)
+            if recs: return recs
+        rows = self._q("orchestration", "SELECT * FROM orchestration WHERE path_id=? ORDER BY edge_order", (path_id,))
+        return [_row_to_edge(r) for r in rows] if rows else []
 
     def pending_edges(self) -> list[OrchestrationEdge]:
-        rows = self._q("orchestration", "SELECT * FROM orchestration WHERE status='pending' ORDER BY depth, edge_order")
-        if rows:
-            return [_row_to_edge(r) for r in rows]
         if self._mysql:
-            return self._mysql.read_pending_edges()
-        return []
+            recs = self._mysql.read_pending_edges()
+            if recs: return recs
+        rows = self._q("orchestration", "SELECT * FROM orchestration WHERE status='pending' ORDER BY depth, edge_order")
+        return [_row_to_edge(r) for r in rows] if rows else []
 
 
 # ── row → record 反序列化 ────────────────────────────────────────────────────

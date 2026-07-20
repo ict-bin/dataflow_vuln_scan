@@ -355,6 +355,18 @@ class SharedMysqlStore(MysqlReadMixin):
                  "tid": self.task_id, "tp": taint_params, "sp": sessions_path})
             conn.commit()
 
+    def try_reserve_processed_taint(self, func_id: str, taint_sig: str,
+                                    taint_params: str = "[]", sessions_path: str = "") -> bool:
+        """跨 worker 原子占位 (INSERT IGNORE, rowcount=1=占位成功)。"""
+        with self._engine.connect() as conn:
+            result = conn.execute(sa_text(
+                "INSERT IGNORE INTO processed_taints (source_dir_id,func_id,taint_signature,task_id,taint_params,sessions_path) "
+                "VALUES (:sid,:fid,:ts,:tid,:tp,:sp)"),
+                {"sid": self.source_dir_id, "fid": func_id, "ts": taint_sig,
+                 "tid": self.task_id, "tp": taint_params, "sp": sessions_path})
+            conn.commit()
+            return result.rowcount == 1
+
     def delete_processed_taint(self, func_id: str, taint_sig: str):
         with self._engine.connect() as conn:
             conn.execute(sa_text(

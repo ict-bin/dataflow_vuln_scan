@@ -212,13 +212,27 @@ class DagflowStore:
                     row = conn.execute(sa_text(
                         "SELECT 1 FROM dag_processed_taints WHERE source_dir_id=:sid AND func_id=:fid AND taint_signature=:ts AND task_id=:tid"),
                         {"sid": self._mysql.source_dir_id, "fid": func_id, "ts": taint_signature, "tid": self._mysql.task_id}).fetchone()
-                    return row is not None
+                    if row is not None: return True
             except Exception:
                 pass
-        return False
+        r = self._q("SELECT 1 FROM dag_processed_taints WHERE func_id=? AND taint_signature=?",
+                    (func_id, taint_signature))
+        return bool(r)
 
     def try_reserve(self, func_id: str, taint_signature: str) -> bool:
-        """分析前占位 (INSERT OR IGNORE, PK 去重)。rowcount=1=本线程占位成功; 0=并发 peer 已占。"""
+        """分析前占位 (MySQL 优先原子, SQLite 本地缓存)。"""
+        if self._mysql:
+            try:
+                reserved = self._mysql.dag_try_reserve(func_id, taint_signature)
+                if reserved:
+                    with self._lock:
+                        self._conn.execute(
+                            "INSERT OR IGNORE INTO dag_processed_taints (func_id, taint_signature) VALUES (?,?)",
+                            (func_id, taint_signature))
+                        self._conn.commit()
+                return reserved
+            except Exception:
+                pass
         with self._lock:
             cur = self._conn.execute(
                 "INSERT OR IGNORE INTO dag_processed_taints (func_id, taint_signature) VALUES (?,?)",
@@ -238,11 +252,6 @@ class DagflowStore:
     # ── 跨函数查询 (dag_tools 用) ────────────────────────────────────────
     def get_callers(self, func_id: str) -> list[tuple[str, str]]:
         """反查哪些 DAG 有 callee 边指向本 func (跨函数反向)。返回 [(caller_func_id, taint_sig)]。"""
-        rows = self._q(
-            "SELECT DISTINCT func_id, taint_signature FROM taint_dag_edges "
-            "WHERE kind='callee' AND sink_ref=?", (func_id,))
-        if rows:
-            return [(r["func_id"], r["taint_signature"]) for r in rows]
         if self._mysql:
             from sqlalchemy import text as sa_text
             try:
@@ -251,16 +260,16 @@ class DagflowStore:
                         "SELECT DISTINCT func_id, taint_signature FROM dag_edges "
                         "WHERE source_dir_id=:sid AND kind='callee' AND sink_ref=:fid AND task_id=:tid"),
                         {"sid": self._mysql.source_dir_id, "fid": func_id, "tid": self._mysql.task_id}).fetchall()
-                    return [(r[0], r[1]) for r in mrows]
+                    if mrows: return [(r[0], r[1]) for r in mrows]
             except Exception:
                 pass
-        return []
+        rows = self._q(
+            "SELECT DISTINCT func_id, taint_signature FROM taint_dag_edges "
+            "WHERE kind='callee' AND sink_ref=?", (func_id,))
+        return [(r["func_id"], r["taint_signature"]) for r in rows] if rows else []
 
     def list_analyzed(self) -> list[tuple[str, str]]:
         """所有已分析的 (func_id, taint_signature)。"""
-        rows = self._q("SELECT func_id, taint_signature FROM dag_processed_taints")
-        if rows:
-            return [(r["func_id"], r["taint_signature"]) for r in rows]
         if self._mysql:
             from sqlalchemy import text as sa_text
             try:
@@ -268,19 +277,14 @@ class DagflowStore:
                     mrows = conn.execute(sa_text(
                         "SELECT func_id, taint_signature FROM dag_processed_taints WHERE source_dir_id=:sid AND task_id=:tid"),
                         {"sid": self._mysql.source_dir_id, "tid": self._mysql.task_id}).fetchall()
-                    return [(r[0], r[1]) for r in mrows]
+                    if mrows: return [(r[0], r[1]) for r in mrows]
             except Exception:
                 pass
-        return []
+        rows = self._q("SELECT func_id, taint_signature FROM dag_processed_taints")
+        return [(r["func_id"], r["taint_signature"]) for r in rows] if rows else []
 
     def list_dag_outgoing(self, func_id: str, taint_signature: str) -> list[dict]:
         """本 DAG 的传出边 (callee/return/extern/container, 用于挖掘触发判定)。"""
-        rows = self._q(
-            "SELECT * FROM taint_dag_edges WHERE func_id=? AND taint_signature=? "
-            "AND kind IN ('callee','return','extern','container')",
-            (func_id, taint_signature))
-        if rows:
-            return [dict(r) for r in rows]
         if self._mysql:
             from sqlalchemy import text as sa_text
             try:
@@ -289,7 +293,11 @@ class DagflowStore:
                         "SELECT * FROM dag_edges WHERE source_dir_id=:sid AND func_id=:fid AND taint_signature=:ts AND task_id=:tid "
                         "AND kind IN ('callee','return','extern','container')"),
                         {"sid": self._mysql.source_dir_id, "fid": func_id, "ts": taint_signature, "tid": self._mysql.task_id}).fetchall()
-                    return [dict(r._mapping) for r in mrows]
+                    if mrows: return [dict(r._mapping) for r in mrows]
             except Exception:
                 pass
-        return []
+        rows = self._q(
+            "SELECT * FROM taint_dag_edges WHERE func_id=? AND taint_signature=? "
+            "AND kind IN ('callee','return','extern','container')",
+            (func_id, taint_signature))
+        return [dict(r) for r in rows] if rows else []
