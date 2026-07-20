@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import threading
 from pathlib import Path
@@ -26,6 +27,8 @@ from .models import (
     FunctionRecord, OrchestrationEdge, ProcessedTaint, PropagationRecord,
     TaintParamInfo, TaintRecord, Validation, _norm_sig, _sha,
 )
+
+logger = logging.getLogger("dvs.dataflow_v2.store")
 
 
 def _validation_from_dict(v: dict) -> Validation:
