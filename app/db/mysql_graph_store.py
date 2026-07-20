@@ -203,19 +203,23 @@ class MysqlGraphStore:
         run_root = str(run_dict.get("run_root") or "")
         epoch = str(run_dict.get("epoch") or "")
 
-        # MySQL TEXT columns are nullable; replace None with empty defaults
-        # to match SQLite's NOT NULL DEFAULT '' behavior for pydantic models.
-        _TEXT_DEFAULTS = {"{}": ("extra_json",), "[]": ("validations_json", "actual_args_json"), "": tuple()
-        }
-        _DEFAULT_MAP = {}
-        for default, cols in _TEXT_DEFAULTS.items():
-            for c in cols:
-                _DEFAULT_MAP[c] = default
+        # MySQL TEXT columns are nullable; replace None with appropriate defaults
+        # to match SQLite's NOT NULL DEFAULT behavior for pydantic models.
+        _JSON_DEFAULTS = {"extra_json": "{}", "tracker_result_json": "{}",
+                         "validations_json": "[]", "actual_args_json": "[]"}
+        _KEEP_NONE = {"mtime", "confidence", "call_line", "started_at",
+                       "ended_at", "created_at", "updated_at",
+                       "finished_at", "started_at", "finished_at"}
         for row_list in (nodes, edges, sessions, findings):
             for row in row_list:
                 for key in list(row.keys()):
                     if row[key] is None:
-                        row[key] = _DEFAULT_MAP.get(key, "")
+                        if key in _KEEP_NONE:
+                            pass  # leave as None (pydantic Optional handles it)
+                        elif key in _JSON_DEFAULTS:
+                            row[key] = _JSON_DEFAULTS[key]
+                        else:
+                            row[key] = ""  # str fields
 
         node_by_id = {str(n.get("node_id") or ""): n for n in nodes}
         edges_by_source: dict[str, list[dict]] = {}
