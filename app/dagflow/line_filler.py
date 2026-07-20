@@ -82,12 +82,14 @@ def _find_if_condition(fdef: Any, start: int, end: int, source: bytes) -> str:
     return ""
 
 
-def _find_call_at_line(fdef: Any, start: int, end: int, source: bytes) -> tuple[str, list[str]] | None:
+def _find_call_at_line(fdef: Any, start: int, end: int, source: bytes,
+                         expected_callee: str = "") -> tuple[str, list[str]] | None:
     """在函数体 AST 找 start行(到end行) 的 CallExpression, 返回 (callee_name, args)。
 
     args 是实参表达式文本列表。
+    如果 expected_callee 非空, 优先选 callee 名匹配的 CallExpression (解决同行嵌套调用)。
     """
-    best = None
+    all_hits = []
     for n in _walk(fdef):
         if n.type in ("call_expression", "CALL_EXPRESSION"):
             nl = n.start_point[0] + 1
@@ -97,7 +99,6 @@ def _find_call_at_line(fdef: Any, start: int, end: int, source: bytes) -> tuple[
                 if fn_node is not None:
                     callee = _node_text(fn_node, source)
                 args = []
-                # CallExpr 的 arguments: function 子节点之后的子节点 (排除 function 和括号)
                 found_fn = False
                 for c in n.children:
                     ct = c.type
@@ -111,10 +112,19 @@ def _find_call_at_line(fdef: Any, start: int, end: int, source: bytes) -> tuple[
                         break
                     if found_fn and ct not in ("(", ")", ","):
                         args.append(_node_text(c, source))
-                if best is None or abs(nl - start) < abs(best[2] - start):
-                    best = (callee, args, nl)
-    if best is None:
+                all_hits.append((callee, args, nl))
+    if not all_hits:
         return None
+    # 优先选 callee 名匹配的 (解决同行嵌套调用)
+    if expected_callee:
+        for callee, args, nl in all_hits:
+            if callee and (callee in expected_callee or expected_callee in callee):
+                return (callee, args)
+    # 回退: 选最接近 start 的
+    best = all_hits[0]
+    for hit in all_hits[1:]:
+        if abs(hit[2] - start) < abs(best[2] - start):
+            best = hit
     return (best[0], best[1])
 
 
@@ -228,7 +238,7 @@ def fill_lines(dag: TaintDAG, func, source_root: str, func_lookup=None) -> None:
             # param_taints: 从 tainted_args + CallExpr args + callee 签名
             if e.kind == "callee" and e.tainted_args and e.line:
                 sl, el = (e.line, e.line_end or e.line)
-                call_info = _find_call_at_line(fdef, sl, el, src)
+                call_info = _find_call_at_line(fdef, sl, el, src, expected_callee=e.callee)
                 if call_info is not None:
                     call_callee, call_args = call_info
                     # 校验 LLM 输出的 callee 名与 AST 一致

@@ -163,6 +163,17 @@ class DagflowOrchestrator:
                                   target_taint=param, origin_func=dag.func_id,
                                   origin_node=node.id, depth=depth + 1,
                                   origin_edge=f"{node.id}->{e.to_node}"))
+        # Fallback: param_taints 为空但 tainted_args 非空 → 用 taint 直接 emit
+        if not e.param_taints and e.tainted_args:
+            for ta in e.tainted_args:
+                taint = str(ta.get("taint", "")).strip()
+                if taint and not taint.startswith("("):
+                    logger.info("emit callee item (fallback): target=%s taint=%s depth=%d",
+                                callee.func_id[:10], taint, depth + 1)
+                    self._wq.put(WorkItem(kind="callee", target_func=callee.func_id,
+                                          target_taint=taint, origin_func=dag.func_id,
+                                          origin_node=node.id, depth=depth + 1,
+                                          origin_edge=f"{node.id}->{e.to_node}"))
 
     def _emit_return(self, dag, node, e, caller_func_id: str = "", depth: int = 0) -> None:
         """return 边 -> 回传项 (caller_func_id, return_taint_sig)。
