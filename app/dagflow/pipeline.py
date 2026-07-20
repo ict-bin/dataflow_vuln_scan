@@ -134,6 +134,7 @@ class DagflowPipeline:
         from .mining_agent import MiningAgent
         from ..vuln_store import VulnScanStore
         from ..dataflow_v2.function_extractor import extract_file_functions
+        from .graph_recorder import GraphRecorder
 
         # _root_out_dir = epoch /tmp 路径 (symlink -> /tmp, 随 pod 消失)。
         # dagflow.db + vuln-scan.sqlite 放 NFS (持久, run/ 下), sessions/functions.db 留 epoch (与 V2 一致)。
@@ -181,11 +182,21 @@ class DagflowPipeline:
             except Exception as e:
                 logger.warning("diag write failed: %s", e)
 
+            # ── graph recorder (兼容前端 graph-view API) ──
+            vuln_db = nfs_run / "vuln-scan.sqlite"
+            vuln_store = VulnScanStore(vuln_db)
+            epoch_name = epoch_dir.name  # e.g. "0006"
+            graph_rec = GraphRecorder(vuln_store=vuln_store, task_id=task_id,
+                                      epoch=epoch_name, run_root=str(nfs_run),
+                                      root_function=root_name)
+            graph_rec.start_run()
+
             # ── 阶段 1: taint 跟踪 ──
             logger.info("[dagflow] PHASE 1 START: taint tracking, root=%s", root_name)
             analyzer = TaintAnalyzer(config=self.config, sessions_dir=sessions_dir,
                                       on_event=self.on_event, task_id=task_id,
-                                      func_lookup=func_index.get_by_name)
+                                      func_lookup=func_index.get_by_name,
+                                      graph_recorder=graph_rec)
             analyzer.cancel_event = self.cancel_event
 
             def analyze_fn(func, taint_sig, depth=0):
@@ -210,12 +221,14 @@ class DagflowPipeline:
             rf = ReaderFinder(config=self.config, source_root=self.source_root,
                               v2_db_dir=v2_db_dir, sessions_dir=sessions_dir,
                               task_id=task_id, on_event=self.on_event,
-                              cancel_event=self.cancel_event)
+                              cancel_event=self.cancel_event,
+                              graph_recorder=graph_rec)
             fr_ = FunctionResolver(config=self.config, source_root=self.source_root,
                                    v2_db_dir=v2_db_dir, sessions_dir=sessions_dir,
                                    task_id=task_id, on_event=self.on_event,
                                    cancel_event=self.cancel_event,
-                                   func_lookup_by_id=func_index.get_by_id)
+                                   func_lookup_by_id=func_index.get_by_id,
+                                   graph_recorder=graph_rec)
             dispatcher = TrackerDispatcher(
                 store=store, func_lookup=func_index.get_by_name,
                 on_enqueue=lambda fid, t: orch._wq.put(_make_callee_item(fid, t)),
@@ -227,7 +240,7 @@ class DagflowPipeline:
                 func_lookup=func_index.get_by_name, on_event=self.on_event,
                 n_workers=1,  # dagflow 串行 (大函数 LLM DAG 输出大, 并发 OOM 8Gi; mining 本就串行)
                 task_id=task_id, cancel_event=self.cancel_event,
-                tracker_dispatcher=dispatcher)
+                tracker_dispatcher=dispatcher, graph_recorder=graph_rec)
             orch._func_lookup_by_id = func_index.get_by_id
 
             taints = getattr(self.config, "taint_details", []) or [{"name": "auto"}]
@@ -244,12 +257,11 @@ class DagflowPipeline:
 
             # ── 阶段 2: 挖掘 (传出点就绪的 (func,taint)) ──
             logger.info("[dagflow] PHASE 2 START: vuln mining, candidates=%d", len(list(store.list_analyzed())))
-            vuln_db = nfs_run / "vuln-scan.sqlite"  # findings -> NFS (持久, 产出不随 pod 丢)
-            vuln_store = VulnScanStore(vuln_db)
             miner = MiningAgent(config=self.config, store=store, sessions_dir=sessions_dir,
                                 vuln_store=vuln_store, run_id=task_id,
                                 func_lookup=func_index.get_by_name,
-                                on_event=self.on_event, task_id=task_id)
+                                on_event=self.on_event, task_id=task_id,
+                                graph_recorder=graph_rec)
             miner.cancel_event = self.cancel_event
             total_findings = 0
             # 多轮: 跟踪产新 DAG 后传出点就绪状态变化; 简化为单轮 (跟踪完成后挖一轮)
@@ -267,6 +279,7 @@ class DagflowPipeline:
             logger.info("[dagflow] PHASE 2 DONE: findings=%d", total_findings)
             self._emit("v2_dagflow_phase", phase="mining_done", findings=total_findings, task_id=task_id)
             self._emit("task_end", task_id=task_id)
+            graph_rec.finish_run("passed")
             return TaskResult(
                 task_id=task_id, status=TaskStatus.PASSED, task=self.config.task,
                 analysis_status="dagflow_complete",

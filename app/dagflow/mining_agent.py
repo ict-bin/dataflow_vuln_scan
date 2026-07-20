@@ -38,7 +38,8 @@ class MiningAgent:
 
     def __init__(self, *, config: Any, store: DagflowStore, sessions_dir: Path,
                  vuln_store: Any, run_id: str, func_lookup: Any,
-                 on_event: Any = None, task_id: str = "") -> None:
+                 on_event: Any = None, task_id: str = "",
+                 graph_recorder: Any = None) -> None:
         self.config = config
         self.store = store
         self.sessions_dir = Path(sessions_dir)
@@ -46,6 +47,7 @@ class MiningAgent:
         self.run_id = run_id
         self.func_lookup = func_lookup
         self.on_event = on_event
+        self.graph_recorder = graph_recorder
         self.task_id = task_id
         self.source_root = getattr(config, "cwd", "") or getattr(config, "source_root", "")
         self._acfg = (config.workers.agents[0] if config.workers.agents else None)
@@ -97,6 +99,12 @@ class MiningAgent:
                                     node_id=node_id, func=func)
         logger.info("[dagflow-mine] DONE func=%s taint=%s duration=%.1fs findings=%d error=%s",
                     func.name, taint_sig, _time.time() - _t0, len(findings), (output.error or "")[:100])
+        # 记录挖掘会话
+        if self.graph_recorder:
+            self.graph_recorder.record_session(
+                session_path=sp, node_id=self.graph_recorder._node_id(func.func_id),
+                session_role="vuln", session_kind="mine",
+                status="done" if findings else "no_finding")
         if self.on_event:
             try:
                 self.on_event("v2_dagflow_mined", function=func.name, taint=taint_sig,

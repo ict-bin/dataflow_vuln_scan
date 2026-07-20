@@ -27,7 +27,8 @@ class DagflowOrchestrator:
                  func_lookup: Callable[[str], Any], on_event: Any = None,
                  n_workers: int = 4, task_id: str = "",
                  cancel_event: threading.Event | None = None,
-                 tracker_dispatcher: Any = None) -> None:
+                 tracker_dispatcher: Any = None,
+                 graph_recorder: Any = None) -> None:
         self.store = store
         self.analyze_fn = analyze_fn
         self.func_lookup = func_lookup
@@ -36,6 +37,7 @@ class DagflowOrchestrator:
         self.task_id = task_id
         self.cancel_event = cancel_event
         self.tracker_dispatcher = tracker_dispatcher  # P5: escape/indirect 调度
+        self.graph_recorder = graph_recorder
         self._wq: WorkQueue | None = None
 
     def run(self, root_func, root_taint: str) -> None:
@@ -146,6 +148,14 @@ class DagflowOrchestrator:
         callee = self.func_lookup(e.sink_ref)
         if callee is None:
             logger.info("callee NOT indexed (skip): sink_ref=%s depth=%d — on-demand 未找到", e.sink_ref, depth)
+            # 记录未索引边 (status=not_followed)
+            if self.graph_recorder:
+                self.graph_recorder.record_edge(
+                    edge_id=f"{dag.func_id[:10]}::{node.id}->{e.to_node}",
+                    source_func_id=dag.func_id, target_func_id="",
+                    source_func_name=dag.taint_signature, target_func_name=e.sink_ref,
+                    target_func_raw=e.sink_ref, edge_kind="external_callee",
+                    status="not_followed", call_line=e.line, depth=depth)
             return
         # 校验 callee 真实形参名 (从 signature 提取)
         real_params = _extract_params(getattr(callee, "signature", ""))
@@ -163,6 +173,16 @@ class DagflowOrchestrator:
                                   target_taint=param, origin_func=dag.func_id,
                                   origin_node=node.id, depth=depth + 1,
                                   origin_edge=f"{node.id}->{e.to_node}"))
+            # 记录边
+            if self.graph_recorder:
+                self.graph_recorder.record_edge(
+                    edge_id=f"{dag.func_id[:10]}::{node.id}->{e.to_node}",
+                    source_func_id=dag.func_id, target_func_id=callee.func_id,
+                    source_func_name=dag.taint_signature, target_func_name=callee.name,
+                    target_func_raw=e.sink_ref, source_file="",
+                    target_file=getattr(callee, 'file', ''), edge_kind="direct_call",
+                    status="discovered", call_line=e.line, source_taint=param,
+                    target_taint=param, depth=depth)
         # Fallback: param_taints 为空但 tainted_args 非空 → 用 taint 直接 emit
         if not e.param_taints and e.tainted_args:
             for ta in e.tainted_args:

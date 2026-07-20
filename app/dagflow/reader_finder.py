@@ -28,7 +28,7 @@ class ReaderFinder:
 
     def __init__(self, *, config: Any, source_root: str, v2_db_dir: Path,
                  sessions_dir: Path, task_id: str = "", on_event: Any = None,
-                 cancel_event: Any = None) -> None:
+                 cancel_event: Any = None, graph_recorder: Any = None) -> None:
         self.config = config
         self.source_root = source_root
         self.v2_db_dir = v2_db_dir
@@ -36,6 +36,7 @@ class ReaderFinder:
         self.task_id = task_id
         self.on_event = on_event
         self.cancel_event = cancel_event
+        self.graph_recorder = graph_recorder
         self._acfg = (config.workers.agents[0] if config.workers.agents else None)
 
     def _read_func_body(self, func_file: str, start: int, end: int) -> str:
@@ -124,4 +125,9 @@ class ReaderFinder:
                               readers=out, taints=escape_info.get("taints", []), task_id=self.task_id)
             except Exception:
                 pass
+        # 记录 track 会话
+        if self.graph_recorder:
+            self.graph_recorder.record_session(
+                session_path=sp, session_role="track", session_kind="reader_finder",
+                status="done" if out else "no_reader")
         return out

@@ -41,13 +41,15 @@ class TaintAnalyzer:
     """单函数单污点 DAG 分析 (LLM 输出行号, 脚本后处理)。"""
 
     def __init__(self, *, config: Any, sessions_dir: Path, on_event: Any = None,
-                 task_id: str = "", func_lookup=None) -> None:
+                 task_id: str = "", func_lookup=None,
+                 graph_recorder: Any = None) -> None:
         self.config = config
         self.sessions_dir = Path(sessions_dir)
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
         self.on_event = on_event
         self.task_id = task_id
         self.func_lookup = func_lookup
+        self.graph_recorder = graph_recorder
         self.source_root = getattr(config, "cwd", "") or getattr(config, "source_root", "")
         self._acfg = (config.workers.agents[0] if config.workers.agents else None)
         self._default_tools = getattr(config.workers, "default_tools", None)
@@ -86,6 +88,11 @@ class TaintAnalyzer:
                   "DVS_V2_DB_DIR": str(self.sessions_dir.parent / "dataflow-v2")}
         logger.info("[dagflow-taint] CALLING run_agent func=%s taint=%s session=%s",
                     func.name, taint_sig, sp[-60:])
+        # 记录节点 (discovered)
+        if self.graph_recorder:
+            self.graph_recorder.record_node(
+                func_id=func.func_id, func_name=func.name, file=func.file,
+                depth=getattr(self, "_cur_depth", 0), status="analyzing", analysis_status="pending")
         output = run_agent(
             prompt=prompt, model=self._acfg.model,
             tools=self._acfg.tools or self._default_tools or [],
@@ -118,6 +125,16 @@ class TaintAnalyzer:
         logger.info("[dagflow-taint] DONE func=%s taint=%s duration=%.1fs error=%s output_len=%d nodes=%d",
                     func.name, taint_sig, _time.time() - _t0, (output.error or "")[:100],
                     len(output.output or ""), len(dag.nodes))
+        # 记录节点 (done) + 会话
+        if self.graph_recorder:
+            self.graph_recorder.record_node(
+                func_id=func.func_id, func_name=func.name, file=func.file,
+                depth=getattr(self, "_cur_depth", 0), status="done",
+                analysis_status="done" if not dag.taint_failed else "failed")
+            self.graph_recorder.record_session(
+                session_path=sp, node_id=self.graph_recorder._node_id(func.func_id),
+                session_role="taint", session_kind=f"d{getattr(self, '_cur_depth', 0):02d}",
+                status="done")
         if self.on_event:
             try:
                 self.on_event("v2_dagflow_taint_done", function=func.name, taint=taint_sig,
