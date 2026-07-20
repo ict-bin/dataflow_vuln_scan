@@ -221,12 +221,16 @@ class SharedMysqlStore:
             # 先连默认库, 建目标库
             base = mysql_url.rsplit("/", 1)[0]  # 去掉 /dbname?charset=...
             # base 形如 mysql+pymysql://user:pass@host:port
-            admin_url = f"{base}/mysql?charset=utf8mb4"
-            admin_eng = create_engine(admin_url, pool_pre_ping=True, pool_recycle=3600)
-            with admin_eng.connect() as conn:
-                conn.execute(sa_text(f"CREATE DATABASE IF NOT EXISTS {db_name} DEFAULT CHARSET utf8mb4"))
-                conn.commit()
-            admin_eng.dispose()
+            # 预建库 (secflow 用户可能无 CREATE DATABASE 权限, 容错)
+            try:
+                admin_url = f"{base}/mysql?charset=utf8mb4"
+                admin_eng = create_engine(admin_url, pool_pre_ping=True, pool_recycle=3600)
+                with admin_eng.connect() as conn:
+                    conn.execute(sa_text(f"CREATE DATABASE IF NOT EXISTS {db_name} DEFAULT CHARSET utf8mb4"))
+                    conn.commit()
+                admin_eng.dispose()
+            except Exception:
+                logger.debug("CREATE DATABASE failed (secflow may lack privilege); trying direct connect")
             # 连目标库
             url = f"{base}/{db_name}?charset=utf8mb4"
             eng = create_engine(url, pool_size=3, max_overflow=5, pool_pre_ping=True, pool_recycle=3600)
