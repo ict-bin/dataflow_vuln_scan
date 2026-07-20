@@ -517,6 +517,54 @@ class RunAgentPromptFileTests(unittest.TestCase):
         self.assertEqual(0, count)
         self.assertEqual("high", captured["thinking_level"])
 
+    def test_dataflow_v2_infer_external_callees_always_writes_session(self):
+        from app.dataflow_v2.analysis import TaintAnalysisCallbacks
+        from app.dataflow_v2.models import FunctionRecord
+        from app.models import RoleConfig, TaskConfig
+
+        cfg = TaskConfig(
+            task="demo",
+            cwd="/tmp/source",
+            task_pi_dirs={"workers": "/tmp/runtime/workers"},
+            workers=RoleConfig(default_model="glm-5.2", agents=[{"model": "glm-5.2", "tools": ["read"]}]),
+        )
+        cb = TaintAnalysisCallbacks.__new__(TaintAnalysisCallbacks)
+        cb.cfg = cfg
+        cb.sessions_dir = Path(tempfile.mkdtemp())
+        cb.run_dir = Path(tempfile.mkdtemp())
+        cb.vuln_root = Path(tempfile.mkdtemp())
+        cb.vuln_root.mkdir(parents=True, exist_ok=True)
+        cb.cancel_event = None
+        cb.task_id = "dvs_test"
+        cb.run_id = "run_1"
+        cb.source_root = "/tmp/source"
+        cb.on_event = None
+
+        func = FunctionRecord(file="demo.c", name="demo", signature="void demo()", start_line=1, end_line=10)
+        props = [
+            SimpleNamespace(
+                target_function="open",
+                source_taint_name="request",
+                target_taint_name="fd",
+            )
+        ]
+        captured: dict[str, object] = {}
+
+        def fake_run_agent(*, session_file: str | None, **kwargs):
+            captured["session_file"] = session_file
+            result = runner.AgentResult()
+            result.output = '[{"function":"open","inferable":true,"return_taint":"fd","propagation":null,"validation":null}]'
+            result.exit_code = 0
+            return result
+
+        with patch("app.dataflow_v2.analysis.run_agent", side_effect=fake_run_agent):
+            inferred = cb._infer_external_callees(props, func)
+
+        self.assertEqual("fd", inferred["open"]["return_taint"])
+        self.assertIsNotNone(captured["session_file"])
+        self.assertTrue(str(captured["session_file"]).endswith(".jsonl"))
+        self.assertIn(str(cb.sessions_dir), str(captured["session_file"]))
+
     def test_legacy_dagflow_vuln_mining_is_forced_off(self):
         from app.dagflow.mining_agent import MiningAgent
 

@@ -775,11 +775,19 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
             '输出格式: ```json\n[{"function": "...", ...}, ...]\n```'
         )
         # 用 fresh session (不继承 taint 分析上下文)
-        logger.info("[V2-infer-ext] CALLING run_agent (no-session, timeout=%ss)", self.cfg.agent_run_timeout_seconds)
+        session_key = "_".join(_safe_name(p.target_function or "external") for p in external_props[:3]) or "external"
+        if len(external_props) > 3:
+            session_key = f"{session_key}_plus{len(external_props) - 3}"
+        fork_session = _session_path(self.sessions_dir, -1, func.name, session_key[:80], kind="infer-ext")
+        logger.info(
+            "[V2-infer-ext] CALLING run_agent (session=%s timeout=%ss)",
+            str(fork_session)[-80:],
+            self.cfg.agent_run_timeout_seconds,
+        )
         result = run_agent(
             prompt=prompt, model=acfg.model,
             tools=acfg.tools or self.cfg.workers.default_tools,
-            cwd=str(self.run_dir), session_file=None,
+            cwd=str(self.run_dir), session_file=str(fork_session),
             system_prompt="你是 C/C++ 安全分析专家。根据函数名推断外部函数的污点行为。",
             cancel_event=self.cancel_event,
             env={"DVS_V2_DB_DIR": str(self.vuln_root.parent / "dataflow-v2"),
