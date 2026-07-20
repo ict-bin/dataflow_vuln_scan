@@ -340,12 +340,12 @@ class MysqlGraphStore:
         ph = ",".join(f":{c}" for c in cols)
         sql = (
             f"INSERT INTO dvs_task_graph_nodes ({col_list}) VALUES ({ph}) "
-            f"ON DUPLICATE KEY UPDATE status=VALUES(status),"
-            f"analysis_status=VALUES(analysis_status),"
-            f"findings_count=VALUES(findings_count),"
-            f"started_at=VALUES(started_at),"
-            f"finished_at=VALUES(finished_at),"
-            f"primary_session_relpath=VALUES(primary_session_relpath)"
+            f"AS new ON DUPLICATE KEY UPDATE status=new.status,"
+            f"analysis_status=new.analysis_status,"
+            f"findings_count=new.findings_count,"
+            f"started_at=new.started_at,"
+            f"finished_at=new.finished_at,"
+            f"primary_session_relpath=new.primary_session_relpath"
         )
         with self._engine.connect() as conn:
             conn.execute(sa_text(sql), vals)
@@ -354,14 +354,8 @@ class MysqlGraphStore:
     def update_task_graph_node(self, node_id: str, **kw) -> None:
         if not kw:
             return
-        sets = ", ".join(f"{k}=VALUES({k})" for k in kw)
-        cols = ",".join(kw.keys())
-        ph = ",".join(f":{k}" for k in kw)
-        sql = (
-            f"INSERT INTO dvs_task_graph_nodes (node_id,{cols}) "
-            f"VALUES (:node_id,{ph}) "
-            f"ON DUPLICATE KEY UPDATE {sets}"
-        )
+        sets = ", ".join(f"{k}=:{k}" for k in kw)
+        sql = f"UPDATE dvs_task_graph_nodes SET {sets} WHERE node_id=:node_id"
         params = {"node_id": node_id, **kw}
         with self._engine.connect() as conn:
             conn.execute(sa_text(sql), params)
@@ -376,10 +370,10 @@ class MysqlGraphStore:
         ph = ",".join(f":{c}" for c in cols)
         sql = (
             f"INSERT INTO dvs_task_graph_sessions ({col_list}) VALUES ({ph}) "
-            f"ON DUPLICATE KEY UPDATE node_id=VALUES(node_id),"
-            f"edge_id=VALUES(edge_id),"
-            f"session_role=VALUES(session_role),"
-            f"status=VALUES(status)"
+            f"AS new ON DUPLICATE KEY UPDATE node_id=new.node_id,"
+            f"edge_id=new.edge_id,"
+            f"session_role=new.session_role,"
+            f"status=new.status"
         )
         with self._engine.connect() as conn:
             conn.execute(sa_text(sql), vals)
@@ -388,14 +382,8 @@ class MysqlGraphStore:
     def update_task_graph_session(self, session_relpath: str, **kw) -> None:
         if not kw:
             return
-        sets = ", ".join(f"{k}=VALUES({k})" for k in kw)
-        cols = ",".join(kw.keys())
-        ph = ",".join(f":{k}" for k in kw)
-        sql = (
-            f"INSERT INTO dvs_task_graph_sessions (session_relpath,{cols}) "
-            f"VALUES (:sr,{ph}) "
-            f"ON DUPLICATE KEY UPDATE {sets}"
-        )
+        sets = ", ".join(f"{k}=:{k}" for k in kw)
+        sql = f"UPDATE dvs_task_graph_sessions SET {sets} WHERE session_relpath=:sr"
         params = {"sr": session_relpath, **kw}
         with self._engine.connect() as conn:
             conn.execute(sa_text(sql), params)
@@ -418,10 +406,10 @@ class MysqlGraphStore:
         ph = ",".join(f":{c}" for c in cols)
         sql = (
             f"INSERT INTO dvs_task_graph_edges ({col_list}) VALUES ({ph}) "
-            f"ON DUPLICATE KEY UPDATE status=VALUES(status),"
-            f"reason_code=VALUES(reason_code),"
-            f"reason_message=VALUES(reason_message),"
-            f"reason_source=VALUES(reason_source)"
+            f"AS new ON DUPLICATE KEY UPDATE status=new.status,"
+            f"reason_code=new.reason_code,"
+            f"reason_message=new.reason_message,"
+            f"reason_source=new.reason_source"
         )
         with self._engine.connect() as conn:
             conn.execute(sa_text(sql), vals)
@@ -446,8 +434,8 @@ class MysqlGraphStore:
                 "(run_id,task_id,root_file,root_function,source_root,"
                 "status,started_at) "
                 "VALUES (:rid,:tid,:rf,:rfunc,:sr,'running',:ts) "
-                "ON DUPLICATE KEY UPDATE status='running',"
-                "started_at=VALUES(started_at)"),
+                "AS new ON DUPLICATE KEY UPDATE status='running',"
+                "started_at=new.started_at"),
                 {"rid": run_id, "tid": task_id, "rf": root_file,
                  "rfunc": root_function, "sr": str(source_root),
                  "ts": time.time()})
@@ -467,8 +455,8 @@ class MysqlGraphStore:
             "(task_id,epoch,run_root,graph_version,root_function,"
             "generated_at) "
             "VALUES (:tid,:ep,:rr,:gv,:rf,:ga) "
-            "ON DUPLICATE KEY UPDATE run_root=VALUES(run_root),"
-            "root_function=VALUES(root_function)"
+            "AS new ON DUPLICATE KEY UPDATE run_root=new.run_root,"
+            "root_function=new.root_function"
         )
         with self._engine.connect() as conn:
             conn.execute(sa_text(sql), {
