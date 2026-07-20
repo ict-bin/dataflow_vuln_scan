@@ -14,9 +14,11 @@
 单共享连接 + lock (work_queue 多线程, check_same_thread=False, _exec 立即 commit)。
 """
 from __future__ import annotations
-import json, sqlite3, threading
+import json, logging, sqlite3, threading
 from pathlib import Path
 from .models import TaintDAG, TaintNode, TaintEdge, PruneSignal
+
+logger = logging.getLogger("dvs.dagflow.dag_store")
 
 
 _DDL = """
