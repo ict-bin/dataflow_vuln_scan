@@ -52,6 +52,13 @@ _TAINT_ANALYSIS_PROMPT = _read_prompt("prompts/v2/taint-analysis.md")
 import re as _re
 
 
+def _short_list_preview(items: list[str], *, limit: int = 8) -> list[str]:
+    preview = [str(item) for item in items[:limit]]
+    if len(items) > limit:
+        preview.append(f"...(+{len(items) - limit} more)")
+    return preview
+
+
 def _try_extract_truncated_json(text: str) -> dict | None:
     """尝试从被 stopReason=length 截断的文本中提取部分 JSON。
 
@@ -685,13 +692,27 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
         find_function, 命中即为定义所在。返回相对 source_root 的路径列表。
         """
         import subprocess
+        started_at = time.time()
         short = callee_name.rsplit("::", 1)[-1]
+        logger.info(
+            "[V2-resolve] search_callee_files START callee=%s short=%s source_root=%s",
+            callee_name,
+            short,
+            self.source_root,
+        )
         try:
             r = subprocess.run(
                 ["grep", "-rlE", "--include=*.c", "--include=*.cpp", "--include=*.cc",
                  f"{short}[[:space:]]*\\(", self.source_root],
                 capture_output=True, text=True, timeout=30)
         except Exception:
+            logger.warning(
+                "[V2-resolve] search_callee_files FAILED callee=%s short=%s duration=%.1fs",
+                callee_name,
+                short,
+                time.time() - started_at,
+                exc_info=True,
+            )
             return []
         out: list[str] = []
         for f in (r.stdout or "").split("\n"):
@@ -704,6 +725,16 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                 continue  # 不在 source_root 内 (grep wrapper 已限制, 正常不会到这)
             if rel not in out:
                 out.append(rel)
+        logger.info(
+            "[V2-resolve] search_callee_files DONE callee=%s short=%s duration=%.1fs returncode=%s candidates=%d preview=%s stderr=%s",
+            callee_name,
+            short,
+            time.time() - started_at,
+            r.returncode,
+            len(out),
+            _short_list_preview(out),
+            (r.stderr or "").strip()[:300],
+        )
         return out
 
     def _resolve_target_func_id(self, store: DataflowStore, prop: PropagationRecord) -> str:
@@ -717,32 +748,105 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
         """
         if not prop.target_function:
             return ""
+        started_at = time.time()
+        logger.info(
+            "[V2-resolve] target_func_id START callee=%s caller_func_id=%s source_taint=%s target_taint=%s call_line=%s dispatch_kind=%s is_external=%s is_indirect=%s",
+            prop.target_function,
+            prop.source_func_id,
+            prop.source_taint_name,
+            prop.target_taint_name,
+            prop.call_line,
+            prop.dispatch_kind,
+            prop.is_external,
+            prop.is_indirect_call,
+        )
         rec = store.find_function(prop.target_function)
+        if rec is not None:
+            logger.info(
+                "[V2-resolve] target_func_id HIT callee=%s func_id=%s file=%s duration=%.1fs source=indexed_store",
+                prop.target_function,
+                rec.func_id,
+                rec.file,
+                time.time() - started_at,
+            )
         if rec is None:
             candidates = self._search_callee_files(prop.target_function)
+            logger.info(
+                "[V2-resolve] target_func_id INDEX_CANDIDATES callee=%s candidate_count=%d preview=%s",
+                prop.target_function,
+                len(candidates),
+                _short_list_preview(candidates),
+            )
             for fpath in candidates:
                 if not self._within_source_root(fpath):
+                    logger.info(
+                        "[V2-resolve] target_func_id SKIP_OUT_OF_SCOPE callee=%s candidate=%s",
+                        prop.target_function,
+                        fpath,
+                    )
                     continue
+                file_started_at = time.time()
                 try:
                     ensure_file_indexed(self.source_root, fpath, store)
+                    logger.info(
+                        "[V2-resolve] target_func_id INDEXED callee=%s candidate=%s duration=%.1fs",
+                        prop.target_function,
+                        fpath,
+                        time.time() - file_started_at,
+                    )
                 except Exception:
                     logger.debug("v2 ensure_file_indexed failed for %s", fpath, exc_info=True)
+                    logger.warning(
+                        "[V2-resolve] target_func_id INDEX_FAILED callee=%s candidate=%s duration=%.1fs",
+                        prop.target_function,
+                        fpath,
+                        time.time() - file_started_at,
+                        exc_info=True,
+                    )
                     continue
             # 全部候选建库后再查 (定义可能在任一文件里, 上面已全部索引)
             rec = store.find_function(prop.target_function)
+            if rec is not None:
+                logger.info(
+                    "[V2-resolve] target_func_id RESOLVED_AFTER_INDEX callee=%s func_id=%s file=%s duration=%.1fs",
+                    prop.target_function,
+                    rec.func_id,
+                    rec.file,
+                    time.time() - started_at,
+                )
         if rec is None:
             # 定义不在源码树 (外部库/系统 API) — 记录传播但不跟入
             # 不设 is_external (那是外部变量传播, 走 tracker)
             # 设 is_external_callee (callee 实现不可达, 不跟入不走 tracker)
             prop.is_external_callee = True
+            logger.info(
+                "[V2-resolve] target_func_id UNRESOLVED callee=%s caller_func_id=%s duration=%.1fs reason=definition_not_found_in_source_tree",
+                prop.target_function,
+                prop.source_func_id,
+                time.time() - started_at,
+            )
             self.on_event("v2_callee_external_unresolved",
                           function=prop.target_function, caller=prop.source_func_id,
                           reason="definition not found in source tree")
             return ""
         if rec.file and not self._within_source_root(rec.file):
+            logger.info(
+                "[V2-resolve] target_func_id OUT_OF_SCOPE callee=%s func_id=%s file=%s duration=%.1fs",
+                prop.target_function,
+                rec.func_id,
+                rec.file,
+                time.time() - started_at,
+            )
             self.on_event("v2_out_of_scope_skipped", function=prop.target_function,
                        file=rec.file, reason="outside_source_root")
             return ""
+        logger.info(
+            "[V2-resolve] target_func_id DONE callee=%s func_id=%s file=%s duration=%.1fs",
+            prop.target_function,
+            rec.func_id,
+            rec.file,
+            time.time() - started_at,
+        )
         return rec.func_id
 
     # ── prompt 构造 ─────────────────────────────────────────────────────────
@@ -754,7 +858,14 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
         """
         _t0 = time.time()
         _names = [p.target_function for p in external_props]
-        logger.info("[V2-infer-ext] START func=%s callees=%s count=%d", func.name, _names, len(_names))
+        logger.info(
+            "[V2-infer-ext] START func=%s file=%s callees=%s count=%d base_session=%s",
+            func.name,
+            func.file,
+            _names,
+            len(_names),
+            str(base_session or "")[-120:],
+        )
         acfg = self.cfg.workers.agents[0] if self.cfg.workers.agents else None
         if acfg is None:
             return {}
@@ -762,6 +873,20 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
         lines = []
         for i, p in enumerate(external_props, 1):
             lines.append(f"{i}. 函数: {p.target_function}, 污点参数: {p.source_taint_name} → {p.target_taint_name}")
+        logger.info(
+            "[V2-infer-ext] INPUTS func=%s entries=%s",
+            func.name,
+            [
+                {
+                    "target_function": str(p.target_function or ""),
+                    "source_taint": str(p.source_taint_name or ""),
+                    "target_taint": str(p.target_taint_name or ""),
+                    "call_line": int(p.call_line or 0),
+                    "source_func_id": str(p.source_func_id or ""),
+                }
+                for p in external_props
+            ],
+        )
         prompt = (
             "以下外部函数被污点参数调用, 定义不在源码中。\n"
             "请根据函数名和调用上下文, 逐个判断能否推断其污点行为。\n\n"
@@ -824,6 +949,11 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                 fn = str(item.get("function") or "")
                 if fn:
                     inferred[fn] = item
+        logger.info(
+            "[V2-infer-ext] PARSED func=%s inferred=%s",
+            func.name,
+            inferred,
+        )
         return inferred
 
     def _build_prompt(self, func: FunctionRecord, body: str,
