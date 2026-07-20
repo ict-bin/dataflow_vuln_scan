@@ -40,7 +40,7 @@ CREATE TABLE IF NOT EXISTS functions (
     start_line     INTEGER NOT NULL,
     end_line       INTEGER NOT NULL,
     func_hash      TEXT,
-    description    TEXT DEFAULT '',
+    description    TEXT,
     PRIMARY KEY (source_dir_id, func_id)
 );
 CREATE INDEX IF NOT EXISTS idx_func_name ON functions(source_dir_id, name);
@@ -53,16 +53,16 @@ CREATE TABLE IF NOT EXISTS include_index (
 CREATE TABLE IF NOT EXISTS class_hierarchy (
     source_dir_id  VARCHAR(64) NOT NULL,
     class_name     TEXT NOT NULL,
-    bases          TEXT DEFAULT '[]',
-    `file`         TEXT DEFAULT '',
+    bases          TEXT,
+    `file`         TEXT,
     PRIMARY KEY (source_dir_id, class_name)
 );
 CREATE TABLE IF NOT EXISTS class_members (
     source_dir_id  VARCHAR(64) NOT NULL,
     class_name     TEXT NOT NULL,
     member_name    TEXT NOT NULL,
-    member_type    TEXT DEFAULT '',
-    `file`         TEXT DEFAULT '',
+    member_type    TEXT,
+    `file`         TEXT,
     PRIMARY KEY (source_dir_id, class_name, member_name)
 );
 """
@@ -73,8 +73,8 @@ CREATE TABLE IF NOT EXISTS processed_taints (
     func_id          TEXT NOT NULL,
     taint_signature  TEXT NOT NULL,
     task_id          VARCHAR(64) NOT NULL,
-    taint_params     TEXT DEFAULT '[]',
-    sessions_path    TEXT DEFAULT '',
+    taint_params     TEXT,
+    sessions_path    TEXT,
     analyzed_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (source_dir_id, func_id, taint_signature, task_id)
 );
@@ -88,8 +88,8 @@ CREATE TABLE IF NOT EXISTS taints (
     signature           TEXT NOT NULL,
     file                TEXT NOT NULL,
     function            TEXT NOT NULL,
-    next_propagations   TEXT DEFAULT '[]',
-    description         TEXT DEFAULT '',
+    next_propagations   TEXT,
+    description         TEXT,
     task_id             VARCHAR(64) NOT NULL,
     PRIMARY KEY (source_dir_id, taint_id, task_id)
 );
@@ -104,14 +104,14 @@ CREATE TABLE IF NOT EXISTS propagations (
     target_function         TEXT,
     target_file             TEXT,
     call_line               INTEGER,
-    `condition`              TEXT DEFAULT '',
+    `condition`              TEXT,
     is_external             INTEGER DEFAULT 0,
     is_indirect_call        INTEGER DEFAULT 0,
-    escape_kind             TEXT DEFAULT '',
-    carrier                 TEXT DEFAULT '',
-    escape_via              TEXT DEFAULT '',
-    actual_args             TEXT DEFAULT '[]',
-    validations             TEXT DEFAULT '[]',
+    escape_kind             TEXT,
+    carrier                 TEXT,
+    escape_via              TEXT,
+    actual_args             TEXT,
+    validations             TEXT,
     task_id                 VARCHAR(64) NOT NULL,
     PRIMARY KEY (source_dir_id, prop_id, task_id)
 );
@@ -125,7 +125,7 @@ CREATE TABLE IF NOT EXISTS orchestration (
     taint_params     TEXT NOT NULL,
     depth            INTEGER NOT NULL,
     edge_order       INTEGER NOT NULL,
-    `status`           TEXT DEFAULT 'pending',
+    `status`           VARCHAR(32) DEFAULT 'pending',
     task_id          VARCHAR(64) NOT NULL,
     PRIMARY KEY (source_dir_id, edge_id, task_id)
 );
@@ -149,10 +149,10 @@ CREATE TABLE IF NOT EXISTS dag_nodes (
     taint_signature  TEXT NOT NULL,
     node_id          INTEGER NOT NULL,
     line             INTEGER NOT NULL DEFAULT 0,
-    taint            TEXT NOT NULL DEFAULT '',
-    parents_json     TEXT DEFAULT '[]',
-    checks_json      TEXT DEFAULT '[]',
-    prune_json       TEXT DEFAULT '',
+    taint            TEXT NOT NULL,
+    parents_json     TEXT,
+    checks_json      TEXT,
+    prune_json       TEXT,
     is_source        INTEGER NOT NULL DEFAULT 0,
     task_id          VARCHAR(64) NOT NULL,
     PRIMARY KEY (source_dir_id, func_id, taint_signature, node_id, task_id)
@@ -165,14 +165,14 @@ CREATE TABLE IF NOT EXISTS dag_edges (
     from_node          INTEGER NOT NULL,
     to_node            INTEGER NOT NULL,
     line               INTEGER NOT NULL DEFAULT 0,
-    condition_json     TEXT DEFAULT '[]',
-    taints_json        TEXT DEFAULT '[]',
-    kind               TEXT NOT NULL DEFAULT 'inside',
-    sink_ref           TEXT DEFAULT '',
-    param_taints_json  TEXT DEFAULT '[]',
-    escape_subkind     TEXT DEFAULT '',
-    carrier            TEXT DEFAULT '',
-    escape_via          TEXT DEFAULT '',
+    condition_json     TEXT,
+    taints_json        TEXT,
+    kind               VARCHAR(32) NOT NULL DEFAULT 'inside',
+    sink_ref           TEXT,
+    param_taints_json  TEXT,
+    escape_subkind     TEXT,
+    carrier            TEXT,
+    escape_via          TEXT,
     task_id            VARCHAR(64) NOT NULL,
     PRIMARY KEY (source_dir_id, func_id, taint_signature, edge_id, task_id)
 );
@@ -182,7 +182,7 @@ CREATE TABLE IF NOT EXISTS dag_meta (
     func_id         TEXT NOT NULL,
     taint_signature TEXT NOT NULL,
     self_contained  INTEGER NOT NULL DEFAULT 0,
-    description     TEXT DEFAULT '',
+    description     TEXT,
     taint_failed    INTEGER NOT NULL DEFAULT 0,
     task_id         VARCHAR(64) NOT NULL,
     PRIMARY KEY (source_dir_id, func_id, taint_signature, task_id)
