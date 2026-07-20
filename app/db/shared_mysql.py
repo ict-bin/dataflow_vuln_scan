@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS functions (
     func_id        VARCHAR(128) NOT NULL,
     `file`         VARCHAR(512) NOT NULL,
     name           VARCHAR(128) NOT NULL,
+    name_tail      VARCHAR(128) NOT NULL DEFAULT '',
     signature      VARCHAR(512) NOT NULL,
     start_line     INTEGER NOT NULL,
     end_line       INTEGER NOT NULL,
@@ -46,6 +47,11 @@ CREATE TABLE IF NOT EXISTS functions (
     PRIMARY KEY (source_dir_id, func_id)
 );
 CREATE INDEX idx_func_name ON functions(source_dir_id, name);
+CREATE INDEX idx_func_tail ON functions(source_dir_id, name_tail);
+CREATE INDEX idx_func_file ON functions(source_dir_id, `file`);
+ALTER TABLE functions ADD COLUMN IF NOT EXISTS name_tail VARCHAR(128) NOT NULL DEFAULT '';
+ALTER TABLE functions ADD INDEX IF NOT EXISTS idx_func_tail (source_dir_id, name_tail);
+ALTER TABLE functions ADD INDEX IF NOT EXISTS idx_func_file (source_dir_id, `file`);
 CREATE TABLE IF NOT EXISTS include_index (
     source_dir_id  VARCHAR(64) NOT NULL,
     header         VARCHAR(128) NOT NULL,
@@ -305,15 +311,16 @@ class SharedMysqlStore(MysqlReadMixin):
     def upsert_function(self, *, func_id: str, file: str, name: str, signature: str,
                         start_line: int, end_line: int, func_hash: str = "",
                         description: str = ""):
-        sql = """INSERT INTO functions (source_dir_id,func_id,file,name,signature,
+        name_tail = name.split("::")[-1].strip() if "::" in name else name
+        sql = """INSERT INTO functions (source_dir_id,func_id,file,name,name_tail,signature,
             start_line,end_line,func_hash,description)
-            VALUES (:sid,:fid,:file,:name,:sig,:sl,:el,:fh,:desc)
-            ON DUPLICATE KEY UPDATE file=VALUES(file),name=VALUES(name),signature=VALUES(signature),
-            start_line=VALUES(start_line),end_line=VALUES(end_line),
-            func_hash=VALUES(func_hash),description=VALUES(description)"""
+            VALUES (:sid,:fid,:file,:name,:tail,:sig,:sl,:el,:fh,:desc)
+            AS new ON DUPLICATE KEY UPDATE file=new.file,name=new.name,name_tail=new.name_tail,
+            signature=new.signature,start_line=new.start_line,end_line=new.end_line,
+            func_hash=new.func_hash,description=new.description"""
         with self._engine.connect() as conn:
             conn.execute(sa_text(sql), {"sid": self.source_dir_id, "fid": func_id, "file": file,
-                "name": name, "sig": signature, "sl": start_line, "el": end_line,
+                "name": name, "tail": name_tail, "sig": signature, "sl": start_line, "el": end_line,
                 "fh": func_hash, "desc": description})
             conn.commit()
 

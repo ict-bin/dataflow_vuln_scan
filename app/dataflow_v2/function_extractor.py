@@ -177,7 +177,7 @@ def ensure_file_indexed(source_root: str, rel_file: str, store: DataflowStore) -
       "indexed"  - 已完成索引 (之前或本次)
       "indexing"  - 另一进程正在索引此文件 (部分函数可能已入库, 但不完整)
     """
-    existing = [f for f in store.list_functions() if f.file == rel_file]
+    existing = store.functions_by_file(rel_file)
     # 检查是否正在被另一进程索引
     # MySQL 优先: 查 indexing 状态
     if store._mysql:
@@ -488,7 +488,7 @@ def index_source_tree(source_root: str, store: DataflowStore) -> int:
             continue
         extract_file_functions(source_root, rel, store)
         count += 1
-    logger.info("indexed %d source files, %d functions", count, len(store.list_functions()))
+    logger.info("indexed %d source files, %d functions", count, store.count_functions())
     # 2) include 索引
     _build_include_index(source_root, store)
     # 3) class 继承图

@@ -122,7 +122,7 @@ class DataflowV2Runner:
             # 分析过程中 callee 查不到时用 v2_db index <file> 增量索引
             self._emit("v2_indexing_source_tree")
             ensure_file_indexed(source_root, cfg.source_file, store)
-            self._emit("v2_indexed", functions=len(store.list_functions()))
+            self._emit("v2_indexed", functions=store.count_functions())
             if not cfg.source_file:
                 return TaskResult(task_id=tid, status=TaskStatus.INVALID_INPUT,
                                   task=cfg.task, error="v2: source_file 未指定")
@@ -222,7 +222,7 @@ class DataflowV2Runner:
                         err_msg = "v2: taint 分析未产出传播边 (LLM 输出可能截断或格式错误)"
                 # else: 有 propagation 记录但 edge_count=0 (callee 找不到/不跟入) = 正常完成
             final_output = self._build_final_report(tid, cfg, store, graph_db_path)
-            vuln_summary = {"functions": len(store.list_functions()),
+            vuln_summary = {"functions": store.count_functions(),
                             "findings": self._count_findings(graph_db_path)}
             graph_run_status = "cancelled" if (self._cancel_event is not None and self._cancel_event.is_set()) else str(status.value if hasattr(status, "value") else status)
             cbs.graph_store.finish_run(tid, graph_run_status)
@@ -348,7 +348,7 @@ class DataflowV2Runner:
             f"- 任务ID: `{tid}`",
             f"- 状态: `{TaskStatus.PASSED.value}`",
             f"- 漏洞数量: {len(findings)}",
-            f"- 函数库函数数: {len(store.list_functions())}",
+            f"- 函数库函数数: {store.count_functions()}",
             f"- 图谱数据库: `output/vuln-scan.sqlite`",
             f"- v2 四库: `output/dataflow-v2/`",
             "",

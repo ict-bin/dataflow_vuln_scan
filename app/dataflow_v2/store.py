@@ -363,6 +363,22 @@ class DataflowStore:
         rows = self._q("functions", "SELECT * FROM functions")
         return [_row_to_function(r) for r in rows] if rows else []
 
+    def count_functions(self) -> int:
+        """快速计数 (COUNT, 不加载全部行)。"""
+        if self._mysql:
+            cnt = self._mysql.count_functions()
+            if cnt: return cnt
+        rows = self._q("functions", "SELECT COUNT(*) as c FROM functions")
+        return rows[0]["c"] if rows else 0
+
+    def functions_by_file(self, file: str) -> list[FunctionRecord]:
+        """按文件查函数 (用索引, 不全量扫描)。"""
+        if self._mysql:
+            recs = self._mysql.read_functions_by_file(file)
+            if recs: return recs
+        rows = self._q("functions", "SELECT * FROM functions WHERE file=? ORDER BY start_line", (file,))
+        return [_row_to_function(r) for r in rows] if rows else []
+
     # ── include 索引 (C 作用域) ────────────────────────────────────────
     def add_include(self, header: str, file: str) -> None:
         self._exec("functions",

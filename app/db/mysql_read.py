@@ -162,18 +162,17 @@ class MysqlReadMixin:
                 if rows:
                     return [_dict_to_function(dict(r._mapping)) for r in rows]
 
-                # Layer 3: suffix %::tail
-                suf = f"%::{tail}"
+                # Layer 3: suffix %::tail → use name_tail index
                 if file:
                     rows = conn.execute(sa_text(
-                        "SELECT * FROM functions WHERE source_dir_id=:sid AND name LIKE :suf AND `file`=:fl "
+                        "SELECT * FROM functions WHERE source_dir_id=:sid AND name_tail=:nm AND `file`=:fl "
                         "ORDER BY start_line"),
-                        {"sid": sid, "suf": suf, "fl": file}).fetchall()
+                        {"sid": sid, "nm": tail, "fl": file}).fetchall()
                 else:
                     rows = conn.execute(sa_text(
-                        "SELECT * FROM functions WHERE source_dir_id=:sid AND name LIKE :suf "
+                        "SELECT * FROM functions WHERE source_dir_id=:sid AND name_tail=:nm "
                         "ORDER BY start_line"),
-                        {"sid": sid, "suf": suf}).fetchall()
+                        {"sid": sid, "nm": tail}).fetchall()
                 return [_dict_to_function(dict(r._mapping)) for r in rows]
         except Exception:
             return []
@@ -260,6 +259,28 @@ class MysqlReadMixin:
                 rows = conn.execute(sa_text(
                     "SELECT * FROM functions WHERE source_dir_id=:sid"),
                     {"sid": self.source_dir_id}).fetchall()
+                return [_dict_to_function(dict(r._mapping)) for r in rows]
+        except Exception:
+            return []
+
+    def count_functions(self) -> int:
+        """COUNT(*) 快速计数 (避免加载全部行)。"""
+        try:
+            with self._engine.connect() as conn:
+                return conn.execute(sa_text(
+                    "SELECT COUNT(*) FROM functions WHERE source_dir_id=:sid"),
+                    {"sid": self.source_dir_id}).scalar()
+        except Exception:
+            return 0
+
+    def read_functions_by_file(self, file: str) -> list[FunctionRecord]:
+        """按文件查函数 (用 idx_func_file 索引)。"""
+        try:
+            with self._engine.connect() as conn:
+                rows = conn.execute(sa_text(
+                    "SELECT * FROM functions WHERE source_dir_id=:sid AND `file`=:fl "
+                    "ORDER BY start_line"),
+                    {"sid": self.source_dir_id, "fl": file}).fetchall()
                 return [_dict_to_function(dict(r._mapping)) for r in rows]
         except Exception:
             return []

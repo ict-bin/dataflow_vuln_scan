@@ -117,7 +117,7 @@ class AutonomousRunner:
             if root_func is None:
                 return TaskResult(task_id=tid, status=TaskStatus.INVALID_INPUT, task=cfg.task,
                                   error=f"autonomous: 入口函数 {cfg.function_name} 未找到")
-            self._emit("v2_indexed", functions=len(store.list_functions()))
+            self._emit("v2_indexed", functions=store.count_functions())
 
             # 服务工具脚本路径 (agent 经 bash 调)
             script_dir = Path("/opt/dataflow_vuln_scan/scripts/autonomous")
