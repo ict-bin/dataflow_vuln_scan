@@ -491,7 +491,12 @@ class DataflowStore:
                 "INSERT OR IGNORE INTO processed_taints (func_id, taint_signature, pre_validation_signature, taint_params, sessions_path) VALUES (?,?,?,?,?)",
                 (func_id, ts, pvs, json.dumps(pt.taint_params, ensure_ascii=False), pt.sessions_path))
             self._conns["functions"].commit()
-            return cur.rowcount == 1
+            reserved = cur.rowcount == 1
+            if reserved and self._mysql:
+                try: self._mysql.add_processed_taint(func_id, ts,
+                    json.dumps(pt.taint_params, ensure_ascii=False), pt.sessions_path)
+                except Exception: pass
+            return reserved
 
     def delete_processed_taint(self, func_id: str, taint_signature: str,
                                pre_validation_signature: str = "") -> None:
