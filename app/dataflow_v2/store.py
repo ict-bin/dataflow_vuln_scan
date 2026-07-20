@@ -533,6 +533,11 @@ class DataflowStore:
             ON CONFLICT(taint_id) DO UPDATE SET
                 next_propagations=excluded.next_propagations, description=excluded.description
         """, r)
+        if self._mysql:
+            try: self._mysql.upsert_taint(taint_id=r["taint_id"], func_id=r["func_id"],
+                name=r["name"], signature=r["signature"], file=r["file"], function=r["function"],
+                next_propagations=r["next_propagations"], description=r["description"])
+            except Exception: logger.debug("mysql upsert_taint failed", exc_info=True)
 
     def get_taint(self, taint_id: str) -> TaintRecord | None:
         row = self._q("taints", "SELECT * FROM taints WHERE taint_id=?", (taint_id,))
@@ -581,6 +586,9 @@ class DataflowStore:
                 actual_args=excluded.actual_args,
                 validations=excluded.validations, description=excluded.description
         """, r)
+        if self._mysql:
+            try: self._mysql.upsert_propagation(**r)
+            except Exception: logger.debug("mysql upsert_propagation failed", exc_info=True)
 
     def get_propagation(self, prop_id: str) -> PropagationRecord | None:
         row = self._q("propagations", "SELECT * FROM propagations WHERE prop_id=?", (prop_id,))
@@ -602,6 +610,12 @@ class DataflowStore:
                 :taint_params,:depth,:edge_order,:status)
             ON CONFLICT(edge_id) DO UPDATE SET status=excluded.status
         """, r)
+        if self._mysql:
+            try: self._mysql.upsert_orchestration_edge(edge_id=r["edge_id"], path_id=r["path_id"],
+                source_func_id=r["source_func_id"], target_func_id=r["target_func_id"],
+                taint_params=r["taint_params"], depth=r["depth"], edge_order=r["edge_order"],
+                status=r["status"])
+            except Exception: logger.debug("mysql upsert_edge failed", exc_info=True)
 
     def set_edge_status(self, edge_id: str, status: str) -> None:
         self._exec("orchestration", "UPDATE orchestration SET status=? WHERE edge_id=?", (status, edge_id))
