@@ -235,13 +235,18 @@ class SharedMysqlStore:
 
     def _ensure_schema(self):
         """建库 + 建表 (幂等)。"""
-        with self._engine.connect() as conn:
-            conn.execute(sa_text(_DDL_NO_TASK))
-            if self.mode in ("complete", "autonomous"):
-                conn.execute(sa_text(_DDL_WITH_TASK_V2))
-            elif self.mode == "dagflow":
-                conn.execute(sa_text(_DDL_WITH_TASK_DAG))
-            conn.commit()
+        def _exec_multi(ddl: str):
+            for stmt in ddl.split(";"):
+                s = stmt.strip()
+                if s:
+                    with self._engine.connect() as conn:
+                        conn.execute(sa_text(s))
+                        conn.commit()
+        _exec_multi(_DDL_NO_TASK)
+        if self.mode in ("complete", "autonomous"):
+            _exec_multi(_DDL_WITH_TASK_V2)
+        elif self.mode == "dagflow":
+            _exec_multi(_DDL_WITH_TASK_DAG)
 
     def _register_source_dir(self, source_root: str):
         """注册源码目录 (INSERT IGNORE)。"""
