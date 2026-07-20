@@ -234,14 +234,18 @@ class SharedMysqlStore:
             return eng
 
     def _ensure_schema(self):
-        """建库 + 建表 (幂等)。"""
+        """建表 (幂等, 容错: 单条失败不阻断后续)。"""
         def _exec_multi(ddl: str):
             for stmt in ddl.split(";"):
                 s = stmt.strip()
-                if s:
+                if not s:
+                    continue
+                try:
                     with self._engine.connect() as conn:
                         conn.execute(sa_text(s))
                         conn.commit()
+                except Exception as e:
+                    logger.debug("DDL skip: %s (%s)", s[:60], e)
         _exec_multi(_DDL_NO_TASK)
         if self.mode in ("complete", "autonomous"):
             _exec_multi(_DDL_WITH_TASK_V2)
