@@ -30,7 +30,7 @@ _DDL = """
 CREATE TABLE IF NOT EXISTS dvs_task_graph_runs (
     task_id VARCHAR(64) PRIMARY KEY,
     epoch VARCHAR(8) NOT NULL DEFAULT '',
-    run_root TEXT NOT NULL DEFAULT '',
+    run_root TEXT,
     graph_version INTEGER NOT NULL DEFAULT 1,
     root_function VARCHAR(256) NOT NULL DEFAULT '',
     generated_at DOUBLE NOT NULL DEFAULT 0
@@ -49,13 +49,13 @@ CREATE TABLE IF NOT EXISTS dvs_task_graph_nodes (
     findings_count INTEGER NOT NULL DEFAULT 0,
     started_at VARCHAR(40),
     finished_at VARCHAR(40),
-    primary_session_relpath TEXT NOT NULL DEFAULT '',
+    primary_session_relpath TEXT,
     session_group_key VARCHAR(256) NOT NULL DEFAULT '',
     visible_in_tree INTEGER NOT NULL DEFAULT 1,
     visible_in_all_propagations INTEGER NOT NULL DEFAULT 1,
-    extra_json TEXT NOT NULL DEFAULT '{}'
+    extra_json TEXT
 );
-CREATE INDEX IF NOT EXISTS ix_dvs_tgn_task ON dvs_task_graph_nodes(task_id, depth);
+CREATE INDEX ix_dvs_tgn_task ON dvs_task_graph_nodes(task_id, depth);
 CREATE TABLE IF NOT EXISTS dvs_task_graph_edges (
     edge_id VARCHAR(256) PRIMARY KEY,
     task_id VARCHAR(64) NOT NULL,
@@ -72,24 +72,24 @@ CREATE TABLE IF NOT EXISTS dvs_task_graph_edges (
     edge_kind VARCHAR(64) NOT NULL DEFAULT 'direct_call',
     status VARCHAR(32) NOT NULL DEFAULT 'discovered',
     reason_code VARCHAR(128) NOT NULL DEFAULT '',
-    reason_message TEXT NOT NULL DEFAULT '',
+    reason_message TEXT,
     reason_source VARCHAR(64) NOT NULL DEFAULT '',
     source_prop_id VARCHAR(256) NOT NULL DEFAULT '',
     source_orchestration_edge_id VARCHAR(256) NOT NULL DEFAULT '',
     call_line INTEGER,
     source_taint_name VARCHAR(256) NOT NULL DEFAULT '',
     target_taint_name VARCHAR(256) NOT NULL DEFAULT '',
-    validations_json TEXT NOT NULL DEFAULT '[]',
-    actual_args_json TEXT NOT NULL DEFAULT '[]',
+    validations_json TEXT,
+    actual_args_json TEXT,
     tracker_type VARCHAR(64) NOT NULL DEFAULT '',
-    tracker_result_json TEXT NOT NULL DEFAULT '{}',
+    tracker_result_json TEXT,
     display_order INTEGER NOT NULL DEFAULT 0,
     visible_in_tree INTEGER NOT NULL DEFAULT 1,
     visible_in_all_propagations INTEGER NOT NULL DEFAULT 1,
     created_at VARCHAR(40),
     updated_at VARCHAR(40)
 );
-CREATE INDEX IF NOT EXISTS ix_dvs_tge_task ON dvs_task_graph_edges(task_id, display_order);
+CREATE INDEX ix_dvs_tge_task ON dvs_task_graph_edges(task_id, display_order);
 CREATE TABLE IF NOT EXISTS dvs_task_graph_sessions (
     session_relpath VARCHAR(512) PRIMARY KEY,
     task_id VARCHAR(64) NOT NULL,
@@ -104,9 +104,9 @@ CREATE TABLE IF NOT EXISTS dvs_task_graph_sessions (
     ended_at VARCHAR(40),
     mtime DOUBLE,
     event_count INTEGER NOT NULL DEFAULT 0,
-    extra_json TEXT NOT NULL DEFAULT '{}'
+    extra_json TEXT
 );
-CREATE INDEX IF NOT EXISTS ix_dvs_tgs_task ON dvs_task_graph_sessions(task_id);
+CREATE INDEX ix_dvs_tgs_task ON dvs_task_graph_sessions(task_id);
 CREATE TABLE IF NOT EXISTS dvs_vuln_findings (
     finding_id VARCHAR(128) PRIMARY KEY,
     run_id VARCHAR(64) NOT NULL,
@@ -119,29 +119,29 @@ CREATE TABLE IF NOT EXISTS dvs_vuln_findings (
     vuln_type VARCHAR(64) NOT NULL DEFAULT 'unknown',
     severity VARCHAR(32) NOT NULL DEFAULT 'unknown',
     title VARCHAR(512) NOT NULL DEFAULT '',
-    summary TEXT NOT NULL DEFAULT '',
-    evidence TEXT NOT NULL DEFAULT '',
-    exploitability TEXT NOT NULL DEFAULT '',
+    summary TEXT,
+    evidence TEXT,
+    exploitability TEXT,
     confidence DOUBLE NOT NULL DEFAULT 0,
-    output_dir TEXT NOT NULL DEFAULT '',
+    output_dir TEXT,
     report_status VARCHAR(32) NOT NULL DEFAULT '',
     report_case_id VARCHAR(128) NOT NULL DEFAULT '',
     created_at VARCHAR(40) NOT NULL DEFAULT ''
 );
-CREATE INDEX IF NOT EXISTS ix_dvs_vf_run ON dvs_vuln_findings(run_id);
-CREATE INDEX IF NOT EXISTS ix_dvs_vf_task ON dvs_vuln_findings(task_id);
+CREATE INDEX ix_dvs_vf_run ON dvs_vuln_findings(run_id);
+CREATE INDEX ix_dvs_vf_task ON dvs_vuln_findings(task_id);
 CREATE TABLE IF NOT EXISTS dvs_analysis_runs (
     run_id VARCHAR(64) PRIMARY KEY,
     task_id VARCHAR(64) NOT NULL,
     root_file VARCHAR(512) NOT NULL DEFAULT '',
     root_function VARCHAR(256) NOT NULL DEFAULT '',
-    source_root TEXT NOT NULL DEFAULT '',
+    source_root TEXT,
     status VARCHAR(32) NOT NULL DEFAULT 'running',
     started_at DOUBLE NOT NULL DEFAULT 0,
     finished_at DOUBLE,
-    config_json TEXT NOT NULL DEFAULT '{}'
+    config_json TEXT
 );
-CREATE INDEX IF NOT EXISTS ix_dvs_ar_task ON dvs_analysis_runs(task_id);
+CREATE INDEX ix_dvs_ar_task ON dvs_analysis_runs(task_id);
 """
 
 
@@ -159,8 +159,8 @@ def _get_engine(mysql_url: str) -> Engine:
                 if s:
                     try:
                         conn.execute(sa_text(s))
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("DDL skip: %s", e)
             conn.commit()
         _ENGINE = eng
         return eng
