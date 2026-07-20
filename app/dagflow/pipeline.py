@@ -256,6 +256,7 @@ class DagflowPipeline:
             for fid, ts in list(store.list_analyzed()):
                 func = func_index.get_by_id(fid)
                 if func is None:
+                    logger.warning("[dagflow-mine] SKIP (func not indexed): fid=%s taint=%s", fid[:12], ts)
                     continue
                 if trigger.is_ready(store, fid, ts, func_index.get_by_name):
                     try:
