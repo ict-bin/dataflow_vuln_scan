@@ -1806,21 +1806,29 @@ def get_task_result(task_id: str, db: Session = Depends(get_db)):
 
 @router.get("/tasks/{task_id}/sessions")
 def list_task_sessions(task_id: str, db: Session = Depends(get_db)):
-    row = _get_task_row(db, task_id)
-    root = _task_root(row)
-    latest_run_root = _latest_epoch_run_root(root) if str(root) else Path()
-    run_root = latest_run_root if latest_run_root.exists() else root / "run"
-    view = _load_task_graph_view(run_root, task_id)
-    return {"task_id": task_id, "items": _project_session_list_from_graph(view), "current_epoch": view.get("epoch") or None}
+    if db is None:
+        row = _get_task_row(db, task_id)
+        root = _task_root(row)
+        latest_run_root = _latest_epoch_run_root(root) if str(root) else Path()
+        run_root = latest_run_root if latest_run_root.exists() else root / "run"
+        view = _load_task_graph_view(run_root, task_id)
+        return {"task_id": task_id, "items": _project_session_list_from_graph(view), "current_epoch": view.get("epoch") or None}
+    return {
+        "task_id": task_id,
+        "items": get_task_service().list_task_sessions(db, task_id),
+        "current_epoch": None,
+    }
 
 @router.get("/tasks/{task_id}/sessions/index", response_model=TaskSessionIndexResponse)
 def get_task_session_index(task_id: str, db: Session = Depends(get_db)):
-    row = _get_task_row(db, task_id)
-    root = _task_root(row)
-    latest_run_root = _latest_epoch_run_root(root) if str(root) else Path()
-    run_root = latest_run_root if latest_run_root.exists() else root / "run"
-    view = _load_task_graph_view(run_root, task_id)
-    return _project_session_index_from_graph(task_id=task_id, task_status=row.status, run_root=run_root, view=view)
+    if db is None:
+        row = _get_task_row(db, task_id)
+        root = _task_root(row)
+        latest_run_root = _latest_epoch_run_root(root) if str(root) else Path()
+        run_root = latest_run_root if latest_run_root.exists() else root / "run"
+        view = _load_task_graph_view(run_root, task_id)
+        return _project_session_index_from_graph(task_id=task_id, task_status=row.status, run_root=run_root, view=view)
+    return get_task_service().get_task_session_index(db, task_id)
 
 
 @router.get("/tasks/{task_id}/sessions/file")
