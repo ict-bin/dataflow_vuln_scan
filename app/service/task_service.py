@@ -1589,8 +1589,9 @@ class TaskService:
         except Exception as e:
             logger.warning("mysql shared store cleanup failed: %s", e)
         # 保留历史时间线事件（app_dvs_task_events）：这些事件已携带
-        # execution_epoch / control_version，重启后 epoch 自增，新旧事件天然
-        # 可区分（dedupe_key 含 epoch 不会冲突），便于审计与跨重启回溯。
+        # execution_epoch / control_version。显式 restart 从头重跑时会把
+        # execution_epoch 归零，由下一次 claim 从 1 重新开始；跨重启审计
+        # 依赖 control_version 与历史事件时间线区分。
         # 注意 stages_json（/logs 的 SwarmEvent 回放缓冲）仍会被清空，那是
         # 前端 trace 树的重建缓冲，与 DB 时间线是两回事，clean restart 需重建。
         retained_event_count = int(
@@ -1611,7 +1612,7 @@ class TaskService:
         row.error = None
         row.latest_abnormal_reason_json = None
         row.execution_owner_id = None
-        row.execution_epoch = int(row.execution_epoch or 0) + 1
+        row.execution_epoch = 0
         row.execution_lease_until = None
         row.execution_heartbeat_at = None
         row.control_version = int(row.control_version or 0) + 1

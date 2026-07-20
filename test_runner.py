@@ -666,10 +666,11 @@ class RunAgentPromptFileTests(unittest.TestCase):
             with patch("app.workspace_manager._sync_interval", return_value=5.0):
                 wm._periodic_sync_loop()
 
-            target = nfs_run_root.parent.parent / "output" / "sessions" / "live.jsonl"
+            target = nfs_run_root.parent.parent.parent / "output" / "sessions" / "live.jsonl"
+            legacy_target = nfs_run_root.parent.parent / "output" / "sessions" / "live.jsonl"
             self.assertTrue(target.exists())
             self.assertEqual("live\n", target.read_text(encoding="utf-8"))
-            self.assertFalse((nfs_run_root.parent.parent / "sessions" / "live.jsonl").exists())
+            self.assertFalse(legacy_target.exists())
 
     def test_legacy_dagflow_vuln_mining_is_forced_off(self):
         from app.dagflow.mining_agent import MiningAgent

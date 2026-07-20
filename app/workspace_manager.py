@@ -389,15 +389,16 @@ class WorkspaceManager:
                 continue
             if not self._local_run_root.exists():
                 continue
-            # run/ itself is on NFS, not symlinked — write here directly
-            # self._nfs_run_root = {root}/run/epochs/{epoch:04d}/
-            # nfs_run_parent = {root}/run/
-            nfs_run_parent = self._nfs_run_root.parent.parent
+            # self._nfs_run_root = {task_root}/run/epochs/{epoch:04d}/
+            # Keep run/ compatibility artifacts under {task_root}/run/,
+            # but real-time session visibility now lives under {task_root}/output/sessions.
+            task_root = self._nfs_run_root.parent.parent.parent
+            nfs_run_parent = task_root / "run"
             try:
                 # Sync sessions/ to output/sessions/ on NFS (authoritative read path)
                 local_sessions = self._local_run_root / "sessions"
                 if local_sessions.exists():
-                    nfs_output = nfs_run_parent / "output"
+                    nfs_output = task_root / "output"
                     nfs_output.mkdir(parents=True, exist_ok=True)
                     nfs_sessions = nfs_output / "sessions"
                     nfs_sessions.mkdir(parents=True, exist_ok=True)
