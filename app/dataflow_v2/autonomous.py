@@ -41,6 +41,18 @@ class AutonomousRunner:
         self.task_id = task_id
         self._cancel_event: threading.Event | None = threading.Event()
 
+    def _create_mysql_store(self, mode: str):
+        """创建 SharedMysqlStore (双写, 失败返回 None)。"""
+        try:
+            from ..db.shared_mysql import create_shared_store
+            db_cfg = getattr(self.cfg, "db", None)
+            url = db_cfg.url if db_cfg else \
+                "mysql+pymysql://root:Huawei12%23$@mysql.sothothv2-ns.svc.cluster.local:3306/secflow"
+            return create_shared_store(url, mode, self.cfg.cwd, self.task_id)
+        except Exception as e:
+            logger.warning("create mysql store failed: %s", e)
+            return None
+
     def _emit(self, etype: str, **data: Any) -> None:
         try:
             if self._raw_on_event is not None:
@@ -90,7 +102,7 @@ class AutonomousRunner:
             if not cfg.source_file:
                 return TaskResult(task_id=tid, status=TaskStatus.INVALID_INPUT, task=cfg.task,
                                   error="autonomous: source_file 未指定")
-            store = DataflowStore(v2_run_dir)
+            store = DataflowStore(v2_run_dir, mysql_store=self._create_mysql_store("autonomous"))
             self._emit("v2_indexing_source_tree")
             ensure_file_indexed(source_root, cfg.source_file, store)
             root_func = store.find_function(cfg.function_name, cfg.source_file) \

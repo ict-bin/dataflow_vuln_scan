@@ -38,6 +38,18 @@ class DataflowV2Runner:
         self.task_id = task_id
         self._cancel_event: threading.Event | None = threading.Event()
 
+    def _create_mysql_store(self, mode: str):
+        """创建 SharedMysqlStore (双写, 失败返回 None)。"""
+        try:
+            from ..db.shared_mysql import create_shared_store
+            db_cfg = getattr(self.cfg, "db", None)
+            url = db_cfg.url if db_cfg else \
+                "mysql+pymysql://root:Huawei12%23$@mysql.sothothv2-ns.svc.cluster.local:3306/secflow"
+            return create_shared_store(url, mode, self.cfg.cwd, self.task_id)
+        except Exception as e:
+            logger.warning("create mysql store failed: %s", e)
+            return None
+
     def _emit(self, etype: str, **data: Any) -> None:
         """适配: (etype, **data) → SwarmEvent → task_service on_event(SwarmEvent)。"""
         try:
@@ -93,7 +105,7 @@ class DataflowV2Runner:
         err_msg = ""
 
         try:
-            store = DataflowStore(v2_run_dir)
+            store = DataflowStore(v2_run_dir, mysql_store=self._create_mysql_store("complete"))
             # 增量索引: 只索引根函数所在文件 (不全量扫描)
             # 分析过程中 callee 查不到时用 v2_db index <file> 增量索引
             self._emit("v2_indexing_source_tree")

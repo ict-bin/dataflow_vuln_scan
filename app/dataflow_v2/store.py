@@ -163,10 +163,11 @@ _DDL = {
 class DataflowStore:
     """四库的统一访问层。线程安全 (每库一把锁; sqlite check_same_thread=False)。"""
 
-    def __init__(self, run_dir: str | Path) -> None:
+    def __init__(self, run_dir: str | Path, mysql_store=None) -> None:
         self.run_dir = Path(run_dir)
         self.run_dir.mkdir(parents=True, exist_ok=True)
         (self.run_dir).mkdir(parents=True, exist_ok=True)
+        self._mysql = mysql_store  # SharedMysqlStore (双写, 可选)
         self._paths = {
             "functions": self.run_dir / "functions.db",
             "taints": self.run_dir / "taints.db",
@@ -257,9 +258,6 @@ class DataflowStore:
     # ── 函数库 ──────────────────────────────────────────────────────────────
     def upsert_function(self, rec: FunctionRecord) -> None:
         r = rec.to_row()
-        # 注意: ON CONFLICT 不更新 processed_taints — 该字段由 add_processed_taint 唯一管理。
-        # 若此处写 excluded.processed_taints (rec 是旧对象, processed_taints 为旧值/空),
-        # 会覆盖 DB 已累积的去重锚点 -> find_processed_taint 看不到 -> return_taint 重分析循环。
         self._exec("functions", """
             INSERT INTO functions (func_id,file,name,signature,start_line,end_line,
                 body_path,func_hash,description,processed_taints)
@@ -271,6 +269,11 @@ class DataflowStore:
                 body_path=excluded.body_path, func_hash=excluded.func_hash,
                 description=excluded.description
         """, r)
+        if self._mysql:
+            try: self._mysql.upsert_function(func_id=rec.func_id, file=rec.file, name=rec.name,
+                signature=rec.signature, start_line=rec.start_line, end_line=rec.end_line,
+                func_hash=rec.func_hash or "", description=rec.description or "")
+            except Exception: pass
 
     def get_function(self, func_id: str) -> FunctionRecord | None:
         row = self._q("functions", "SELECT * FROM functions WHERE func_id=?", (func_id,))
@@ -350,6 +353,9 @@ class DataflowStore:
         self._exec("functions",
                    "INSERT OR IGNORE INTO include_index (header, file) VALUES (?, ?)",
                    (header, file))
+        if self._mysql:
+            try: self._mysql.add_include(header, file)
+            except Exception: pass
 
     def get_files_including(self, header: str) -> list[str]:
         """查找所有传递性 include 了指定 header 的 .c/.cpp 文件。"""
@@ -362,12 +368,18 @@ class DataflowStore:
         self._exec("functions",
                    "INSERT OR REPLACE INTO class_hierarchy (class_name, bases, file) VALUES (?, ?, ?)",
                    (class_name, json.dumps(bases), file))
+        if self._mysql:
+            try: self._mysql.add_class(class_name, json.dumps(bases), file)
+            except Exception: pass
 
     def add_class_member(self, class_name: str, member_name: str,
                          member_type: str = "", file: str = "") -> None:
         self._exec("functions",
                    "INSERT OR IGNORE INTO class_members (class_name, member_name, member_type, file) VALUES (?, ?, ?, ?)",
                    (class_name, member_name, member_type, file))
+        if self._mysql:
+            try: self._mysql.add_class_member(class_name, member_name, member_type, file)
+            except Exception: pass
 
     def get_bases(self, class_name: str) -> list[str]:
         import json
@@ -455,6 +467,10 @@ class DataflowStore:
         self._exec("functions",
             "INSERT OR IGNORE INTO processed_taints (func_id, taint_signature, pre_validation_signature, taint_params, sessions_path) VALUES (?,?,?,?,?)",
             (func_id, ts, pvs, json.dumps(pt.taint_params, ensure_ascii=False), pt.sessions_path))
+        if self._mysql:
+            try: self._mysql.add_processed_taint(func_id, ts,
+                json.dumps(pt.taint_params, ensure_ascii=False), pt.sessions_path)
+            except Exception: pass
 
     def try_reserve_processed_taint(self, func_id: str, pt: ProcessedTaint) -> bool:
         """分析前预留占位 (双检锁防并发重复分析)。
@@ -479,15 +495,13 @@ class DataflowStore:
 
     def delete_processed_taint(self, func_id: str, taint_signature: str,
                                pre_validation_signature: str = "") -> None:
-        """删除占位 (analyze 失败时, 让后续可重试)。
-
-        去重键: (func_id, taint_signature) — 删除该组合的所有记录。
-        pre_validation_signature 参数保留兼容但不用于过滤。
-        """
         ts = _norm_sig(taint_signature or "")
         self._exec("functions",
             "DELETE FROM processed_taints WHERE func_id=? AND taint_signature=?",
             (func_id, ts))
+        if self._mysql:
+            try: self._mysql.delete_processed_taint(func_id, ts)
+            except Exception: pass
 
     def find_processed_taint(self, func_id: str, taint_signature: str,
                              pre_validation_signature: str = "") -> ProcessedTaint | None:

@@ -70,7 +70,7 @@ CREATE TABLE IF NOT EXISTS dag_processed_taints (
 class DagflowStore:
     """dagflow DAG 存储 + 去重锚点 (独立 db, 不碰 V2 functions/taints/propagations)。"""
 
-    def __init__(self, run_dir: str | Path) -> None:
+    def __init__(self, run_dir: str | Path, mysql_store=None) -> None:
         self.run_dir = Path(run_dir)
         (self.run_dir / "dagflow").mkdir(parents=True, exist_ok=True)
         self.db_path = self.run_dir / "dagflow" / "dagflow.db"
@@ -79,6 +79,7 @@ class DagflowStore:
         self._conn.executescript(_DDL)
         self._conn.commit()
         self._lock = threading.Lock()
+        self._mysql = mysql_store  # SharedMysqlStore (双写, 可选)
 
     def close(self) -> None:
         with self._lock:
@@ -132,6 +133,27 @@ class DagflowStore:
                 "self_contained=excluded.self_contained, description=excluded.description, taint_failed=excluded.taint_failed",
                 (fid, ts, 1 if dag.self_contained else 0, dag.description, 1 if dag.taint_failed else 0))
             self._conn.commit()
+        # MySQL 双写
+        if self._mysql:
+            try:
+                nodes_m = [{"node_id": n.id, "line": n.line, "taint": n.taint,
+                           "parents": n.parents, "checks": n.checks,
+                           "prune": n.prune.to_dict() if n.prune else {},
+                           "is_source": n.is_source} for n in dag.nodes]
+                edges_m = []
+                for n in dag.nodes:
+                    for i, e in enumerate(n.children):
+                        eid = f"{n.id}->{e.to_node}_{e.kind}_{i}"
+                        edges_m.append({"edge_id": eid, "from_node": n.id, "to_node": e.to_node,
+                                        "line": e.line, "condition": e.condition, "taints": e.taints,
+                                        "kind": e.kind, "sink_ref": e.sink_ref,
+                                        "param_taints": e.param_taints, "escape_subkind": e.escape_subkind,
+                                        "carrier": e.carrier, "escape_via": e.escape_via})
+                meta_m = {"self_contained": dag.self_contained,
+                          "description": dag.description, "taint_failed": dag.taint_failed}
+                self._mysql.save_dag(fid, ts, nodes_m, edges_m, meta_m)
+            except Exception as e:
+                logger.warning("mysql save_dag failed: %s", e)
 
     def load_dag(self, func_id: str, taint_signature: str) -> TaintDAG | None:
         rows_n = self._q(
@@ -195,6 +217,9 @@ class DagflowStore:
         self._exec(
             "DELETE FROM dag_processed_taints WHERE func_id=? AND taint_signature=?",
             (func_id, taint_signature))
+        if self._mysql:
+            try: self._mysql.dag_delete_processed(func_id, taint_signature)
+            except Exception: pass
 
     # ── 跨函数查询 (dag_tools 用) ────────────────────────────────────────
     def get_callers(self, func_id: str) -> list[tuple[str, str]]:

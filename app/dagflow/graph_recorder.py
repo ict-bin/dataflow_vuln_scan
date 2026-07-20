@@ -30,14 +30,13 @@ class GraphRecorder:
         return f"node::{self.task_id}::{self.epoch}::{func_id}"
 
     def _session_relpath(self, session_path: str) -> str:
-        p = Path(session_path)
-        try:
-            return str(p.resolve().relative_to(Path(self.run_root).resolve())).replace("\\", "/")
-        except Exception:
-            try:
-                return str(p.relative_to(self.run_root)).replace("\\", "/")
-            except Exception:
-                return str(p).replace("\\", "/")
+        """返回 session 文件名 (sessions 在 run/sessions/ 扁平存放, relpath=文件名)。
+
+        API 返回 sessions_root = run_root / "sessions",
+        前端用 sessions_root / relative_path 读文件。
+        所以 relpath 只能是文件名, 不能带 epochs/NNNN/sessions/ 前缀。
+        """
+        return Path(session_path).name
 
     # ── run 生命周期 ──────────────────────────────────────────────────
 

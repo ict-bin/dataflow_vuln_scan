@@ -107,6 +107,11 @@ class DagflowPipeline:
         self.task_id = task_id
         self.source_root = getattr(config, "cwd", "") or getattr(config, "source_root", "")
         self.cancel_event = None
+        # MySQL 共享存储 URL (从 config 取 db 配置)
+        db_cfg = getattr(config, "db", None)
+        self._mysql_url = db_cfg.url if db_cfg else \
+            getattr(config, "mysql_url", "") or \
+            "mysql+pymysql://root:Huawei12%23$@mysql.sothothv2-ns.svc.cluster.local:3306/secflow"
 
     def _emit(self, event_type: str, **kw) -> None:
         """安全发事件 (兼容现有 event 映射)。"""
@@ -127,6 +132,7 @@ class DagflowPipeline:
         """阶段 1 taint 跟踪 -> 阶段 2 挖掘。返回 TaskResult (兼容 task_service model_dump)。"""
         from ..models import TaskResult, TaskStatus, TokenUsage
         from .dag_store import DagflowStore
+        from ..db.shared_mysql import create_shared_store
         from .taint_analyzer import TaintAnalyzer
         from .orchestrator import DagflowOrchestrator
         from .trackers import TrackerDispatcher
@@ -141,7 +147,10 @@ class DagflowPipeline:
         epoch_dir = Path(_root_out_dir or (Path(self.source_root) / "run"))
         # NFS run/ = epoch_dir.parent.parent (run/epochs/00NN -> run/epochs -> run/)
         nfs_run = epoch_dir.parent.parent if epoch_dir.name != "run" else epoch_dir
-        store = DagflowStore(nfs_run)  # dagflow.db -> run/dagflow/ (NFS, 持久)
+        # MySQL 共享存储 (双写, 失败不阻断)
+        mysql_store = create_shared_store(
+            self._mysql_url, "dagflow", self.source_root, task_id) if hasattr(self, '_mysql_url') and self._mysql_url else None
+        store = DagflowStore(nfs_run, mysql_store=mysql_store)  # dagflow.db -> run/dagflow/ (NFS, 持久)
         sessions_dir = epoch_dir / "sessions"  # sessions -> epoch /tmp (与 V2 一致, 大文件 ephemeral)
         functions_db = epoch_dir / "dataflow-v2" / "functions.db"  # functions.db -> epoch (重建, 与 V2 一致)
         (epoch_dir / "dataflow-v2").mkdir(parents=True, exist_ok=True)
@@ -149,7 +158,7 @@ class DagflowPipeline:
         v2_store = None
         try:
             from ..dataflow_v2.store import DataflowStore
-            v2_store = DataflowStore(epoch_dir / "dataflow-v2")
+            v2_store = DataflowStore(epoch_dir / "dataflow-v2", mysql_store=mysql_store)
         except Exception:
             pass
         func_index = FuncIndex(self.source_root, functions_db, v2_store)
