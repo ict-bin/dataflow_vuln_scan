@@ -71,7 +71,7 @@ _DDL_WITH_TASK_V2 = """
 CREATE TABLE IF NOT EXISTS processed_taints (
     source_dir_id    VARCHAR(64) NOT NULL,
     func_id          VARCHAR(128) NOT NULL,
-    taint_signature  VARCHAR(512) NOT NULL,
+    taint_signature  VARCHAR(128) NOT NULL,
     task_id          VARCHAR(64) NOT NULL,
     taint_params     TEXT,
     sessions_path    VARCHAR(128),
@@ -87,7 +87,7 @@ CREATE TABLE IF NOT EXISTS taints (
     name                VARCHAR(128) NOT NULL,
     signature           VARCHAR(512) NOT NULL,
     file                VARCHAR(512) NOT NULL,
-    function            VARCHAR(512) NOT NULL,
+    `function`          VARCHAR(512) NOT NULL,
     next_propagations   TEXT,
     description         VARCHAR(128),
     task_id             VARCHAR(64) NOT NULL,
@@ -98,8 +98,8 @@ CREATE TABLE IF NOT EXISTS propagations (
     source_dir_id           VARCHAR(64) NOT NULL,
     prop_id                 VARCHAR(128) NOT NULL,
     source_func_id          VARCHAR(128),
-    source_taint_signature  VARCHAR(512) NOT NULL,
-    target_taint_signature  VARCHAR(512) NOT NULL,
+    source_taint_signature  VARCHAR(128) NOT NULL,
+    target_taint_signature  VARCHAR(128) NOT NULL,
     target_func_id          VARCHAR(128),
     target_function         VARCHAR(512),
     target_file             VARCHAR(512),
@@ -136,7 +136,7 @@ _DDL_WITH_TASK_DAG = """
 CREATE TABLE IF NOT EXISTS dag_processed_taints (
     source_dir_id    VARCHAR(64) NOT NULL,
     func_id          VARCHAR(128) NOT NULL,
-    taint_signature  VARCHAR(512) NOT NULL,
+    taint_signature  VARCHAR(128) NOT NULL,
     task_id          VARCHAR(64) NOT NULL,
     analyzed_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (source_dir_id, func_id, taint_signature, task_id)
@@ -146,7 +146,7 @@ CREATE INDEX idx_dpt_task ON dag_processed_taints(task_id);
 CREATE TABLE IF NOT EXISTS dag_nodes (
     source_dir_id    VARCHAR(64) NOT NULL,
     func_id          VARCHAR(128) NOT NULL,
-    taint_signature  VARCHAR(512) NOT NULL,
+    taint_signature  VARCHAR(128) NOT NULL,
     node_id          INTEGER NOT NULL,
     line             INTEGER NOT NULL DEFAULT 0,
     taint            VARCHAR(128) NOT NULL,
