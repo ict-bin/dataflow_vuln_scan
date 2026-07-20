@@ -203,6 +203,20 @@ class MysqlGraphStore:
         run_root = str(run_dict.get("run_root") or "")
         epoch = str(run_dict.get("epoch") or "")
 
+        # MySQL TEXT columns are nullable; replace None with empty defaults
+        # to match SQLite's NOT NULL DEFAULT '' behavior for pydantic models.
+        _TEXT_DEFAULTS = {"{}": ("extra_json",), "[]": ("validations_json", "actual_args_json"), "": tuple()
+        }
+        _DEFAULT_MAP = {}
+        for default, cols in _TEXT_DEFAULTS.items():
+            for c in cols:
+                _DEFAULT_MAP[c] = default
+        for row_list in (nodes, edges, sessions, findings):
+            for row in row_list:
+                for key in list(row.keys()):
+                    if row[key] is None:
+                        row[key] = _DEFAULT_MAP.get(key, "")
+
         node_by_id = {str(n.get("node_id") or ""): n for n in nodes}
         edges_by_source: dict[str, list[dict]] = {}
         for edge in edges:
