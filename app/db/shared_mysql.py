@@ -13,6 +13,8 @@ import hashlib, logging, threading
 from typing import Any
 from sqlalchemy import create_engine, text as sa_text
 
+from .mysql_read import MysqlReadMixin
+
 logger = logging.getLogger("dvs.db.shared_mysql")
 
 # 缓存 engine (每 db_name 一个)
@@ -116,6 +118,16 @@ CREATE TABLE IF NOT EXISTS propagations (
     PRIMARY KEY (source_dir_id, prop_id, task_id)
 );
 CREATE INDEX idx_prop_source ON propagations(source_dir_id, source_func_id);
+ALTER TABLE propagations ADD COLUMN IF NOT EXISTS source_taint_name VARCHAR(128) NOT NULL DEFAULT '';
+ALTER TABLE propagations ADD COLUMN IF NOT EXISTS target_taint_name VARCHAR(128) NOT NULL DEFAULT '';
+ALTER TABLE propagations ADD COLUMN IF NOT EXISTS callsite_validated INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE propagations ADD COLUMN IF NOT EXISTS is_external_callee INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE propagations ADD COLUMN IF NOT EXISTS dispatch_kind VARCHAR(128) NOT NULL DEFAULT '';
+ALTER TABLE propagations ADD COLUMN IF NOT EXISTS branch_group_id VARCHAR(128) NOT NULL DEFAULT '';
+ALTER TABLE propagations ADD COLUMN IF NOT EXISTS branch_arm_id VARCHAR(128) NOT NULL DEFAULT '';
+ALTER TABLE propagations ADD COLUMN IF NOT EXISTS branch_path TEXT;
+ALTER TABLE propagations ADD COLUMN IF NOT EXISTS mutex_siblings TEXT;
+ALTER TABLE propagations ADD COLUMN IF NOT EXISTS description VARCHAR(128);
 CREATE TABLE IF NOT EXISTS orchestration (
     source_dir_id   VARCHAR(64) NOT NULL,
     edge_id          VARCHAR(128) NOT NULL,
@@ -130,6 +142,10 @@ CREATE TABLE IF NOT EXISTS orchestration (
     PRIMARY KEY (source_dir_id, edge_id, task_id)
 );
 CREATE INDEX idx_orch_status ON orchestration(source_dir_id, status);
+ALTER TABLE orchestration ADD COLUMN IF NOT EXISTS source_function VARCHAR(512) NOT NULL DEFAULT '';
+ALTER TABLE orchestration ADD COLUMN IF NOT EXISTS source_signature VARCHAR(512) NOT NULL DEFAULT '';
+ALTER TABLE orchestration ADD COLUMN IF NOT EXISTS target_function VARCHAR(512) NOT NULL DEFAULT '';
+ALTER TABLE orchestration ADD COLUMN IF NOT EXISTS target_signature VARCHAR(512) NOT NULL DEFAULT '';
 """
 
 _DDL_WITH_TASK_DAG = """
@@ -193,8 +209,8 @@ _V2_TASK_TABLES = ["processed_taints", "taints", "propagations", "orchestration"
 _DAG_TASK_TABLES = ["dag_processed_taints", "dag_nodes", "dag_edges", "dag_meta"]
 
 
-class SharedMysqlStore:
-    """MySQL 共享存储 (只写 + 清理, 不读)。
+class SharedMysqlStore(MysqlReadMixin):
+    """MySQL 共享存储 (读写 + 清理)。
 
     使用: 在 store 初始化时创建, 传入 mode/source_root/task_id。
     worker 每次 SQLite 写完后调对应方法同步写 MySQL。
@@ -355,9 +371,12 @@ class SharedMysqlStore:
     def upsert_propagation(self, **kw):
         """propagations 表插入 (key = prop_id, 列名与表结构对应)。"""
         cols = ["prop_id", "source_func_id", "source_taint_signature", "target_taint_signature",
+                "source_taint_name", "target_taint_name",
                 "target_func_id", "target_function", "target_file", "call_line", "condition",
-                "is_external", "is_indirect_call", "escape_kind", "carrier", "escape_via",
-                "actual_args", "validations"]
+                "is_external", "is_indirect_call", "is_external_callee", "dispatch_kind",
+                "escape_kind", "carrier", "escape_via", "callsite_validated",
+                "branch_group_id", "branch_arm_id", "branch_path", "mutex_siblings",
+                "actual_args", "validations", "description"]
         vals = {c: kw.get(c, "") for c in cols}
         placeholders = ", ".join(f":{c}" for c in cols)
         col_list = ", ".join(cols)
@@ -370,14 +389,19 @@ class SharedMysqlStore:
 
     def upsert_orchestration_edge(self, *, edge_id: str, path_id: str, source_func_id: str,
                                   target_func_id: str, taint_params: str, depth: int,
-                                  edge_order: int, status: str = "pending"):
+                                  edge_order: int, status: str = "pending",
+                                  source_function: str = "", source_signature: str = "",
+                                  target_function: str = "", target_signature: str = ""):
         sql = """INSERT IGNORE INTO orchestration (source_dir_id,edge_id,path_id,source_func_id,
-            target_func_id,taint_params,depth,edge_order,status,task_id)
-            VALUES (:sid,:eid,:pid,:sfid,:tfid,:tp,:d,:eo,:st,:task)"""
+            target_func_id,taint_params,depth,edge_order,status,task_id,
+            source_function,source_signature,target_function,target_signature)
+            VALUES (:sid,:eid,:pid,:sfid,:tfid,:tp,:d,:eo,:st,:task,:sf,:ssig,:tf,:tsig)"""
         with self._engine.connect() as conn:
             conn.execute(sa_text(sql), {"sid": self.source_dir_id, "eid": edge_id, "pid": path_id,
                 "sfid": source_func_id, "tfid": target_func_id, "tp": taint_params,
-                "d": depth, "eo": edge_order, "st": status, "task": self.task_id})
+                "d": depth, "eo": edge_order, "st": status, "task": self.task_id,
+                "sf": source_function, "ssig": source_signature,
+                "tf": target_function, "tsig": target_signature})
             conn.commit()
 
     # ── DAG (仅 dagflow 模式) ─────────────────────────────────────────

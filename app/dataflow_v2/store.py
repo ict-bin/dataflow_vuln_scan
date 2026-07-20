@@ -280,7 +280,11 @@ class DataflowStore:
 
     def get_function(self, func_id: str) -> FunctionRecord | None:
         row = self._q("functions", "SELECT * FROM functions WHERE func_id=?", (func_id,))
-        return _row_to_function(row[0]) if row else None
+        if row:
+            return _row_to_function(row[0])
+        if self._mysql:
+            return self._mysql.read_function(func_id)
+        return None
 
     def find_function(self, name: str, file: str = "") -> FunctionRecord | None:
         """按名查找函数。C++ 方法: LLM 报短名 (ReadDataTask), 库存限定名
@@ -320,6 +324,8 @@ class DataflowStore:
         )
         if exact:
             return exact
+        if self._mysql:
+            return self._mysql.read_functions(name, file)
 
         tail = ""
         if "::" in name:
@@ -340,13 +346,16 @@ class DataflowStore:
         if not tail:
             return []
         suf = "%::" + tail
-        return _rows(
+        result = _rows(
             "SELECT * FROM functions WHERE name LIKE ? ORDER BY start_line",
             (suf,),
         ) if not file else _rows(
             "SELECT * FROM functions WHERE name LIKE ? AND file=? ORDER BY start_line",
             (suf, file),
         )
+        if not result and self._mysql:
+            return self._mysql.read_functions(name, file)
+        return result
 
     def list_functions(self) -> list[FunctionRecord]:
         return [_row_to_function(r) for r in self._q("functions", "SELECT * FROM functions")]
@@ -528,6 +537,8 @@ class DataflowStore:
                                    taint_signature=r["taint_signature"], pre_validations=[],
                                    pre_validation_signature=r["pre_validation_signature"],
                                    sessions_path=r["sessions_path"])
+        if self._mysql:
+            return self._mysql.read_processed_taint(func_id, ts)
         return None
 
     # ── 污点库 ──────────────────────────────────────────────────────────────
@@ -552,8 +563,12 @@ class DataflowStore:
         return _row_to_taint(row[0]) if row else None
 
     def list_taints_in_function(self, func_id: str) -> list[TaintRecord]:
-        return [_row_to_taint(r) for r in self._q("taints",
-                "SELECT * FROM taints WHERE func_id=?", (func_id,))]
+        rows = self._q("taints", "SELECT * FROM taints WHERE func_id=?", (func_id,))
+        if rows:
+            return [_row_to_taint(r) for r in rows]
+        if self._mysql:
+            return self._mysql.read_taints_in_function(func_id)
+        return []
 
     def add_propagation_to_taint(self, taint_id: str, prop_id: str) -> None:
         t = self.get_taint(taint_id)
@@ -600,11 +615,19 @@ class DataflowStore:
 
     def get_propagation(self, prop_id: str) -> PropagationRecord | None:
         row = self._q("propagations", "SELECT * FROM propagations WHERE prop_id=?", (prop_id,))
-        return _row_to_propagation(row[0]) if row else None
+        if row:
+            return _row_to_propagation(row[0])
+        if self._mysql:
+            return self._mysql.read_propagation(prop_id)
+        return None
 
     def list_propagations_from(self, func_id: str) -> list[PropagationRecord]:
-        return [_row_to_propagation(r) for r in self._q("propagations",
-                "SELECT * FROM propagations WHERE source_func_id=?", (func_id,))]
+        rows = self._q("propagations", "SELECT * FROM propagations WHERE source_func_id=?", (func_id,))
+        if rows:
+            return [_row_to_propagation(r) for r in rows]
+        if self._mysql:
+            return self._mysql.read_propagations_from(func_id)
+        return []
 
     # ── 编排库 ──────────────────────────────────────────────────────────────
     def upsert_edge(self, edge: OrchestrationEdge) -> None:
@@ -622,19 +645,29 @@ class DataflowStore:
             try: self._mysql.upsert_orchestration_edge(edge_id=r["edge_id"], path_id=r["path_id"],
                 source_func_id=r["source_func_id"], target_func_id=r["target_func_id"],
                 taint_params=r["taint_params"], depth=r["depth"], edge_order=r["edge_order"],
-                status=r["status"])
+                status=r["status"],
+                source_function=r["source_function"], source_signature=r["source_signature"],
+                target_function=r["target_function"], target_signature=r["target_signature"])
             except Exception: logger.debug("mysql upsert_edge failed", exc_info=True)
 
     def set_edge_status(self, edge_id: str, status: str) -> None:
         self._exec("orchestration", "UPDATE orchestration SET status=? WHERE edge_id=?", (status, edge_id))
 
     def list_path_edges(self, path_id: str) -> list[OrchestrationEdge]:
-        return [_row_to_edge(r) for r in self._q("orchestration",
-                "SELECT * FROM orchestration WHERE path_id=? ORDER BY edge_order", (path_id,))]
+        rows = self._q("orchestration", "SELECT * FROM orchestration WHERE path_id=? ORDER BY edge_order", (path_id,))
+        if rows:
+            return [_row_to_edge(r) for r in rows]
+        if self._mysql:
+            return self._mysql.read_path_edges(path_id)
+        return []
 
     def pending_edges(self) -> list[OrchestrationEdge]:
-        return [_row_to_edge(r) for r in self._q("orchestration",
-                "SELECT * FROM orchestration WHERE status='pending' ORDER BY depth, edge_order")]
+        rows = self._q("orchestration", "SELECT * FROM orchestration WHERE status='pending' ORDER BY depth, edge_order")
+        if rows:
+            return [_row_to_edge(r) for r in rows]
+        if self._mysql:
+            return self._mysql.read_pending_edges()
+        return []
 
 
 # ── row → record 反序列化 ────────────────────────────────────────────────────
