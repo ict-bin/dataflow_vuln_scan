@@ -119,7 +119,7 @@ class TestPathBuilding(unittest.TestCase):
         # → resolve_external_propagation 返回读者 → fork 子路径跟入读者 (list_add_tail 不当 callee 跟入)
         reader = _func(self.store, "Reader")
         class _ReaderCbs(AnalysisCallbacks):
-            def resolve_external_propagation(self, store, func, prop, ctx):
+            def resolve_external_propagation(self, store, func, prop, ctx, base_session=""):
                 if prop.escape_kind == "container":
                     return [(reader, TaintParamInfo(positions=[0], signature="head", names=["head"]))]
                 return []
@@ -231,7 +231,7 @@ class _MockCbs(AnalysisCallbacks):
             ]
             return AnalysisResult(propagations=props, self_contained=False, description="A")
         return AnalysisResult(self_contained=True, description=func.name)  # 叶子自洽
-    def resolve_external_propagation(self, store, func, taint, ctx):
+    def resolve_external_propagation(self, store, func, taint, ctx, base_session=""):
         return []
     def mine_vulns(self, store, func, tp, ctx, base_session=""):
         with self._lock: self.mined.append(func.name)
@@ -372,7 +372,7 @@ class TestGraphUnresolvedTargetKind(unittest.TestCase):
                     self.graph_epoch = "run"
                     self.graph_node_id = lambda func: f"node::{func.func_id}"
 
-                def resolve_external_propagation(self, store, func, prop, ctx):
+                def resolve_external_propagation(self, store, func, prop, ctx, base_session=""):
                     return []
 
             graph_store.start_task_graph_run(TaskGraphRunRecord(
@@ -548,6 +548,38 @@ class TestGraphBridgeVisibility(unittest.TestCase):
             self.assertEqual(1, int(edge_by_id[bridge_edge_id]["visible_in_all_propagations"]))
 
 
+class TestTrackerSessionPropagation(unittest.TestCase):
+    def test_build_paths_passes_chain_session_to_external_tracker(self):
+        with tempfile.TemporaryDirectory() as td:
+            store = DataflowStore(Path(td) / "run")
+            root = _func(store, "Root", file="root.c")
+            reader = _func(store, "Reader", file="reader.c")
+            seen: dict[str, str] = {}
+
+            class _Cbs(AnalysisCallbacks):
+                def resolve_external_propagation(self, store, func, prop, ctx, base_session=""):
+                    seen["base_session"] = base_session
+                    return [(reader, TaintParamInfo([0], "head", ["head"]))]
+
+            orch = DfsOrchestrator(store, _Cbs(), concurrent=False, max_depth=2)
+            prop = PropagationRecord(
+                source_func_id=root.func_id,
+                source_taint_name="msg",
+                source_taint_signature="msg_t*",
+                target_taint_name="reader",
+                target_taint_signature="reader_t*",
+                target_function="Reader",
+                call_line=10,
+                is_external=True,
+                escape_kind="container",
+            )
+            paths = orch._build_paths([prop], root, PathContext("p0"), 0, ["msg"], "/tmp/chain-session.jsonl")
+
+            self.assertEqual(1, len(paths))
+            self.assertEqual("/tmp/chain-session.jsonl", seen["base_session"])
+            store.close()
+
+
 class TestGraphExecutionLifecycle(unittest.TestCase):
     def test_external_callee_propagation_stays_not_followed_in_authoritative_graph(self):
         with tempfile.TemporaryDirectory() as td:
@@ -682,7 +714,7 @@ class TestGraphExecutionLifecycle(unittest.TestCase):
                         description="Reader",
                     )
 
-                def resolve_external_propagation(self, store, func, prop, ctx):
+                def resolve_external_propagation(self, store, func, prop, ctx, base_session=""):
                     return [(reader, TaintParamInfo([0], "head", ["head"]))]
 
                 def mine_vulns(self, store, func, taint_params, ctx, base_session=""):

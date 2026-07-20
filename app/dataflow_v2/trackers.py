@@ -14,6 +14,7 @@ import re
 from pathlib import Path
 from typing import Any, Callable
 
+from ..copy_utils import safe_copyfile
 from ..runner import run_agent
 from ..vuln_report_utils import safe_name, build_v2_system_prompt
 from ..parsers import _extract_json_object
@@ -30,6 +31,7 @@ def resolve_external(
     cfg, source_root: str, sessions_dir: Path, store: DataflowStore,
     func: FunctionRecord, prop: PropagationRecord,
     cancel_event: Any = None, on_event: Callable = None, depth: int = 0,
+    base_session: str = "",
 ) -> list[tuple[FunctionRecord, TaintParamInfo]]:
     """外部逃逸下游追踪: LLM fork 用 v2_db 按逃逸语义查读者。
 
@@ -43,6 +45,11 @@ def resolve_external(
         return []
 
     fork_session = sessions_dir / f"d{depth:02d}-{safe_name(func.name)}-track-{safe_name(prop.escape_kind or prop.carrier or 'escape')}.jsonl"
+    try:
+        if base_session and Path(base_session).exists():
+            safe_copyfile(base_session, str(fork_session))
+    except OSError:
+        pass
     v2_system = build_v2_system_prompt(custom="tracker")
     system_prompt = (v2_system + "\n\n" if v2_system else "") + (
         "你是数据流污点分析中的外部逃逸下游读者追踪器。\n"
@@ -161,6 +168,7 @@ def resolve_indirect(
     cfg, source_root: str, sessions_dir: Path, store: DataflowStore,
     func: FunctionRecord, prop: PropagationRecord,
     cancel_event: Any = None, on_event: Callable = None, depth: int = 0,
+    base_session: str = "",
 ) -> list[tuple[FunctionRecord, TaintParamInfo]]:
     """函数指针注册点追踪: 数据库前后缀匹配 + LLM 判断 (fresh session)。"""
     acfg = cfg.workers.agents[0] if cfg.workers.agents else None
@@ -178,6 +186,11 @@ def resolve_indirect(
         candidates = [{"name": "", "file": "", "func_id": ""}]
 
     fork_session = sessions_dir / f"d{depth:02d}-{safe_name(func.name)}-fptrack-{safe_name(fp_expr)}.jsonl"
+    try:
+        if base_session and Path(base_session).exists():
+            safe_copyfile(base_session, str(fork_session))
+    except OSError:
+        pass
     v2_system = build_v2_system_prompt(custom="tracker")
     system_prompt = (v2_system + "\n\n" if v2_system else "") + (
         "你是数据流污点分析中的函数指针/回调目标追踪器。\n"

@@ -99,7 +99,8 @@ class AnalysisCallbacks:
         return AnalysisResult()
 
     def resolve_external_propagation(self, store: DataflowStore, func: FunctionRecord,
-                                     prop: PropagationRecord, ctx: PathContext) -> list[tuple[FunctionRecord, TaintParamInfo]]:
+                                     prop: PropagationRecord, ctx: PathContext,
+                                     base_session: str = "") -> list[tuple[FunctionRecord, TaintParamInfo]]:
         """taint 传播到外部变量 (如 ctx->buf) 时, 跟踪查找读取该变量的跟入函数。
 
         返回 [(目标函数, 该路径上的污点参数信息)] 用于分叉路径。
@@ -107,7 +108,8 @@ class AnalysisCallbacks:
         return []
 
     def resolve_indirect_call(self, store: DataflowStore, func: FunctionRecord,
-                              prop: PropagationRecord, ctx: PathContext) -> list[tuple[FunctionRecord, TaintParamInfo]]:
+                              prop: PropagationRecord, ctx: PathContext,
+                              base_session: str = "") -> list[tuple[FunctionRecord, TaintParamInfo]]:
         """函数指针/回调/dispatch 间接调用 → function_pointer tracker 搜注册点 → 处理函数。
 
         返回 [(处理函数, 污点参数)] 用于分叉路径。TODO: 接入。
@@ -424,7 +426,7 @@ class DfsOrchestrator:
             # 返回值派生的 propagation 在 return_taints 重分析轮自然拾起
             taint_names = set(taint_params.names) | {t.name for t in result.taints}
             paths = self._build_paths(result.propagations, func, ctx, depth,
-                                      list(taint_names))
+                                      list(taint_names), chain_session)
         else:
             paths = []
 
@@ -642,7 +644,7 @@ class DfsOrchestrator:
     # ── 路径构造: 有序链 + 互斥分叉 + 外部分叉 ───────────────────────────────
     def _build_paths(self, props: list[PropagationRecord], func: FunctionRecord,
                      ctx: PathContext, depth: int,
-                     taint_names: list[str]) -> list[list[ChainStep]]:
+                     taint_names: list[str], chain_session: str = "") -> list[list[ChainStep]]:
         if not props:
             return []
         # 只跟入 source 有"已确认污点"支撑的 propagation (防爆炸 + 不跟未确认的 callee 返回值派生)
@@ -683,7 +685,7 @@ class DfsOrchestrator:
             elif p.is_external:
                 # 外部变量传播 → 跟踪 LLM 找跟入函数, 每个跟入 fork 一条子链
                 targets = self._run_llm(
-                    self.cbs.resolve_external_propagation, self.store, func, p, ctx)
+                    self.cbs.resolve_external_propagation, self.store, func, p, ctx, chain_session)
                 if not targets:
                     graph_store = self._graph_store()
                     if graph_store is not None:
@@ -719,7 +721,7 @@ class DfsOrchestrator:
                 paths = new_paths
             elif p.is_indirect_call:
                 # 函数指针/回调间接调用 → function_pointer tracker 搜注册点 → 处理函数
-                targets = self._run_llm(self.cbs.resolve_indirect_call, self.store, func, p, ctx)
+                targets = self._run_llm(self.cbs.resolve_indirect_call, self.store, func, p, ctx, chain_session)
                 if not targets:
                     graph_store = self._graph_store()
                     if graph_store is not None:

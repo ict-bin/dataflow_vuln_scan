@@ -630,7 +630,7 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
         external_props = [p for p in validated_props
                           if p.is_external_callee and p.target_function]
         if external_props:
-            inferred = self._infer_external_callees(external_props, func)
+            inferred = self._infer_external_callees(external_props, func, str(fork_session))
             for prop in external_props:
                 inf = inferred.get(prop.target_function)
                 if inf and inf.get("inferable"):
@@ -746,7 +746,8 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
         return rec.func_id
 
     # ── prompt 构造 ─────────────────────────────────────────────────────────
-    def _infer_external_callees(self, external_props: list, func: FunctionRecord) -> dict:
+    def _infer_external_callees(self, external_props: list, func: FunctionRecord,
+                                base_session: str = "") -> dict:
         """批量 LLM 推断外部函数语义 (一次调用)。
 
         返回 {function_name: {inferable, return_taint, propagation, validation}}
@@ -774,11 +775,15 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
             '- 不能推断: {"function": "MSG_Proc", "inferable": false}\n\n'
             '输出格式: ```json\n[{"function": "...", ...}, ...]\n```'
         )
-        # 用 fresh session (不继承 taint 分析上下文)
         session_key = "_".join(_safe_name(p.target_function or "external") for p in external_props[:3]) or "external"
         if len(external_props) > 3:
             session_key = f"{session_key}_plus{len(external_props) - 3}"
         fork_session = _session_path(self.sessions_dir, -1, func.name, session_key[:80], kind="infer-ext")
+        try:
+            if base_session and Path(base_session).exists():
+                safe_copyfile(base_session, str(fork_session))
+        except OSError:
+            pass
         logger.info(
             "[V2-infer-ext] CALLING run_agent (session=%s timeout=%ss)",
             str(fork_session)[-80:],
@@ -856,19 +861,23 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
 
     # ── 函数指针间接调用跟踪 (复用 V1 function_pointer tracker) ──────────────
     def resolve_indirect_call(self, store: DataflowStore, func: FunctionRecord,
-                              prop: PropagationRecord, ctx: PathContext) -> list[tuple[FunctionRecord, TaintParamInfo]]:
-        """函数指针注册点追踪: 前后缀匹配缩小候选 + LLM 判断 (fresh session)"""
+                              prop: PropagationRecord, ctx: PathContext,
+                              base_session: str = "") -> list[tuple[FunctionRecord, TaintParamInfo]]:
+        """函数指针注册点追踪: 前后缀匹配缩小候选 + LLM 判断 (fork-from-parent session)"""
         from .trackers import resolve_indirect
         return resolve_indirect(self.cfg, self.source_root, self.sessions_dir, store,
-                               func, prop, self.cancel_event, self.on_event, ctx.depth)
+                               func, prop, self.cancel_event, self.on_event, ctx.depth,
+                               base_session)
 
     # ── 外部变量跟踪 (item 1) ────────────────────────────────────────────────
     def resolve_external_propagation(self, store: DataflowStore, func: FunctionRecord,
-                                     prop: PropagationRecord, ctx: PathContext) -> list[tuple[FunctionRecord, TaintParamInfo]]:
-        """外部逃逸下游追踪: LLM fork 用 v2_db 按逃逸语义查读者 (不靠字符串 pattern)"""
+                                     prop: PropagationRecord, ctx: PathContext,
+                                     base_session: str = "") -> list[tuple[FunctionRecord, TaintParamInfo]]:
+        """外部逃逸下游追踪: LLM fork 用 v2_db 按逃逸语义查读者 (fork-from-parent session)"""
         from .trackers import resolve_external
         return resolve_external(self.cfg, self.source_root, self.sessions_dir, store,
-                               func, prop, self.cancel_event, self.on_event, ctx.depth)
+                               func, prop, self.cancel_event, self.on_event, ctx.depth,
+                               base_session)
 
     # ── 漏洞挖掘 (item 2) ────────────────────────────────────────────────────
     def mine_vulns(self, store: DataflowStore, func: FunctionRecord,

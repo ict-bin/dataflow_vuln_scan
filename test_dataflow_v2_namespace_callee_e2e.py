@@ -13,6 +13,7 @@ from app.dataflow_v2.models import FunctionRecord, PropagationRecord, TaintParam
 from app.dataflow_v2.orchestrator import AnalysisCallbacks, AnalysisResult, DfsOrchestrator
 from app.dataflow_v2.store import DataflowStore
 from app.dataflow_v2.trackers import resolve_external
+from app.dataflow_v2.trackers import resolve_indirect
 
 
 class _RealCaseCallbacks(AnalysisCallbacks):
@@ -269,6 +270,101 @@ class DataflowV2NamespaceCalleeE2ETests(unittest.TestCase):
         self.assertEqual(1, len(confirmed))
         self.assertEqual("OnSharedManager", confirmed[0][0].name)
         self.assertTrue(any(call.args[1] == "module_template.cpp" for call in ensure_mock.call_args_list))
+
+    def test_external_tracker_reuses_parent_session_history(self):
+        self.store.upsert_function(
+            FunctionRecord(
+                file="module_template.cpp",
+                name="OnSharedManager",
+                signature="int OnSharedManager()",
+                start_line=1,
+                end_line=4,
+                func_hash="callee-hash",
+            )
+        )
+        sessions_dir = Path(self.td.name) / "sessions"
+        sessions_dir.mkdir(parents=True, exist_ok=True)
+        base_session = sessions_dir / "parent.jsonl"
+        base_session.write_text('{"role":"user","content":"parent-history"}\n', encoding="utf-8")
+        prop = PropagationRecord(
+            source_func_id=self.root_func.func_id,
+            source_taint_name="msg",
+            source_taint_signature="msg_t*",
+            target_taint_name="ModuleTemplate::OnSharedManager",
+            target_taint_signature="msg_t*",
+            escape_kind="container",
+            carrier="shared_manager",
+            escape_via="ModuleTemplate::OnSharedManager",
+        )
+        captured: dict[str, str] = {}
+
+        def _fake_external_run_agent(**kwargs):
+            captured["session_text"] = Path(kwargs["session_file"]).read_text(encoding="utf-8")
+            return type("AgentResult", (), {"output": '{"confirmed":[{"function":"OnSharedManager","taint_param":"manager","reason":"real case"}]}'})()
+
+        with patch("app.dataflow_v2.trackers.run_agent", side_effect=_fake_external_run_agent):
+            confirmed = resolve_external(
+                _TrackerCfg(),
+                str(self.source_root),
+                sessions_dir,
+                self.store,
+                self.root_func,
+                prop,
+                cancel_event=None,
+                on_event=None,
+                depth=0,
+                base_session=str(base_session),
+            )
+
+        self.assertEqual(1, len(confirmed))
+        self.assertIn("parent-history", captured["session_text"])
+
+    def test_indirect_tracker_reuses_parent_session_history(self):
+        target = FunctionRecord(
+            file="handler.cpp",
+            name="OnSharedManager",
+            signature="int OnSharedManager()",
+            start_line=1,
+            end_line=4,
+            func_hash="handler-hash",
+        )
+        self.store.upsert_function(target)
+        sessions_dir = Path(self.td.name) / "sessions-indirect"
+        sessions_dir.mkdir(parents=True, exist_ok=True)
+        base_session = sessions_dir / "parent.jsonl"
+        base_session.write_text('{"role":"user","content":"parent-history"}\n', encoding="utf-8")
+        prop = PropagationRecord(
+            source_func_id=self.root_func.func_id,
+            source_taint_name="msg",
+            source_taint_signature="msg_t*",
+            target_taint_name="cb",
+            target_taint_signature="msg_t*",
+            target_function="ctxt->sax->OnSharedManager",
+            call_line=88,
+            is_indirect_call=True,
+        )
+        captured: dict[str, str] = {}
+
+        def _fake_run_agent(**kwargs):
+            captured["session_text"] = Path(kwargs["session_file"]).read_text(encoding="utf-8")
+            return type("AgentResult", (), {"output": '{"handlers":[{"function":"OnSharedManager","file":"handler.cpp","reason":"match"}]}'})()
+
+        with patch("app.dataflow_v2.trackers.run_agent", side_effect=_fake_run_agent):
+            resolved = resolve_indirect(
+                _TrackerCfg(),
+                str(self.source_root),
+                sessions_dir,
+                self.store,
+                self.root_func,
+                prop,
+                cancel_event=None,
+                on_event=None,
+                depth=0,
+                base_session=str(base_session),
+            )
+
+        self.assertEqual(1, len(resolved))
+        self.assertIn("parent-history", captured["session_text"])
 
 
 if __name__ == "__main__":
