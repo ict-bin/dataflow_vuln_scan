@@ -67,6 +67,12 @@ CREATE TABLE IF NOT EXISTS class_members (
     `file`         VARCHAR(512),
     PRIMARY KEY (source_dir_id, class_name, member_name)
 );
+CREATE TABLE IF NOT EXISTS indexing_files (
+    source_dir_id  VARCHAR(64) NOT NULL,
+    file_path      VARCHAR(512) NOT NULL,
+    started_at     DOUBLE NOT NULL DEFAULT 0,
+    PRIMARY KEY (source_dir_id, file_path)
+);
 """
 
 _DDL_WITH_TASK_V2 = """

@@ -251,3 +251,158 @@ class MysqlReadMixin:
                 return [_dict_to_edge(dict(r._mapping)) for r in rows]
         except Exception:
             return []
+
+    # ── 共享数据 (源码级, 无 task_id) ────────────────────────────────
+
+    def read_list_functions(self) -> list[FunctionRecord]:
+        try:
+            with self._engine.connect() as conn:
+                rows = conn.execute(sa_text(
+                    "SELECT * FROM functions WHERE source_dir_id=:sid"),
+                    {"sid": self.source_dir_id}).fetchall()
+                return [_dict_to_function(dict(r._mapping)) for r in rows]
+        except Exception:
+            return []
+
+    def read_files_including(self, header: str) -> list[str]:
+        try:
+            with self._engine.connect() as conn:
+                rows = conn.execute(sa_text(
+                    "SELECT `file` FROM include_index WHERE source_dir_id=:sid AND header=:h"),
+                    {"sid": self.source_dir_id, "h": header}).fetchall()
+                return [r[0] for r in rows]
+        except Exception:
+            return []
+
+    def read_bases(self, class_name: str) -> list[str]:
+        try:
+            with self._engine.connect() as conn:
+                row = conn.execute(sa_text(
+                    "SELECT bases FROM class_hierarchy WHERE source_dir_id=:sid AND class_name=:cn"),
+                    {"sid": self.source_dir_id, "cn": class_name}).fetchone()
+                return json.loads(row[0] or "[]") if row else []
+        except Exception:
+            return []
+
+    def read_all_ancestors(self, class_name: str) -> list[str]:
+        visited: set[str] = set()
+        queue = [class_name]
+        while queue:
+            cls = queue.pop(0)
+            if cls in visited:
+                continue
+            visited.add(cls)
+            for base in self.read_bases(cls):
+                if base not in visited:
+                    queue.append(base)
+        visited.discard(class_name)
+        return list(visited)
+
+    def read_all_descendants(self, class_name: str) -> list[str]:
+        visited = {class_name}
+        try:
+            with self._engine.connect() as conn:
+                rows = conn.execute(sa_text(
+                    "SELECT class_name, bases FROM class_hierarchy WHERE source_dir_id=:sid"),
+                    {"sid": self.source_dir_id}).fetchall()
+            changed = True
+            while changed:
+                changed = False
+                for r in rows:
+                    cn = r[0]
+                    if cn in visited:
+                        continue
+                    bases = json.loads(r[1] or "[]")
+                    if any(b in visited for b in bases):
+                        visited.add(cn)
+                        changed = True
+        except Exception:
+            pass
+        visited.discard(class_name)
+        return list(visited)
+
+    def read_member_declaring_class(self, class_name: str, member_name: str) -> str | None:
+        candidates = [class_name] + self.read_all_ancestors(class_name)
+        try:
+            with self._engine.connect() as conn:
+                for cls in candidates:
+                    row = conn.execute(sa_text(
+                        "SELECT class_name FROM class_members "
+                        "WHERE source_dir_id=:sid AND class_name=:cn AND member_name=:mn"),
+                        {"sid": self.source_dir_id, "cn": cls, "mn": member_name}).fetchone()
+                    if row:
+                        return cls
+        except Exception:
+            pass
+        return None
+
+    def read_class_scope_methods(self, class_name: str, member_name: str = "") -> list[str]:
+        if member_name:
+            declaring = self.read_member_declaring_class(class_name, member_name) or class_name
+        else:
+            declaring = class_name
+        classes = {declaring} | set(self.read_all_descendants(declaring))
+        result: list[str] = []
+        try:
+            with self._engine.connect() as conn:
+                for cls in classes:
+                    rows = conn.execute(sa_text(
+                        "SELECT name FROM functions WHERE source_dir_id=:sid AND name LIKE :pat"),
+                        {"sid": self.source_dir_id, "pat": f"{cls}::%"}).fetchall()
+                    result.extend(r[0] for r in rows)
+        except Exception:
+            pass
+        return result
+
+    def read_functions_with_type_in_signature(self, type_name: str) -> list[str]:
+        try:
+            with self._engine.connect() as conn:
+                rows = conn.execute(sa_text(
+                    "SELECT name FROM functions WHERE source_dir_id=:sid AND signature LIKE :pat"),
+                    {"sid": self.source_dir_id, "pat": f"%{type_name}%"}).fetchall()
+                return [r[0] for r in rows]
+        except Exception:
+            return []
+
+    # ── indexing_files (源码级共享) ──────────────────────────────────
+
+    def read_is_indexed(self, file_path: str) -> bool:
+        try:
+            with self._engine.connect() as conn:
+                row = conn.execute(sa_text(
+                    "SELECT 1 FROM indexing_files WHERE source_dir_id=:sid AND file_path=:fp"),
+                    {"sid": self.source_dir_id, "fp": file_path}).fetchone()
+                return row is not None
+        except Exception:
+            return False
+
+    def read_is_indexing(self, file_path: str) -> bool:
+        try:
+            with self._engine.connect() as conn:
+                row = conn.execute(sa_text(
+                    "SELECT 1 FROM indexing_files WHERE source_dir_id=:sid AND file_path=:fp AND started_at > 0"),
+                    {"sid": self.source_dir_id, "fp": file_path}).fetchone()
+                return row is not None
+        except Exception:
+            return False
+
+    def add_indexing_file(self, file_path: str) -> None:
+        try:
+            with self._engine.connect() as conn:
+                conn.execute(sa_text(
+                    "INSERT IGNORE INTO indexing_files (source_dir_id, file_path, started_at) "
+                    "VALUES (:sid, :fp, :ts)"),
+                    {"sid": self.source_dir_id, "fp": file_path, "ts": __import__("time").time()})
+                conn.commit()
+        except Exception:
+            pass
+
+    def finish_indexing_file(self, file_path: str) -> None:
+        try:
+            with self._engine.connect() as conn:
+                conn.execute(sa_text(
+                    "UPDATE indexing_files SET started_at=0 WHERE source_dir_id=:sid AND file_path=:fp"),
+                    {"sid": self.source_dir_id, "fp": file_path})
+                conn.commit()
+        except Exception:
+            pass

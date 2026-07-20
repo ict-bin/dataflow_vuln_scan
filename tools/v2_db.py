@@ -84,13 +84,121 @@ def _query(db_name: str, sql: str, params: tuple = ()) -> list[dict]:
         return []
 
 
+_mysql_store = None
+
+def _get_mysql_store():
+    """懒加载 SharedMysqlStore (SQLite 查不到时 fallback 到 MySQL)。"""
+    global _mysql_store
+    if _mysql_store is not None:
+        return _mysql_store
+    try:
+        import hashlib
+        sr = _source_root()
+        sid = hashlib.sha1(sr.encode("utf-8")).hexdigest()[:16]
+        tid = os.environ.get("DVS_TASK_ID", "")
+        db_cfg_url = os.environ.get("DVS_MYSQL_URL", "")
+        if not db_cfg_url:
+            db_cfg_url = "mysql+pymysql://root:Huawei12%23$@mysql.sothothv2-ns.svc.cluster.local:3306/secflow"
+        from app.db.shared_mysql import SharedMysqlStore
+        _mysql_store = SharedMysqlStore(db_cfg_url, "complete", sr, tid)
+        return _mysql_store
+    except Exception as e:
+        log.warning("mysql store init failed: %s", e)
+        return None
+
+def _mysql_query_functions(name: str, file: str = "") -> list[dict]:
+    """MySQL fallback: 查 functions 表 (按名, 支持 short/tail/suffix 匹配)。"""
+    ms = _get_mysql_store()
+    if ms is None:
+        return []
+    recs = ms.read_functions(name, file)
+    return [{"func_id": r.func_id, "file": r.file, "name": r.name,
+             "signature": r.signature, "start_line": r.start_line,
+             "end_line": r.end_line, "func_hash": r.func_hash,
+             "description": r.description} for r in recs]
+
+def _mysql_query_taints(func_name: str) -> list[dict]:
+    """MySQL fallback: 查 taints 表 (按 function 名)。"""
+    ms = _get_mysql_store()
+    if ms is None:
+        return []
+    recs = ms.read_functions(func_name)
+    if not recs:
+        recs = ms.read_functions(func_name.split("::")[-1])
+    out = []
+    for r in recs:
+        taints = ms.read_taints_in_function(r.func_id)
+        for t in taints:
+            out.append({"taint_id": t.taint_id, "func_id": t.func_id,
+                        "name": t.name, "signature": t.signature,
+                        "file": t.file, "function": t.function,
+                        "next_propagations": t.next_propagations,
+                        "description": t.description})
+    return out
+
+def _mysql_query_propagations(func_name: str) -> list[dict]:
+    """MySQL fallback: 查 propagations 表 (按 func_name → func_id → propagations)。"""
+    ms = _get_mysql_store()
+    if ms is None:
+        return []
+    recs = ms.read_functions(func_name)
+    if not recs:
+        recs = ms.read_functions(func_name.split("::")[-1])
+    out = []
+    for r in recs:
+        props = ms.read_propagations_from(r.func_id)
+        for p in props:
+            out.append({"prop_id": p.prop_id, "source_func_id": p.source_func_id,
+                        "source_taint_signature": p.source_taint_signature,
+                        "target_taint_signature": p.target_taint_signature,
+                        "target_func_id": p.target_func_id,
+                        "target_function": p.target_function,
+                        "target_file": p.target_file,
+                        "call_line": p.call_line, "condition": p.condition,
+                        "is_external": p.is_external,
+                        "description": p.description})
+    return out
+
+def _mysql_query_orchestration(func_name: str) -> list[dict]:
+    """MySQL fallback: 查 orchestration 表 (按 source/target function)。"""
+    ms = _get_mysql_store()
+    if ms is None:
+        return []
+    from sqlalchemy import text as sa_text
+    try:
+        with ms._engine.connect() as conn:
+            rows = conn.execute(sa_text(
+                "SELECT * FROM orchestration WHERE source_dir_id=:sid AND "
+                "(source_function=:fn OR target_function=:fn) ORDER BY edge_order"),
+                {"sid": ms.source_dir_id, "fn": func_name}).fetchall()
+            return [dict(r._mapping) for r in rows]
+    except Exception as e:
+        log.warning("mysql orchestration query failed: %s", e)
+        return []
+
+def _mysql_is_indexed(rel_file: str) -> bool:
+    ms = _get_mysql_store()
+    if ms is None:
+        return False
+    return ms.read_is_indexed(rel_file)
+
+def _mysql_is_indexing(rel_file: str) -> bool:
+    ms = _get_mysql_store()
+    if ms is None:
+        return False
+    return ms.read_is_indexing(rel_file)
+
 def _find_func(name: str) -> dict | None:
     """查函数库, 支持短名后缀匹配 (C++ Class::Method)。"""
     rows = _query("functions.db", "SELECT * FROM functions WHERE name = ?", (name,))
     if rows:
         return rows[0]
     rows = _query("functions.db", "SELECT * FROM functions WHERE name LIKE ?", (f"%{name}",))
-    return rows[0] if rows else None
+    if rows:
+        return rows[0]
+    # MySQL fallback
+    mrows = _mysql_query_functions(name)
+    return mrows[0] if mrows else None
 
 
 def _read_body(func: dict) -> str:
@@ -238,6 +346,8 @@ def cmd_lookup(name: str) -> None:
         # 3a. 文件是否在索引中?
         try:
             idx_rows = _query("functions.db", "SELECT 1 FROM indexing_files WHERE file_path=?", (rel_file,))
+            if not idx_rows:
+                idx_rows = [{"1": 1}] if _mysql_is_indexed(rel_file) else []
             is_indexing = len(idx_rows) > 0
         except Exception:
             is_indexing = False
@@ -396,6 +506,8 @@ def cmd_taints(func_name: str) -> None:
             rows = _query("taints.db", "SELECT * FROM taints WHERE function = ?", (alt,))
             if rows:
                 log.info("taints underscore fallback: %s -> %s", func_name, alt)
+    if not rows:
+        rows = _mysql_query_taints(func_name)
     if rows:
         for r in rows:
             print(f"taint: {r['name']} (signature: {r['signature']})")
@@ -404,6 +516,16 @@ def cmd_taints(func_name: str) -> None:
     else:
         print(f"NOT_FOUND: 函数 '{func_name}' 在污点库中未找到。")
 
+
+def _print_props(rows: list[dict]) -> None:
+    for r in rows:
+        src = r.get('source_taint_name', '') or r.get('source_taint_signature', '')
+        tgt = r.get('target_taint_name', '') or r.get('target_taint_signature', '')
+        print(f"propagation: {src} → {tgt}")
+        print(f"  target_function: {r.get('target_function', '')}")
+        print(f"  call_line: {r.get('call_line', 0)}")
+        print(f"  is_external: {r.get('is_external', 0)}")
+        print(f"  description: {r.get('description', '')}")
 
 def cmd_propagations(func_name: str) -> None:
     """查传播库: 返回函数的传播路径。"""
@@ -419,11 +541,22 @@ def cmd_propagations(func_name: str) -> None:
             if func_rows:
                 log.info("propagations underscore fallback: %s -> %s", func_name, alt)
     if not func_rows:
+        # MySQL fallback
+        mrows = _mysql_query_propagations(func_name)
+        if mrows:
+            _print_props(mrows)
+            return
         print(f"NOT_FOUND: 函数 '{func_name}' 在函数库中未找到。")
         return
     func_ids = [r["func_id"] for r in func_rows]
     placeholders = ",".join("?" * len(func_ids))
     rows = _query("propagations.db", f"SELECT * FROM propagations WHERE source_func_id IN ({placeholders})", tuple(func_ids))
+    if not rows:
+        # MySQL fallback
+        mrows = _mysql_query_propagations(func_name)
+        if mrows:
+            _print_props(mrows)
+            return
     if rows:
         for r in rows:
             print(f"propagation: {r['source_taint_name']} → {r['target_taint_name']}")
@@ -438,6 +571,8 @@ def cmd_propagations(func_name: str) -> None:
 def cmd_orchestration(func_name: str) -> None:
     """查编排库: 返回调用链。"""
     rows = _query("orchestration.db", "SELECT * FROM orchestration WHERE source_function = ? OR target_function = ?", (func_name, func_name))
+    if not rows:
+        rows = _mysql_query_orchestration(func_name)
     if rows:
         for r in rows:
             print(f"edge: {r['source_function']} → {r['target_function']}")

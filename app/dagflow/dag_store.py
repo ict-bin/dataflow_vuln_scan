@@ -201,9 +201,21 @@ class DagflowStore:
     # ── 去重锚点 (双检锁原子操作) ────────────────────────────────────────
     def find_processed_taint(self, func_id: str, taint_signature: str) -> bool:
         """(func_id, taint_signature) 已分析过?"""
-        r = self._q("SELECT 1 FROM dag_processed_taints WHERE func_id=? AND taint_signature=?",
+        r = self._q("SELECT 1 FROM dag_processed_taints WHERE func_id=? AND taint_signature=",
                     (func_id, taint_signature))
-        return bool(r)
+        if r:
+            return True
+        if self._mysql:
+            from sqlalchemy import text as sa_text
+            try:
+                with self._mysql._engine.connect() as conn:
+                    row = conn.execute(sa_text(
+                        "SELECT 1 FROM dag_processed_taints WHERE source_dir_id=:sid AND func_id=:fid AND taint_signature=:ts AND task_id=:tid"),
+                        {"sid": self._mysql.source_dir_id, "fid": func_id, "ts": taint_signature, "tid": self._mysql.task_id}).fetchone()
+                    return row is not None
+            except Exception:
+                pass
+        return False
 
     def try_reserve(self, func_id: str, taint_signature: str) -> bool:
         """分析前占位 (INSERT OR IGNORE, PK 去重)。rowcount=1=本线程占位成功; 0=并发 peer 已占。"""
@@ -229,12 +241,37 @@ class DagflowStore:
         rows = self._q(
             "SELECT DISTINCT func_id, taint_signature FROM taint_dag_edges "
             "WHERE kind='callee' AND sink_ref=?", (func_id,))
-        return [(r["func_id"], r["taint_signature"]) for r in rows]
+        if rows:
+            return [(r["func_id"], r["taint_signature"]) for r in rows]
+        if self._mysql:
+            from sqlalchemy import text as sa_text
+            try:
+                with self._mysql._engine.connect() as conn:
+                    mrows = conn.execute(sa_text(
+                        "SELECT DISTINCT func_id, taint_signature FROM dag_edges "
+                        "WHERE source_dir_id=:sid AND kind='callee' AND sink_ref=:fid AND task_id=:tid"),
+                        {"sid": self._mysql.source_dir_id, "fid": func_id, "tid": self._mysql.task_id}).fetchall()
+                    return [(r[0], r[1]) for r in mrows]
+            except Exception:
+                pass
+        return []
 
     def list_analyzed(self) -> list[tuple[str, str]]:
         """所有已分析的 (func_id, taint_signature)。"""
-        return [(r["func_id"], r["taint_signature"])
-                for r in self._q("SELECT func_id, taint_signature FROM dag_processed_taints")]
+        rows = self._q("SELECT func_id, taint_signature FROM dag_processed_taints")
+        if rows:
+            return [(r["func_id"], r["taint_signature"]) for r in rows]
+        if self._mysql:
+            from sqlalchemy import text as sa_text
+            try:
+                with self._mysql._engine.connect() as conn:
+                    mrows = conn.execute(sa_text(
+                        "SELECT func_id, taint_signature FROM dag_processed_taints WHERE source_dir_id=:sid AND task_id=:tid"),
+                        {"sid": self._mysql.source_dir_id, "tid": self._mysql.task_id}).fetchall()
+                    return [(r[0], r[1]) for r in mrows]
+            except Exception:
+                pass
+        return []
 
     def list_dag_outgoing(self, func_id: str, taint_signature: str) -> list[dict]:
         """本 DAG 的传出边 (callee/return/extern/container, 用于挖掘触发判定)。"""
@@ -242,4 +279,17 @@ class DagflowStore:
             "SELECT * FROM taint_dag_edges WHERE func_id=? AND taint_signature=? "
             "AND kind IN ('callee','return','extern','container')",
             (func_id, taint_signature))
-        return [dict(r) for r in rows]
+        if rows:
+            return [dict(r) for r in rows]
+        if self._mysql:
+            from sqlalchemy import text as sa_text
+            try:
+                with self._mysql._engine.connect() as conn:
+                    mrows = conn.execute(sa_text(
+                        "SELECT * FROM dag_edges WHERE source_dir_id=:sid AND func_id=:fid AND taint_signature=:ts AND task_id=:tid "
+                        "AND kind IN ('callee','return','extern','container')"),
+                        {"sid": self._mysql.source_dir_id, "fid": func_id, "ts": taint_signature, "tid": self._mysql.task_id}).fetchall()
+                    return [dict(r._mapping) for r in mrows]
+            except Exception:
+                pass
+        return []

@@ -358,7 +358,12 @@ class DataflowStore:
         return result
 
     def list_functions(self) -> list[FunctionRecord]:
-        return [_row_to_function(r) for r in self._q("functions", "SELECT * FROM functions")]
+        rows = self._q("functions", "SELECT * FROM functions")
+        if rows:
+            return [_row_to_function(r) for r in rows]
+        if self._mysql:
+            return self._mysql.read_list_functions()
+        return []
 
     # ── include 索引 (C 作用域) ────────────────────────────────────────
     def add_include(self, header: str, file: str) -> None:
@@ -372,7 +377,11 @@ class DataflowStore:
     def get_files_including(self, header: str) -> list[str]:
         """查找所有传递性 include 了指定 header 的 .c/.cpp 文件。"""
         rows = self._q("functions", "SELECT file FROM include_index WHERE header=?", (header,))
-        return [r["file"] for r in rows]
+        if rows:
+            return [r["file"] for r in rows]
+        if self._mysql:
+            return self._mysql.read_files_including(header)
+        return []
 
     # ── class 继承图 (C++ 作用域) ──────────────────────────────────────
     def add_class(self, class_name: str, bases: list[str], file: str = "") -> None:
@@ -396,9 +405,11 @@ class DataflowStore:
     def get_bases(self, class_name: str) -> list[str]:
         import json
         rows = self._q("functions", "SELECT bases FROM class_hierarchy WHERE class_name=?", (class_name,))
-        if not rows:
-            return []
-        return json.loads(rows[0]["bases"] or "[]")
+        if rows:
+            return json.loads(rows[0]["bases"] or "[]")
+        if self._mysql:
+            return self._mysql.read_bases(class_name)
+        return []
 
     def get_all_ancestors(self, class_name: str) -> list[str]:
         """传递闭包: class → 所有祖先类 (含间接继承)。"""
@@ -421,6 +432,8 @@ class DataflowStore:
         import json
         visited = {class_name}
         rows = self._q("functions", "SELECT class_name, bases FROM class_hierarchy")
+        if not rows and self._mysql:
+            return self._mysql.read_all_descendants(class_name)
         changed = True
         while changed:
             changed = False
@@ -443,6 +456,8 @@ class DataflowStore:
                            (cls, member_name))
             if rows:
                 return cls
+        if self._mysql:
+            return self._mysql.read_member_declaring_class(class_name, member_name)
         return None
 
     def get_class_scope_methods(self, class_name: str, member_name: str = "") -> list[str]:
@@ -464,13 +479,19 @@ class DataflowStore:
             like_pattern = f"{cls}::%"
             rows = self._q("functions", "SELECT name FROM functions WHERE name LIKE ?", (like_pattern,))
             result.extend(r["name"] for r in rows)
+        if not result and self._mysql:
+            return self._mysql.read_class_scope_methods(class_name, member_name)
         return result
 
     def get_functions_with_type_in_signature(self, type_name: str) -> list[str]:
         """查找签名中包含指定类型的函数 (用于 C struct 字段作用域)。"""
         like_pattern = f"%{type_name}%"
         rows = self._q("functions", "SELECT name FROM functions WHERE signature LIKE ?", (like_pattern,))
-        return [r["name"] for r in rows]
+        if rows:
+            return [r["name"] for r in rows]
+        if self._mysql:
+            return self._mysql.read_functions_with_type_in_signature(type_name)
+        return []
 
     def add_processed_taint(self, func_id: str, pt: ProcessedTaint) -> None:
         """写入 processed_taint (INSERT OR IGNORE, PRIMARY KEY 去重)。"""

@@ -18,10 +18,11 @@ class FuncIndex:
     dagflow 只读 + 按需 extract callee 文件。
     """
 
-    def __init__(self, source_root: str, functions_db: Path, dataflow_store: Any = None) -> None:
+    def __init__(self, source_root: str, functions_db: Path, dataflow_store: Any = None, mysql_store: Any = None) -> None:
         self.source_root = source_root
         self.db = functions_db
         self._v2_store = dataflow_store  # 用于 on-demand extract (写 functions.db); None=不按需
+        self._mysql = mysql_store  # SharedMysqlStore (MySQL fallback)
 
     def get_by_name(self, name: str):
         """name (含类限定) -> FunctionRecord|None。"""
@@ -34,7 +35,15 @@ class FuncIndex:
             rows = conn.execute(
                 "SELECT func_id,file,name,signature,start_line,end_line,description "
                 "FROM functions WHERE name=?", (name,)).fetchall()
-            return self._row_to_rec(rows[0]) if rows else self._ondemand(name)
+            if rows:
+                return self._row_to_rec(rows[0])
+            # MySQL fallback
+            if self._mysql:
+                recs = self._mysql.read_functions(name)
+                if recs:
+                    from ..dataflow_v2.models import FunctionRecord
+                    return recs[0]
+            return self._ondemand(name)
         except sqlite3.Error:
             return None
         finally:
@@ -42,6 +51,8 @@ class FuncIndex:
 
     def get_by_id(self, func_id: str):
         if not self.db.is_file():
+            if self._mysql:
+                return self._mysql.read_function(func_id)
             return None
         conn = sqlite3.connect(str(self.db))
         conn.row_factory = sqlite3.Row
@@ -49,7 +60,11 @@ class FuncIndex:
             rows = conn.execute(
                 "SELECT func_id,file,name,signature,start_line,end_line,description "
                 "FROM functions WHERE func_id=?", (func_id,)).fetchall()
-            return self._row_to_rec(rows[0]) if rows else None
+            if rows:
+                return self._row_to_rec(rows[0])
+            if self._mysql:
+                return self._mysql.read_function(func_id)
+            return None
         except sqlite3.Error:
             return None
         finally:
@@ -122,6 +137,15 @@ class DagflowPipeline:
         except Exception:
             pass
 
+    def _create_mysql_graph_store(self):
+        """创建 MysqlGraphStore (task_graph 双写, 失败返回 None)。"""
+        try:
+            from ..db.mysql_graph_store import create_mysql_graph_store
+            return create_mysql_graph_store(self._mysql_url)
+        except Exception as e:
+            logging.warning("create mysql graph store failed: %s", e)
+            return None
+
     def abort(self):
         """取消任务 (与 V2 Orchestrator.abort 接口兼容)。"""
         if self.cancel_event is not None:
@@ -161,7 +185,7 @@ class DagflowPipeline:
             v2_store = DataflowStore(epoch_dir / "dataflow-v2", mysql_store=mysql_store)
         except Exception:
             pass
-        func_index = FuncIndex(self.source_root, functions_db, v2_store)
+        func_index = FuncIndex(self.source_root, functions_db, v2_store, mysql_store=mysql_store)
 
         # 索引根函数所在文件 (function_extractor 填 functions.db)
         src_file = getattr(self.config, "source_file", "")
@@ -193,7 +217,7 @@ class DagflowPipeline:
 
             # ── graph recorder (兼容前端 graph-view API) ──
             vuln_db = nfs_run / "vuln-scan.sqlite"
-            vuln_store = VulnScanStore(vuln_db)
+            vuln_store = VulnScanStore(vuln_db, mysql_store=self._create_mysql_graph_store())
             epoch_name = epoch_dir.name  # e.g. "0006"
             graph_rec = GraphRecorder(vuln_store=vuln_store, task_id=task_id,
                                       epoch=epoch_name, run_root=str(nfs_run),
