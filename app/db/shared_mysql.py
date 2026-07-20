@@ -34,7 +34,7 @@ CREATE TABLE IF NOT EXISTS source_dirs (
 CREATE TABLE IF NOT EXISTS functions (
     source_dir_id  VARCHAR(64) NOT NULL,
     func_id        TEXT NOT NULL,
-    file           TEXT NOT NULL,
+    `file`         TEXT NOT NULL,
     name           TEXT NOT NULL,
     signature      TEXT NOT NULL,
     start_line     INTEGER NOT NULL,
@@ -47,14 +47,14 @@ CREATE INDEX IF NOT EXISTS idx_func_name ON functions(source_dir_id, name);
 CREATE TABLE IF NOT EXISTS include_index (
     source_dir_id  VARCHAR(64) NOT NULL,
     header         TEXT NOT NULL,
-    file           TEXT NOT NULL,
+    `file`         TEXT NOT NULL,
     PRIMARY KEY (source_dir_id, header, file)
 );
 CREATE TABLE IF NOT EXISTS class_hierarchy (
     source_dir_id  VARCHAR(64) NOT NULL,
     class_name     TEXT NOT NULL,
     bases          TEXT DEFAULT '[]',
-    file           TEXT DEFAULT '',
+    `file`         TEXT DEFAULT '',
     PRIMARY KEY (source_dir_id, class_name)
 );
 CREATE TABLE IF NOT EXISTS class_members (
@@ -62,7 +62,7 @@ CREATE TABLE IF NOT EXISTS class_members (
     class_name     TEXT NOT NULL,
     member_name    TEXT NOT NULL,
     member_type    TEXT DEFAULT '',
-    file           TEXT DEFAULT '',
+    `file`         TEXT DEFAULT '',
     PRIMARY KEY (source_dir_id, class_name, member_name)
 );
 """
@@ -104,7 +104,7 @@ CREATE TABLE IF NOT EXISTS propagations (
     target_function         TEXT,
     target_file             TEXT,
     call_line               INTEGER,
-    condition               TEXT DEFAULT '',
+    `condition`              TEXT DEFAULT '',
     is_external             INTEGER DEFAULT 0,
     is_indirect_call        INTEGER DEFAULT 0,
     escape_kind             TEXT DEFAULT '',
@@ -125,7 +125,7 @@ CREATE TABLE IF NOT EXISTS orchestration (
     taint_params     TEXT NOT NULL,
     depth            INTEGER NOT NULL,
     edge_order       INTEGER NOT NULL,
-    status           TEXT DEFAULT 'pending',
+    `status`           TEXT DEFAULT 'pending',
     task_id          VARCHAR(64) NOT NULL,
     PRIMARY KEY (source_dir_id, edge_id, task_id)
 );
