@@ -284,7 +284,7 @@ class SharedMysqlStore(MysqlReadMixin):
     def _ensure_schema(self):
         """建表 (幂等, 容错: 单条失败不阻断后续)。
 
-        CREATE TABLE 语句附加 DATA DIRECTORY, 将 .ibd 文件放到 NFS 项目路径下。
+        尝试用 DATA DIRECTORY 将 .ibd 放到 NFS 项目路径; 失败则回退默认路径。
         """
         data_dir_clause = f" DATA DIRECTORY='{self.data_dir}'" if self.data_dir else ""
 
@@ -293,12 +293,18 @@ class SharedMysqlStore(MysqlReadMixin):
                 s = stmt.strip()
                 if not s:
                     continue
-                # 在 CREATE TABLE 语句末尾 (分号前) 插入 DATA DIRECTORY
+                # 在 CREATE TABLE 语句末尾插入 DATA DIRECTORY
                 if s.upper().startswith("CREATE TABLE") and data_dir_clause:
-                    # 在最后一个 ) 后插入
                     last_paren = s.rfind(")")
                     if last_paren >= 0:
-                        s = s[:last_paren + 1] + data_dir_clause + s[last_paren + 1:]
+                        s_dd = s[:last_paren + 1] + data_dir_clause + s[last_paren + 1:]
+                        try:
+                            with self._engine.connect() as conn:
+                                conn.execute(sa_text(s_dd))
+                                conn.commit()
+                            continue
+                        except Exception:
+                            pass  # DATA DIRECTORY 失败, 回退默认路径
                 try:
                     with self._engine.connect() as conn:
                         conn.execute(sa_text(s))
