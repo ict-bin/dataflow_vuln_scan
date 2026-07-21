@@ -120,7 +120,7 @@ class DagflowPipeline:
         db_cfg = getattr(config, "db", None)
         self._mysql_url = db_cfg.url if db_cfg else \
             getattr(config, "mysql_url", "") or \
-            "mysql+pymysql://root:Huawei12%23$@mysql.sothothv2-ns.svc.cluster.local:3306/secflow"
+            "mysql+pymysql://root:Huawei12%23$@secflow-app-dataflow-vuln-scan-mysql.secflow-ns.svc.cluster.local:3306"
 
     def _emit(self, event_type: str, **kw) -> None:
         """安全发事件 (兼容现有 event 映射)。"""
@@ -135,7 +135,8 @@ class DagflowPipeline:
         """创建 MysqlGraphStore (task_graph 双写, 失败返回 None)。"""
         try:
             from ..db.mysql_graph_store import create_mysql_graph_store
-            return create_mysql_graph_store(self._mysql_url)
+            pid = getattr(self.config, 'project_id', '') or ''
+            return create_mysql_graph_store(self._mysql_url, project_id=pid)
         except Exception as e:
             logging.warning("create mysql graph store failed: %s", e)
             return None
@@ -167,7 +168,9 @@ class DagflowPipeline:
         nfs_run = epoch_dir.parent.parent if epoch_dir.name != "run" else epoch_dir
         # MySQL 共享存储 (双写, 失败不阻断)
         mysql_store = create_shared_store(
-            self._mysql_url, "dagflow", self.source_root, task_id) if hasattr(self, '_mysql_url') and self._mysql_url else None
+            self._mysql_url, "dagflow", self.source_root, task_id,
+            project_id=getattr(self, 'task_id', '') and getattr(self.config, 'project_id', '') or '') \
+            if hasattr(self, '_mysql_url') and self._mysql_url else None
         store = DagflowStore(nfs_run, mysql_store=mysql_store)  # dagflow.db -> run/dagflow/ (NFS, 持久)
         sessions_dir = epoch_dir / "sessions"  # sessions -> epoch /tmp (与 V2 一致, 大文件 ephemeral)
         functions_db = epoch_dir / "dataflow-v2" / "functions.db"  # functions.db -> epoch (重建, 与 V2 一致)

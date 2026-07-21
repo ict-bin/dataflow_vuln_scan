@@ -21,6 +21,9 @@ logger = logging.getLogger("dvs.db.shared_mysql")
 _ENGINES: dict[str, Any] = {}
 _ENGINES_LOCK = threading.Lock()
 
+# 按项目隔离: 数据库名 = dvs_<project_id[:12]>
+# 不同项目的数据完全隔离, 互不影响
+# 兼容旧数据: 如果无 project_id, 回退到 dvs_<mode>
 _MODE_DB = {
     "complete": "dvs_complete",
     "autonomous": "dvs_autonomous",
@@ -229,13 +232,18 @@ class SharedMysqlStore(MysqlReadMixin):
     restart/delete 时调 clear_task_analysis() 清本任务数据。
     """
 
-    def __init__(self, mysql_url: str, mode: str, source_root: str, task_id: str) -> None:
+    def __init__(self, mysql_url: str, mode: str, source_root: str, task_id: str,
+                 project_id: str = "") -> None:
         self.source_dir_id = hashlib.sha1(source_root.encode("utf-8")).hexdigest()[:16]
         self.task_id = task_id
         self.mode = mode
-        self.db_name = _MODE_DB.get(mode)
-        if not self.db_name:
-            raise ValueError(f"unknown mode: {mode}")
+        # 按项目隔离: dvs_<project_id[:12]>; 无 project_id 时回退到 dvs_<mode>
+        if project_id:
+            self.db_name = f"dvs_{project_id[:12]}"
+        else:
+            self.db_name = _MODE_DB.get(mode)
+            if not self.db_name:
+                raise ValueError(f"unknown mode: {mode}")
         self._engine = self._get_engine(mysql_url, self.db_name)
         self._ensure_schema()
         self._register_source_dir(source_root)
@@ -492,10 +500,11 @@ class SharedMysqlStore(MysqlReadMixin):
             conn.commit()
 
 
-def create_shared_store(mysql_url: str, mode: str, source_root: str, task_id: str) -> SharedMysqlStore | None:
+def create_shared_store(mysql_url: str, mode: str, source_root: str, task_id: str,
+                          project_id: str = "") -> SharedMysqlStore | None:
     """工厂: 创建 SharedMysqlStore, 失败返回 None (不影响主流程)。"""
     try:
-        return SharedMysqlStore(mysql_url, mode, source_root, task_id)
+        return SharedMysqlStore(mysql_url, mode, source_root, task_id, project_id=project_id)
     except Exception as e:
         logger.warning("create SharedMysqlStore failed (mode=%s): %s", mode, e)
         return None

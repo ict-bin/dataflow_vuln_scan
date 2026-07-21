@@ -98,9 +98,10 @@ def _get_mysql_store():
         tid = os.environ.get("DVS_TASK_ID", "")
         db_cfg_url = os.environ.get("DVS_MYSQL_URL", "")
         if not db_cfg_url:
-            db_cfg_url = "mysql+pymysql://root:Huawei12%23$@mysql.sothothv2-ns.svc.cluster.local:3306/secflow"
+            db_cfg_url = "mysql+pymysql://root:Huawei12%23$@secflow-app-dataflow-vuln-scan-mysql.secflow-ns.svc.cluster.local:3306"
         from app.db.shared_mysql import SharedMysqlStore
-        _mysql_store = SharedMysqlStore(db_cfg_url, "complete", sr, tid)
+        pid = os.environ.get("DVS_PROJECT_ID", "")
+        _mysql_store = SharedMysqlStore(db_cfg_url, "complete", sr, tid, project_id=pid)
         return _mysql_store
     except Exception as e:
         log.warning("mysql store init failed: %s", e)

@@ -1582,8 +1582,8 @@ class TaskService:
             if source_root:
                 for mode in ("complete", "autonomous", "dagflow"):
                     ms = create_shared_store(
-                        "mysql+pymysql://root:Huawei12%23$@mysql.sothothv2-ns.svc.cluster.local:3306/secflow",
-                        mode, source_root, task_id)
+                        "mysql+pymysql://root:Huawei12%23$@secflow-app-dataflow-vuln-scan-mysql.secflow-ns.svc.cluster.local:3306",
+                        mode, source_root, task_id, project_id=str(row.project_id or ""))
                     if ms:
                         ms.clear_task_analysis()
         except Exception as e:
@@ -1592,7 +1592,8 @@ class TaskService:
         try:
             from app.db.mysql_graph_store import create_mysql_graph_store
             mgs = create_mysql_graph_store(
-                "mysql+pymysql://root:Huawei12%23$@mysql.sothothv2-ns.svc.cluster.local:3306/secflow")
+                "mysql+pymysql://root:Huawei12%23$@secflow-app-dataflow-vuln-scan-mysql.secflow-ns.svc.cluster.local:3306",
+                project_id=str(row.project_id or ""))
             if mgs:
                 mgs.clear_task(task_id)
         except Exception as e:
@@ -1675,8 +1676,8 @@ class TaskService:
             if source_root:
                 for mode in ("complete", "autonomous", "dagflow"):
                     ms = create_shared_store(
-                        "mysql+pymysql://root:Huawei12%23$@mysql.sothothv2-ns.svc.cluster.local:3306/secflow",
-                        mode, source_root, task_id)
+                        "mysql+pymysql://root:Huawei12%23$@secflow-app-dataflow-vuln-scan-mysql.secflow-ns.svc.cluster.local:3306",
+                        mode, source_root, task_id, project_id=str(row.project_id or ""))
                     if ms:
                         ms.clear_task_analysis()
         except Exception as e:
@@ -1684,7 +1685,8 @@ class TaskService:
         try:
             from app.db.mysql_graph_store import create_mysql_graph_store
             mgs = create_mysql_graph_store(
-                "mysql+pymysql://root:Huawei12%23$@mysql.sothothv2-ns.svc.cluster.local:3306/secflow")
+                "mysql+pymysql://root:Huawei12%23$@secflow-app-dataflow-vuln-scan-mysql.secflow-ns.svc.cluster.local:3306",
+                project_id=str(row.project_id or ""))
             if mgs:
                 mgs.clear_task(task_id)
         except Exception as e:

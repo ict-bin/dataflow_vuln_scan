@@ -47,8 +47,9 @@ class AutonomousRunner:
             from ..db.shared_mysql import create_shared_store
             db_cfg = getattr(self.cfg, "db", None)
             url = db_cfg.url if db_cfg else \
-                "mysql+pymysql://root:Huawei12%23$@mysql.sothothv2-ns.svc.cluster.local:3306/secflow"
-            return create_shared_store(url, mode, self.cfg.cwd, self.task_id)
+                "mysql+pymysql://root:Huawei12%23$@secflow-app-dataflow-vuln-scan-mysql.secflow-ns.svc.cluster.local:3306"
+            return create_shared_store(url, mode, self.cfg.cwd, self.task_id,
+                                      project_id=getattr(self.cfg, "project_id", "") or "")
         except Exception as e:
             logger.warning("create mysql store failed: %s", e)
             return None

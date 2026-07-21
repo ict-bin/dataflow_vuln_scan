@@ -1995,29 +1995,37 @@ def get_task_logs(task_id: str, db: Session = Depends(get_db)):
 def generate_prompt(body: GeneratePromptRequest):
     """Auto-generate a data flow analysis prompt from an input path."""
     return {"prompt": generate_prompt_from_path(body.input_path)}
-_MYSQL_GRAPH_STORE = None
+_MYSQL_GRAPH_STORES: dict[str, Any] = {}
 
-def _get_mysql_graph_store():
-    """获取/缓存 MysqlGraphStore (API 优先读 MySQL)。"""
-    global _MYSQL_GRAPH_STORE
-    if _MYSQL_GRAPH_STORE is not None:
-        return _MYSQL_GRAPH_STORE
+def _get_mysql_graph_store_for_task(task_id: str):
+    """获取 per-project MysqlGraphStore (API 优先读 MySQL)。"""
+    if task_id in _MYSQL_GRAPH_STORES:
+        return _MYSQL_GRAPH_STORES[task_id]
     try:
-        from app.db import _engine
-        if _engine is None:
-            return None
-        url = str(_engine.url)
+        from app.db import get_db as _get_db
+        from app.db.models import AppDvsTask
+        db = next(_get_db())
+        try:
+            row = db.query(AppDvsTask).filter_by(task_id=task_id).first()
+            project_id = str(row.project_id or "") if row else ""
+        finally:
+            try: next(_get_db())
+            except StopIteration: pass
+        url = "mysql+pymysql://root:Huawei12%23$@secflow-app-dataflow-vuln-scan-mysql.secflow-ns.svc.cluster.local:3306"
         from app.db.mysql_graph_store import create_mysql_graph_store
-        _MYSQL_GRAPH_STORE = create_mysql_graph_store(url)
-        return _MYSQL_GRAPH_STORE
+        store = create_mysql_graph_store(url, project_id=project_id)
+        if store:
+            _MYSQL_GRAPH_STORES[task_id] = store
+        return store
     except Exception:
         return None
 
-def _graph_store_for_run_root(run_root: Path):
-    """优先返回 MySQL 图谱存储; 回退 SQLite VulnScanStore。"""
-    mysql_store = _get_mysql_graph_store()
-    if mysql_store is not None:
-        return mysql_store
+def _graph_store_for_run_root(run_root: Path, task_id: str = ""):
+    """优先返回 per-project MySQL 图谱存储; 回退 SQLite VulnScanStore。"""
+    if task_id:
+        mysql_store = _get_mysql_graph_store_for_task(task_id)
+        if mysql_store is not None:
+            return mysql_store
     db_path = run_root / "vuln-scan.sqlite"
     if not db_path.exists():
         parent_output = run_root.parent / "output" / "vuln-scan.sqlite"
@@ -2029,7 +2037,7 @@ def _graph_store_for_run_root(run_root: Path):
 
 
 def _load_task_graph_view(run_root: Path, task_id: str) -> dict[str, Any]:
-    store = _graph_store_for_run_root(run_root)
+    store = _graph_store_for_run_root(run_root, task_id=task_id)
     if store is None:
         return {
             "task_id": task_id,
@@ -2051,7 +2059,7 @@ def _load_task_graph_view(run_root: Path, task_id: str) -> dict[str, Any]:
 
 
 def _load_task_vulnerability_findings(run_root: Path, task_id: str) -> list[dict[str, Any]]:
-    store = _graph_store_for_run_root(run_root)
+    store = _graph_store_for_run_root(run_root, task_id=task_id)
     if store is not None:
         return list(store.list_task_findings(task_id))
     return []

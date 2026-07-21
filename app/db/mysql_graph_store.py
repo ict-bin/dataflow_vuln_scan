@@ -169,7 +169,21 @@ def _get_engine(mysql_url: str) -> Engine:
 class MysqlGraphStore:
     """MySQL 图谱读取层。API 优先用此类读 MySQL, 回退读 SQLite VulnScanStore。"""
 
-    def __init__(self, mysql_url: str) -> None:
+    def __init__(self, mysql_url: str, project_id: str = "") -> None:
+        if project_id:
+            db_name = f"dvs_{project_id[:12]}"
+            # Ensure the per-project database exists
+            base_url = mysql_url.rsplit("/", 1)[0]
+            from sqlalchemy import create_engine, text as sa_text
+            try:
+                admin_eng = create_engine(f"{base_url}/mysql?charset=utf8mb4", pool_pre_ping=True, pool_recycle=3600)
+                with admin_eng.connect() as conn:
+                    conn.execute(sa_text(f"CREATE DATABASE IF NOT EXISTS `{db_name}` DEFAULT CHARSET utf8mb4"))
+                    conn.commit()
+                admin_eng.dispose()
+            except Exception:
+                pass
+            mysql_url = f"{base_url}/{db_name}?charset=utf8mb4"
         self._engine = _get_engine(mysql_url)
 
     # ── 读取层 (API 调) ──────────────────────────────────────────────
@@ -503,10 +517,10 @@ class MysqlGraphStore:
             conn.commit()
 
 
-def create_mysql_graph_store(mysql_url: str) -> MysqlGraphStore | None:
+def create_mysql_graph_store(mysql_url: str, project_id: str = "") -> MysqlGraphStore | None:
     """工厂: 创建 MysqlGraphStore, 失败返回 None。"""
     try:
-        return MysqlGraphStore(mysql_url)
+        return MysqlGraphStore(mysql_url, project_id=project_id)
     except Exception as e:
         logger.warning("create MysqlGraphStore failed: %s", e)
         return None

@@ -324,7 +324,9 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
         system_prompt = f"{v2_system}\n\n{_taint_prompt}" if v2_system else _taint_prompt
         v2_env = {"DVS_V2_DB_DIR": str(self.vuln_root.parent / "dataflow-v2"),
                   "DVS_SOURCE_ROOT": self.source_root,
-                  "DVS_TASK_ID": self.task_id}
+                  "DVS_TASK_ID": self.task_id,
+                  "DVS_PROJECT_ID": getattr(self.cfg, "project_id", "") or "",
+                  "DVS_MYSQL_URL": "mysql+pymysql://root:Huawei12%23$@secflow-app-dataflow-vuln-scan-mysql.secflow-ns.svc.cluster.local:3306"}
 
         def _run_taint_agent(agent_prompt: str) -> Any:
             return run_agent(
@@ -923,7 +925,9 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
             cancel_event=self.cancel_event,
             env={"DVS_V2_DB_DIR": str(self.vuln_root.parent / "dataflow-v2"),
                  "DVS_SOURCE_ROOT": self.source_root,
-                 "DVS_TASK_ID": self.task_id},
+                 "DVS_TASK_ID": self.task_id,
+                  "DVS_PROJECT_ID": getattr(self.cfg, "project_id", "") or "",
+                  "DVS_MYSQL_URL": "mysql+pymysql://root:Huawei12%23$@secflow-app-dataflow-vuln-scan-mysql.secflow-ns.svc.cluster.local:3306"},
             thinking_level="off",
             run_timeout_seconds=self.cfg.agent_run_timeout_seconds,
             timeout_retry_enabled=self.cfg.agent_timeout_retry_enabled,
@@ -1056,7 +1060,9 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                          f"{_EMBEDDED_VULN_MINING_SKILL}\n\n{self._vuln_miner_prompt}")
         v2_env = {"DVS_V2_DB_DIR": str(self.vuln_root.parent / "dataflow-v2"),
                   "DVS_SOURCE_ROOT": self.source_root,
-                  "DVS_TASK_ID": self.task_id}
+                  "DVS_TASK_ID": self.task_id,
+                  "DVS_PROJECT_ID": getattr(self.cfg, "project_id", "") or "",
+                  "DVS_MYSQL_URL": "mysql+pymysql://root:Huawei12%23$@secflow-app-dataflow-vuln-scan-mysql.secflow-ns.svc.cluster.local:3306"}
         logger.info("[V2-mine] CALLING run_agent (session=%s thinking=%s)",
                     str(fork_session)[-60:], getattr(self.cfg, "vuln_mining_thinking_level", "high"))
         output = run_agent(
