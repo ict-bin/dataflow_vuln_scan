@@ -201,7 +201,7 @@ class DagflowStore:
     # ── 去重锚点 (双检锁原子操作) ────────────────────────────────────────
     def find_processed_taint(self, func_id: str, taint_signature: str) -> bool:
         """(func_id, taint_signature) 已分析过?"""
-        r = self._q("SELECT 1 FROM dag_processed_taints WHERE func_id=? AND taint_signature=",
+        r = self._q("SELECT 1 FROM dag_processed_taints WHERE func_id=? AND taint_signature=?",
                     (func_id, taint_signature))
         if r:
             return True
