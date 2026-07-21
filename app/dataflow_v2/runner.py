@@ -226,15 +226,23 @@ class DataflowV2Runner:
                         # 无污点也无传播: 用根函数状态区分
                         #   root_analyzed=False -> 根被跳过 (processed_taints 残留/占位冲突, LLM 没跑)
                         #   root_taint_failed=True  -> 解析失败/格式错误 (真失败)
-                        #   root_taint_failed=False -> LLM 合法返回空, 判定无可跟踪污点
+                        #   root_self_contained=True -> 存根/终态函数, 无污点流, 合法完成 → PASSED
+                        #   root_self_contained=False -> "说有流向 callee 却 0 propagation" 可疑漏报 → LIMITED
                         _root_analyzed = bool(getattr(orch, "root_analyzed", False))
                         _root_failed = bool(getattr(orch, "root_taint_failed", False))
-                        status = TaskStatus.COMPLETED_LIMITED
+                        _root_sc = bool(getattr(orch, "root_self_contained", False))
                         if not _root_analyzed:
+                            status = TaskStatus.COMPLETED_LIMITED
                             err_msg = "v2: taint 分析未产出传播边 (根函数未执行分析, 可能 processed_taints 残留/占位冲突)"
                         elif _root_failed:
+                            status = TaskStatus.COMPLETED_LIMITED
                             err_msg = "v2: taint 分析未产出传播边 (LLM 输出可能截断或格式错误)"
+                        elif _root_sc:
+                            # 存根/终态函数: LLM 判定 self_contained 且无污点流, 合法完成
+                            status = TaskStatus.PASSED
+                            err_msg = None
                         else:
+                            status = TaskStatus.COMPLETED_LIMITED
                             err_msg = "v2: taint 分析未产出传播边 (LLM 判定无可跟踪污点, 合法空结果)"
                 # else: 有 propagation 记录但 edge_count=0 (callee 找不到/不跟入) = 正常完成
             final_output = self._build_final_report(tid, cfg, store, graph_db_path)

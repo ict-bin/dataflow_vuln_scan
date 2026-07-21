@@ -184,6 +184,8 @@ class DfsOrchestrator:
         self.root_taint_failed = False
         # 根函数(depth=0) 是否真正跑了 LLM 分析 (区别于"被 processed_taints 跳过")
         self.root_analyzed = False
+        # 根函数 LLM 判定的 self_contained (合法空结果时区分"存根/终态无流" vs "可疑漏报")
+        self.root_self_contained = False
 
     def _run_llm(self, fn: Callable, *args: Any, **kw: Any) -> Any:
         """LLM 调用限流: 信号量 cap 并发 analyze/mine/track 调用, 避免打爆配额。
@@ -399,6 +401,7 @@ class DfsOrchestrator:
             # 供 runner 在 0 边 0 传播时区分 "合法空" vs "解析失败" vs "被跳过"
             self.root_taint_failed = bool(getattr(result, "taint_failed", False))
             self.root_analyzed = True
+            self.root_self_contained = bool(getattr(result, "self_contained", False))
         for t in result.taints:
             self.store.upsert_taint(t)
         for p in result.propagations:
