@@ -128,6 +128,7 @@ def run_agent_with_design_retry(
                 logger.exception("on_result emit failed stage=%s", stage)
 
     attempt = 0
+    cycle_fails = 0
     compacted = False
     cur_prompt = prompt
     result = None
@@ -153,6 +154,11 @@ def run_agent_with_design_retry(
         _emit_runtime(("llm_continue" if cur_prompt is _CONTINUE_PROMPT else
                        ("llm_retry" if attempt > 0 else "llm_call")), result,
                       {"label": label, "attempt": attempt})
+        # 设计③: run_agent 内层已对 fatal (model not found / 401 等) 重试 _FATAL_RETRY_MAX
+        # 次后返回 result.fatal=True; 此类不可重试错误不再走设计重试烧预算, 直接退出。
+        if getattr(result, "fatal", False):
+            _emit("llm_fatal_no_retry", label=label, reason=str(result.error or "")[:200])
+            break
         if parse_check is not None:
             try:
                 parsed, warn = parse_check(result, all_texts)
@@ -164,10 +170,11 @@ def run_agent_with_design_retry(
             break  # 本轮成功 (或无需按 parse 重试)
 
         attempt += 1
+        cycle_fails += 1
         stop_reason = _last_stop_reason(result)
         _emit("llm_retry_json", label=label, attempt=attempt, reason=warn, stop_reason=stop_reason)
 
-        # 保存错误会话 -error{N} (前端过滤不展示)
+        # 保存错误会话 -error{N} (前端过滤不展示); attempt 单调递增避免覆盖
         if error_session_fn is not None and session_file:
             try:
                 _err = error_session_fn(attempt)
@@ -176,8 +183,8 @@ def run_agent_with_design_retry(
             except OSError:
                 pass
 
-        # ④ 重试 retry_max 次依旧报错 → compact 一次再重试一轮
-        if attempt >= retry_max:
+        # ④ 本轮 compact 周期重试预算用尽 → compact 一次再开新一轮
+        if cycle_fails >= retry_max:
             if compact_then_retry and not compacted:
                 _emit("llm_compact_retry", label=label,
                       reason=f"{retry_max} retries failed, compact then retry once")
@@ -186,7 +193,7 @@ def run_agent_with_design_retry(
                                 cancel_event=cancel_event,
                                 timeout_seconds=float(run_timeout_seconds or 3600))
                 compacted = True
-                attempt = 0          # compact 后重置预算重试一轮
+                cycle_fails = 0     # 重置本轮预算 (attempt 不重置, error 会话编号继续递增)
                 cur_prompt = prompt  # compact 后重发原始 prompt
                 continue
             _emit("llm_retry_failed", label=label,
