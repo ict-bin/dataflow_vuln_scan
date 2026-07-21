@@ -173,7 +173,17 @@ class MysqlGraphStore:
         if project_id:
             db_name = f"dvs_{project_id[:12]}"
             # Ensure the per-project database exists
-            base_url = mysql_url.rsplit("/", 1)[0]
+            # Handle URLs with/without database part
+            if "?" in mysql_url:
+                base_url = mysql_url.rsplit("/", 1)[0]
+            elif mysql_url.endswith("/"):
+                base_url = mysql_url[:-1]
+            else:
+                last_slash = mysql_url.rfind("/")
+                if last_slash > mysql_url.find("//") + 1:
+                    base_url = mysql_url[:last_slash]
+                else:
+                    base_url = mysql_url
             from sqlalchemy import create_engine, text as sa_text
             try:
                 admin_eng = create_engine(f"{base_url}/mysql?charset=utf8mb4", pool_pre_ping=True, pool_recycle=3600)

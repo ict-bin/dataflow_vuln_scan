@@ -255,14 +255,25 @@ class SharedMysqlStore(MysqlReadMixin):
             if db_name in _ENGINES:
                 return _ENGINES[db_name]
             # 先连默认库, 建目标库
-            base = mysql_url.rsplit("/", 1)[0]  # 去掉 /dbname?charset=...
+            # 确保 URL 有数据库部分 (没有就加 /)
+            # URL 形如: mysql+pymysql://user:pass@host:port[/dbname?charset=...]
+            if "?" in mysql_url:
+                base = mysql_url.rsplit("/", 1)[0]
+            elif mysql_url.endswith("/"):
+                base = mysql_url[:-1]
+            else:
+                # 没有 dbname 也没有 ? — 检查是否有 /
+                last_slash = mysql_url.rfind("/")
+                if last_slash > mysql_url.find("//") + 1:
+                    base = mysql_url[:last_slash]
+                else:
+                    base = mysql_url  # 无 dbname, base 就是完整 URL
             # base 形如 mysql+pymysql://user:pass@host:port
-            # 预建库 (secflow 用户可能无 CREATE DATABASE 权限, 容错)
             try:
                 admin_url = f"{base}/mysql?charset=utf8mb4"
                 admin_eng = create_engine(admin_url, pool_pre_ping=True, pool_recycle=3600)
                 with admin_eng.connect() as conn:
-                    conn.execute(sa_text(f"CREATE DATABASE IF NOT EXISTS {db_name} DEFAULT CHARSET utf8mb4"))
+                    conn.execute(sa_text(f"CREATE DATABASE IF NOT EXISTS `{db_name}` DEFAULT CHARSET utf8mb4"))
                     conn.commit()
                 admin_eng.dispose()
             except Exception:
