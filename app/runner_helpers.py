@@ -530,11 +530,18 @@ def _is_fatal_error(result: AgentResult) -> bool:
 def _is_retryable_api_error(result: AgentResult) -> bool:
     if result.fatal:
         return False
+    error_text = (result.error or "").lower()
+    # 404 / record not found 是永久错误 (模型/会话记录被删除), 重试无意义
+    _NON_RETRYABLE_PATTERNS = [
+        "404", "record not found", "not found",
+        "model not found", "invalid model", "model does not exist",
+    ]
+    if any(p in error_text for p in _NON_RETRYABLE_PATTERNS):
+        return False
     # 模型侧 stopReason=error (overloaded/internal/瞬时 API 错误): 当可重试。
     # 源码污点分析输入是代码, 无内容过滤风险; 瞬时错误退避重试即可恢复。
     if getattr(result, "stop_reason", "") == "error":
         return True
-    error_text = (result.error or "").lower()
     if not error_text:
         return False
     retryable_patterns = [

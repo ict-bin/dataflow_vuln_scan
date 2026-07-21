@@ -985,7 +985,11 @@ def _run_with_api_retry(
                 continue
             rate_limit_streak = 0
             api_attempt += 1
-            can_retry = True
+            can_retry = (max_retries == -1) or (api_attempt <= max_retries)
+            if not can_retry:
+                _log_warn(f"API error retries exhausted [{api_attempt}/{_fmt_max(max_retries)}]: {(result.error or '')[:200]}")
+                result.error = (result.error or "") + f" [api retries exhausted: {api_attempt} attempts]"
+                return result
             if can_retry:
                 delay = _backoff(retry_delay, api_attempt)
                 result.retry_delay_seconds = int(delay)
