@@ -223,9 +223,15 @@ class DataflowV2Runner:
                         status = TaskStatus.COMPLETED_LIMITED
                         err_msg = "v2: taint 分析未产出传播边 (LLM 识别了污点但未报告传播路径, 可能漏报)"
                     else:
-                        # 无污点也无传播 = taint 分析确实失败 (解析失败或 LLM 未识别污点)
+                        # 无污点也无传播: 用根函数 taint_failed 区分
+                        #   taint_failed=True  -> 解析失败/格式错误 (真失败)
+                        #   taint_failed=False -> LLM 合法返回空 JSON, 判定无可跟踪污点
+                        _root_failed = bool(getattr(orch, "root_taint_failed", False))
                         status = TaskStatus.COMPLETED_LIMITED
-                        err_msg = "v2: taint 分析未产出传播边 (LLM 输出可能截断或格式错误)"
+                        if _root_failed:
+                            err_msg = "v2: taint 分析未产出传播边 (LLM 输出可能截断或格式错误)"
+                        else:
+                            err_msg = "v2: taint 分析未产出传播边 (LLM 判定无可跟踪污点, 合法空结果)"
                 # else: 有 propagation 记录但 edge_count=0 (callee 找不到/不跟入) = 正常完成
             final_output = self._build_final_report(tid, cfg, store, graph_db_path)
             vuln_summary = {"functions": store.count_functions(),
