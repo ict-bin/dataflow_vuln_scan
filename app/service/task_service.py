@@ -1591,9 +1591,13 @@ class TaskService:
         # 清 MySQL 图谱表 (task_graph 双写镜像)
         try:
             from app.db.mysql_graph_store import create_mysql_graph_store
+            source_root = _task_source_root(row) or ""
+            import hashlib as _hl
+            _sid = _hl.sha1(source_root.encode("utf-8")).hexdigest()[:16] if source_root else ""
             mgs = create_mysql_graph_store(
                 "mysql+pymysql://root:Huawei12%23$@secflow-app-dataflow-vuln-scan-mysql.secflow-ns.svc.cluster.local:3306",
-                project_id=str(row.project_id or ""))
+                project_id=str(row.project_id or ""),
+                source_dir_id=_sid, source_root=source_root)
             if mgs:
                 mgs.clear_task(task_id)
         except Exception as e:
@@ -1684,9 +1688,13 @@ class TaskService:
             logger.warning("mysql shared store cleanup (cancel) failed: %s", e)
         try:
             from app.db.mysql_graph_store import create_mysql_graph_store
+            source_root = _task_source_root(row) or ""
+            import hashlib as _hl2
+            _sid2 = _hl2.sha1(source_root.encode("utf-8")).hexdigest()[:16] if source_root else ""
             mgs = create_mysql_graph_store(
                 "mysql+pymysql://root:Huawei12%23$@secflow-app-dataflow-vuln-scan-mysql.secflow-ns.svc.cluster.local:3306",
-                project_id=str(row.project_id or ""))
+                project_id=str(row.project_id or ""),
+                source_dir_id=_sid2, source_root=source_root)
             if mgs:
                 mgs.clear_task(task_id)
         except Exception as e:

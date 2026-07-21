@@ -59,7 +59,11 @@ class DataflowV2Runner:
             url = db_cfg.url if db_cfg else \
                 "mysql+pymysql://root:Huawei12%23$@secflow-app-dataflow-vuln-scan-mysql.secflow-ns.svc.cluster.local:3306"
             project_id = getattr(self.cfg, "project_id", "") or ""
-            return create_mysql_graph_store(url, project_id=project_id)
+            source_root = self.cfg.cwd
+            import hashlib
+            sid = hashlib.sha1(source_root.encode("utf-8")).hexdigest()[:16]
+            return create_mysql_graph_store(url, project_id=project_id,
+                                             source_dir_id=sid, source_root=source_root)
         except Exception as e:
             logger.warning("create mysql graph store failed: %s", e)
             return None

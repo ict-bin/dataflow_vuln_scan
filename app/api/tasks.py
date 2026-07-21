@@ -1998,22 +1998,26 @@ def generate_prompt(body: GeneratePromptRequest):
 _MYSQL_GRAPH_STORES: dict[str, Any] = {}
 
 def _get_mysql_graph_store_for_task(task_id: str):
-    """获取 per-project MysqlGraphStore (API 优先读 MySQL)。"""
+    """获取 per-source-dir MysqlGraphStore (API 优先读 MySQL)。"""
     if task_id in _MYSQL_GRAPH_STORES:
         return _MYSQL_GRAPH_STORES[task_id]
     try:
         from app.db import get_db as _get_db
         from app.db.models import AppDvsTask
+        import hashlib
         db = next(_get_db())
         try:
             row = db.query(AppDvsTask).filter_by(task_id=task_id).first()
             project_id = str(row.project_id or "") if row else ""
+            source_root = str(row.source_root_path or row.input_path or "") if row else ""
         finally:
             try: next(_get_db())
             except StopIteration: pass
+        sid = hashlib.sha1(source_root.encode("utf-8")).hexdigest()[:16] if source_root else ""
         url = "mysql+pymysql://root:Huawei12%23$@secflow-app-dataflow-vuln-scan-mysql.secflow-ns.svc.cluster.local:3306"
         from app.db.mysql_graph_store import create_mysql_graph_store
-        store = create_mysql_graph_store(url, project_id=project_id)
+        store = create_mysql_graph_store(url, project_id=project_id,
+                                           source_dir_id=sid, source_root=source_root)
         if store:
             _MYSQL_GRAPH_STORES[task_id] = store
         return store

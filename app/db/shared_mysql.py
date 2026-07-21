@@ -237,13 +237,10 @@ class SharedMysqlStore(MysqlReadMixin):
         self.source_dir_id = hashlib.sha1(source_root.encode("utf-8")).hexdigest()[:16]
         self.task_id = task_id
         self.mode = mode
-        # 按项目隔离: dvs_<project_id[:12]>; 无 project_id 时回退到 dvs_<mode>
-        if project_id:
-            self.db_name = f"dvs_{project_id[:12]}"
-        else:
-            self.db_name = _MODE_DB.get(mode)
-            if not self.db_name:
-                raise ValueError(f"unknown mode: {mode}")
+        # 每个源码目录独立一个数据库: dvs_<source_dir_id>
+        self.db_name = f"dvs_{self.source_dir_id}"
+        # 数据文件存储路径: /data/files/<project_id>/app/secflow-app-dataflow-vuln-scan/mysql/<source_dir_id>/
+        self.data_dir = self._compute_data_dir(source_root)
         self._engine = self._get_engine(mysql_url, self.db_name)
         self._ensure_schema()
         self._register_source_dir(source_root)
@@ -285,12 +282,23 @@ class SharedMysqlStore(MysqlReadMixin):
             return eng
 
     def _ensure_schema(self):
-        """建表 (幂等, 容错: 单条失败不阻断后续)。"""
+        """建表 (幂等, 容错: 单条失败不阻断后续)。
+
+        CREATE TABLE 语句附加 DATA DIRECTORY, 将 .ibd 文件放到 NFS 项目路径下。
+        """
+        data_dir_clause = f" DATA DIRECTORY='{self.data_dir}'" if self.data_dir else ""
+
         def _exec_multi(ddl: str):
             for stmt in ddl.split(";"):
                 s = stmt.strip()
                 if not s:
                     continue
+                # 在 CREATE TABLE 语句末尾 (分号前) 插入 DATA DIRECTORY
+                if s.upper().startswith("CREATE TABLE") and data_dir_clause:
+                    # 在最后一个 ) 后插入
+                    last_paren = s.rfind(")")
+                    if last_paren >= 0:
+                        s = s[:last_paren + 1] + data_dir_clause + s[last_paren + 1:]
                 try:
                     with self._engine.connect() as conn:
                         conn.execute(sa_text(s))
@@ -302,6 +310,23 @@ class SharedMysqlStore(MysqlReadMixin):
             _exec_multi(_DDL_WITH_TASK_V2)
         elif self.mode == "dagflow":
             _exec_multi(_DDL_WITH_TASK_DAG)
+
+    def _compute_data_dir(self, source_root: str) -> str:
+        """从 source_root 提取 project_id, 返回 NFS 上的 MySQL 数据目录路径。
+
+        source_root = /data/files/<project_id>/app/.../input
+        → /data/files/<project_id>/app/secflow-app-dataflow-vuln-scan/mysql/<source_dir_id>/
+        """
+        import os
+        parts = source_root.split("/")
+        if len(parts) > 3 and parts[1] == "data" and parts[2] == "files":
+            project_id = parts[3]
+            d = f"/data/files/{project_id}/app/secflow-app-dataflow-vuln-scan/mysql/{self.source_dir_id}"
+        else:
+            d = ""  # 无法推断 project_id, 不使用 DATA DIRECTORY
+        if d:
+            os.makedirs(d, exist_ok=True)
+        return d
 
     def _register_source_dir(self, source_root: str):
         """注册源码目录 (INSERT IGNORE)。"""
@@ -509,6 +534,19 @@ class SharedMysqlStore(MysqlReadMixin):
                  "desc": meta.get("description", ""),
                  "tf": 1 if meta.get("taint_failed") else 0, "tid": tid})
             conn.commit()
+
+
+def dispose_engine(self):
+    """释放引擎 (按需加载: 任务结束后调用, 释放连接)。"""
+    global _ENGINES
+    with _ENGINES_LOCK:
+        eng = _ENGINES.pop(self.db_name, None)
+        if eng:
+            try:
+                eng.dispose()
+                logger.info("disposed engine for db=%s", self.db_name)
+            except Exception:
+                pass
 
 
 def create_shared_store(mysql_url: str, mode: str, source_root: str, task_id: str,

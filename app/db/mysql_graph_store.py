@@ -169,10 +169,12 @@ def _get_engine(mysql_url: str) -> Engine:
 class MysqlGraphStore:
     """MySQL 图谱读取层。API 优先用此类读 MySQL, 回退读 SQLite VulnScanStore。"""
 
-    def __init__(self, mysql_url: str, project_id: str = "") -> None:
-        if project_id:
-            db_name = f"dvs_{project_id[:12]}"
-            # Ensure the per-project database exists
+    def __init__(self, mysql_url: str, project_id: str = "",
+                 source_dir_id: str = "", source_root: str = "") -> None:
+        # 每个源码目录独立一个数据库: dvs_<source_dir_id>
+        db_name = f"dvs_{source_dir_id}" if source_dir_id else (
+            f"dvs_{project_id[:12]}" if project_id else None)
+        if db_name:
             # Handle URLs with/without database part
             if "?" in mysql_url:
                 base_url = mysql_url.rsplit("/", 1)[0]
@@ -527,10 +529,13 @@ class MysqlGraphStore:
             conn.commit()
 
 
-def create_mysql_graph_store(mysql_url: str, project_id: str = "") -> MysqlGraphStore | None:
+def create_mysql_graph_store(mysql_url: str, project_id: str = "",
+                                source_dir_id: str = "",
+                                source_root: str = "") -> MysqlGraphStore | None:
     """工厂: 创建 MysqlGraphStore, 失败返回 None。"""
     try:
-        return MysqlGraphStore(mysql_url, project_id=project_id)
+        return MysqlGraphStore(mysql_url, project_id=project_id,
+                               source_dir_id=source_dir_id, source_root=source_root)
     except Exception as e:
         logger.warning("create MysqlGraphStore failed: %s", e)
         return None
