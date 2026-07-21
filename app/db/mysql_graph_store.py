@@ -280,10 +280,18 @@ class MysqlGraphStore:
                 target = node_by_id.get(tid)
                 if target is None:
                     children.append({
-                        "node_id": tid, "edge": edge,
-                        "function_name_resolved": "",
-                        "depth": int(edge.get("display_order") or 0),
-                        "children": [], "missing": True,
+                        "node_id": tid or f"virtual::{edge.get('edge_id')}",
+                        "edge_id": edge.get("edge_id") or "",
+                        "function_name_resolved": edge.get("target_function_resolved") or edge.get("target_function_raw") or "",
+                        "function_name_raw": edge.get("target_function_raw") or "",
+                        "source_file": edge.get("target_file") or "",
+                        "depth": int(node.get("depth") or 0) + 1,
+                        "status": edge.get("status") or "unresolved",
+                        "edge_kind": edge.get("edge_kind") or "",
+                        "reason_code": edge.get("reason_code") or "",
+                        "reason_message": edge.get("reason_message") or "",
+                        "children": [],
+                        "placeholder": True,
                     })
                 else:
                     child = _tree_node(target, next_seen)
