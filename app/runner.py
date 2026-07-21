@@ -71,6 +71,8 @@ _FATAL_PATTERNS: list[list[str]] = [
     ["invalid api key"],
     ["module not found"],
 ]
+# 设计③: 致命/不可重试错误重试上限, 达到后直接报错退出 (不再 [N/inf] 无限重试)
+_FATAL_RETRY_MAX = 3
 _RATE_LIMIT_PATTERNS = ["rate limit", "too many requests", "429"]
 _RATE_LIMIT_EXTRA_DELAY = 30.0
 
@@ -206,6 +208,7 @@ def _run_with_context_overflow_recovery(
     runtime_dir: str | None = None,
     fork_purpose: str | None = None,
     retry_prompt: str | None = None,
+    delegate_api_retry: bool = False,
 ) -> AgentResult:
     context_window = _model_context_window(model)
     overflow_attempts = 0
@@ -266,6 +269,7 @@ def _run_with_context_overflow_recovery(
             session_file=session_file,
             fork_purpose=fork_purpose,
             retry_prompt=retry_prompt,
+            delegate_api_retry=delegate_api_retry,
         )
         result.agent_role = agent_role
         result.runtime_dir = runtime_dir
@@ -330,6 +334,7 @@ def run_agent(
     task_context: dict[str, object] | None = None,
     retry_prompt: str | None = None,
     extension: str | None = None,
+    delegate_api_retry: bool = False,
 ) -> AgentResult:
     """Run a single pi Agent subprocess (double-layer retry + fatal error detection).
 
@@ -401,6 +406,7 @@ def run_agent(
                 runtime_dir=str(task_context.get("task_pi_dir") or "").strip() or None,
                 fork_purpose=str(task_context.get("fork_purpose") or "").strip() or None,
                 retry_prompt=retry_prompt,
+                delegate_api_retry=delegate_api_retry,
             )
             logger.info("run_agent DONE model=%s session=%s duration=%.1fs exit=%s output_len=%d error=%s",
                         model, _func_hint, time.time() - _run_start, result.exit_code,
@@ -457,6 +463,7 @@ def _run_with_pi_retry(
     session_file: str | None = None,
     fork_purpose: str | None = None,
     retry_prompt: str | None = None,
+    delegate_api_retry: bool = False,
 ) -> AgentResult:
     """Outer loop: handle pi process launch failures, crashes, fatal errors."""
     if not os.path.isdir(cwd):
@@ -491,21 +498,23 @@ def _run_with_pi_retry(
                 thinking_level=thinking_level,
                 session_file=session_file,
                 fork_purpose=fork_purpose,
+                delegate_api_retry=delegate_api_retry,
             )
 
             if _is_fatal_error(result) or result.fatal:
                 fatal_retry_count += 1
                 reason = str(result.error or "").strip() or "fatal error"
-                # Key/auth errors (401/unauthorized/invalid key): fail after 3 attempts, don't retry infinitely
                 _err_lower = reason.lower()
                 _is_key_error = any(p in _err_lower for p in ("unauthorized", "invalid api key", "invalid llm key", "401"))
-                if _is_key_error and fatal_retry_count >= 3:
+                # 设计③: 致命错误重试 _FATAL_RETRY_MAX 次后直接报错退出 (不再无限重试)
+                if fatal_retry_count >= _FATAL_RETRY_MAX:
                     result.fatal = True
-                    result.error = f"Key/auth error after {fatal_retry_count} attempts: {reason}"
-                    _log_error(f"key/auth error exhausted after {fatal_retry_count} attempts, giving up: {reason[:200]}")
+                    _kind = "Key/auth" if _is_key_error else "fatal"
+                    result.error = f"{_kind} error after {fatal_retry_count} attempts: {reason}"
+                    _log_error(f"{_kind.lower()} error exhausted after {fatal_retry_count} attempts, giving up: {reason[:200]}")
                     return result
                 _mark_infinite_retry(result, kind="fatal", count=fatal_retry_count, reason=reason)
-                _log_warn(f"pi infrastructure error [{fatal_retry_count}/inf], retry in 30s: {reason[:200]}")
+                _log_warn(f"pi infrastructure error [{fatal_retry_count}/{_FATAL_RETRY_MAX}], retry in 30s: {reason[:200]}")
                 if on_stream:
                     on_stream("\n⚠️ PI infrastructure error, retry in 30s...\n")
                 if _sleep_with_cancel(30.0, cancel_event):
@@ -591,6 +600,7 @@ def _run_with_api_retry(
     thinking_level: str,
     session_file: str | None = None,
     fork_purpose: str | None = None,
+    delegate_api_retry: bool = False,
 ) -> AgentResult:
     """Inner loop: launch pi subprocess via subprocess.Popen, threaded stdout/stderr reading."""
     api_attempt = 0
@@ -983,6 +993,10 @@ def _run_with_api_retry(
                     result.error = (result.error or "") + " [cancelled during api retry backoff]"
                     return result
                 continue
+            # 委托模式: stop_reason=error 直接把结果交回调用方 (v2/dag/自主) 做回退+Error-xx+compact
+            if delegate_api_retry and getattr(result, "stop_reason", "") == "error":
+                result.api_retry_delegated = True
+                return result
             rate_limit_streak = 0
             api_attempt += 1
             can_retry = (max_retries == -1) or (api_attempt <= max_retries)

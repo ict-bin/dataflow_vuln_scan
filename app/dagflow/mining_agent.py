@@ -66,19 +66,25 @@ class MiningAgent:
         source = dag_tools.get_func_source(self.source_root, func)
         prompt = self._build_prompt(func, taint_sig, chain, source)
         sp = str(self._session_path(func, taint_sig))
-        from ..runner import run_agent
+        from ..llm_retry import run_agent_with_design_retry
         from ..parsers import _extract_json_object
         v2_env = {"DVS_SOURCE_ROOT": str(self.source_root),
                   "DVS_V2_DB_DIR": str(self.sessions_dir.parent / "dataflow-v2")}
         logger.info("[dagflow-mine] CALLING run_agent func=%s taint=%s session=%s",
                     func.name, taint_sig, sp[-60:])
-        output = run_agent(
-            prompt=prompt, model=self._acfg.model,
+        def _parse_check(res, all_texts):
+            text = getattr(res, "output", "") or ""
+            p = _extract_json_object(text, "findings") or self._greedy_json(text)
+            if not isinstance(p, dict) or not isinstance(p.get("findings"), list):
+                return None, "dagflow mining JSON parse failed"
+            return p, ""
+
+        output, parsed, _warn = run_agent_with_design_retry(
+            prompt, model=self._acfg.model,
             tools=self._acfg.tools or self._default_tools or [],
             cwd=str(self.source_root), env=v2_env, session_file=sp,
             system_prompt=_system_prompt(),
             cancel_event=getattr(self, "cancel_event", None),
-            # Only v2 vuln mining keeps reasoning enabled; legacy dagflow mining stays explicitly off.
             thinking_level="off",
             run_timeout_seconds=getattr(self.config, "agent_run_timeout_seconds", 1500),
             timeout_retry_enabled=getattr(self.config, "agent_timeout_retry_enabled", True),
@@ -90,9 +96,14 @@ class MiningAgent:
                           "task_run_root": str(self.sessions_dir.parent),
                           "task_pi_dir": _task_pi_dir(self.config, "workers"),
                           "agent_role": "workers", "fork_purpose": "vuln_mining"},
+            parse_check=_parse_check,
+            rollback_session=None,
+            error_session_fn=lambda n: str(Path(sp).with_name(Path(sp).stem + f"-error{n}.jsonl")),
+            on_event=getattr(self, "on_event", None),
+            label=f"dagflow-mine/{func.name}", retry_max=3,
         )
-        text = output.output or ""
-        parsed = _extract_json_object(text, "findings") or self._greedy_json(text) or {"findings": []}
+        if parsed is None:
+            parsed = {"findings": []}
         findings = self._parse_findings(parsed)
         node_id = f"{func.file}::{func.name}"
         finding_store.save_findings(self.vuln_store, findings, run_id=self.run_id,

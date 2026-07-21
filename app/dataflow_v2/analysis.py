@@ -26,6 +26,7 @@ from ..copy_utils import safe_copyfile
 from ..models import TaskConfig
 from ..parsers import _extract_json_object
 from ..runner import run_agent
+from ..llm_retry import run_agent_with_design_retry
 from ..vuln_intake_reporter import report_finding_to_intake
 from ..vuln_report_utils import (EMBEDDED_VULN_MINING_SKILL as _EMBEDDED_VULN_MINING_SKILL,
                                   build_v2_system_prompt as _build_v2_system_prompt,
@@ -328,31 +329,12 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                   "DVS_PROJECT_ID": getattr(self.cfg, "project_id", "") or "",
                   "DVS_MYSQL_URL": "mysql+pymysql://root:Huawei12%23$@secflow-app-dataflow-vuln-scan-mysql.secflow-ns.svc.cluster.local:3306"}
 
-        def _run_taint_agent(agent_prompt: str) -> Any:
-            return run_agent(
-                prompt=agent_prompt, model=acfg.model,
-                tools=acfg.tools or self.cfg.workers.default_tools,
-                cwd=str(self.run_dir), session_file=str(fork_session),
-                system_prompt=system_prompt, cancel_event=self.cancel_event,
-                env=v2_env,
-                thinking_level="off",
-                run_timeout_seconds=self.cfg.agent_run_timeout_seconds,
-                timeout_retry_enabled=self.cfg.agent_timeout_retry_enabled,
-                timeout_max_retries=self.cfg.agent_timeout_max_retries,
-                pi_max_retries=self.cfg.pi_max_retries, pi_retry_delay=self.cfg.pi_retry_delay,
-                task_context={"task_id": getattr(ctx, "path_id", ""), "task_root": str(self.run_dir.parent),
-                              "task_run_root": str(self.run_dir), "task_pi_dir": self.cfg.role_pi_dir("workers"),
-                              "agent_role": "workers", "fork_purpose": "taint_analysis"},
-            )
-
-        output = _run_taint_agent(prompt)
-        if self.on_event:
-            emit_agent_runtime_events(self.on_event, result=output, stage="taint_analysis_v2",
-                                      role="workers", model=acfg.model,
-                                      extra={"function": func.name, "fork_purpose": "taint_analysis"})
-
-        # 5) 解析 JSON + 校验 + 重试 (最多 3 次; 全失败发具体原因事件)
-        def _parse_and_check(text: str, all_texts: list = None):
+        # 4) run_agent + 设计重试 (①②③④, 三模式共享例程 app.llm_retry)
+        #    parse_check 由本模式提供 (key="propagations"); 例程负责 length/error 回退 +
+        #    Error-xx 会话 + 3 次后 compact。内层 run_agent(delegate_api_retry=True)
+        #    不再抢先重试 stop_reason=error, 把结果交回本例程统一处理。
+        def _parse_and_check(result, all_texts):
+            text = getattr(result, "output", "") or ""
             p = _extract_json_object(text, "propagations")
             if not p:
                 p = _try_extract_truncated_json(text)
@@ -368,82 +350,49 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                 return p, "propagations must be a list"
             return p, ""
 
-        # 收集所有 assistant 消息的 text (output.output 只取最后一条)
-        def _collect_all_texts(result):
-            texts = []
-            for msg in getattr(result, 'messages', []):
-                if msg.get('role') == 'assistant':
-                    for c in (msg.get('content') or []):
-                        if isinstance(c, dict) and c.get('type') == 'text' and c.get('text', '').strip():
-                            texts.append(c['text'])
-            return texts
-
-        all_texts = _collect_all_texts(output)
-        parsed, parse_warn = _parse_and_check(output.output, all_texts)
-        retry_used = 0
-        _V2_RETRY_MAX = 3
-        while parse_warn and retry_used < _V2_RETRY_MAX:
-            if self.cancel_event is not None and self.cancel_event.is_set():
-                break
-            retry_used += 1
-            # 从 messages 找最后一条 assistant 的 stopReason
-            stop_reason = ''
-            for msg in reversed(getattr(output, 'messages', [])):
-                if msg.get('role') == 'assistant':
-                    stop_reason = msg.get('stopReason', '')
-                    break
-            self.on_event("v2_taint_retry_json", function=func.name, attempt=retry_used,
-                          reason=parse_warn, stop_reason=stop_reason)
-            # 1. 保存错误 session (加 -error{N} 后缀, 保留供后续定位)
-            _err_session = _session_path(self.sessions_dir, ctx.depth, func.name,
-                                          f"error{retry_used}")
-            try:
-                safe_copyfile(str(fork_session), str(_err_session))
-            except OSError:
-                pass
-            # 2. 解决错误: 只有 stop=length 才 compact; stop=error 回退到 base_session
-            if stop_reason == 'length':
-                # 输出被 max_token 截断 (输出长度限制, 非上下文窗口溢出):
-                # 让 agent 继续未完成的工作; 若已输出 JSON 则完整重输 (部分 JSON 不可解析)。
-                # 不 compact (compact 是给 context_window 溢出的, 与 max_token 截断不同)。
-                self.on_event("v2_length_continue", function=func.name,
-                              reason="stopReason=length (max_token), continue work")
-                output = _run_taint_agent(
-                    "继续你刚才未完成的工作，只输出剩余部分，不要重复已输出内容。"
-                    "如果你刚才已经输出了 JSON，请重新完整输出该 JSON。")
-                if self.on_event:
-                    emit_agent_runtime_events(self.on_event, result=output,
-                                              stage="taint_analysis_v2_length_continue",
-                                              role="workers", model=acfg.model,
-                                              extra={"function": func.name, "attempt": retry_used})
-                # agent 续工作后完整 JSON 在最后一条 assistant 消息; 标准解析 (output.output 优先, all_texts 兑底)
-                all_texts = _collect_all_texts(output)
-                parsed, parse_warn = _parse_and_check(output.output, all_texts)
-                continue  # 已自处理 (continue + 标准解析), 跳过下方统一重发原始 prompt
-            elif stop_reason == 'error':
-                # API 错误 (502/timeout 等): 回退到 base_session, 剥离所有错误消息
-                self.on_event("v2_rollback_before_retry", function=func.name,
-                              reason="stopReason=error, rollback to base_session")
-                try:
-                    if base_session and Path(base_session).exists():
-                        safe_copyfile(base_session, str(fork_session))
-                    else:
-                        # 无 base_session, 清空 fork_session 重建
-                        fork_session.unlink(missing_ok=True)
-                except OSError:
-                    pass
-            # 3. 回退到上个 user 重发: 统一用原始 prompt (不是新的 retry prompt)
-            output = _run_taint_agent(prompt)
+        def _on_result(stage, res, extra):
             if self.on_event:
-                emit_agent_runtime_events(self.on_event, result=output, stage="taint_analysis_v2_retry",
+                _stage_map = {"llm_call": "taint_analysis_v2",
+                              "llm_retry": "taint_analysis_v2_retry",
+                              "llm_continue": "taint_analysis_v2_length_continue"}
+                emit_agent_runtime_events(self.on_event, result=res,
+                                          stage=_stage_map.get(stage, stage),
                                           role="workers", model=acfg.model,
-                                          extra={"function": func.name, "attempt": retry_used})
-            all_texts = _collect_all_texts(output)
-            parsed, parse_warn = _parse_and_check(output.output, all_texts)
+                                          extra={"function": func.name,
+                                                 "fork_purpose": "taint_analysis",
+                                                 **(extra or {})})
 
+        def _v2_on_event(etype, **payload):
+            # 共享例程的通用事件映射回 v2 既有事件名, 保持前端/观测兼容
+            _name_map = {"llm_retry_json": "v2_taint_retry_json",
+                         "llm_rollback": "v2_rollback_before_retry",
+                         "llm_length_continue": "v2_length_continue",
+                         "llm_compact_retry": "v2_compact_retry",
+                         "llm_retry_failed": "v2_taint_analysis_failed"}
+            payload["function"] = payload.pop("label", func.name)
+            self.on_event(_name_map.get(etype, etype), **payload)
+
+        output, parsed, parse_warn = run_agent_with_design_retry(
+            prompt,
+            model=acfg.model, tools=acfg.tools or self.cfg.workers.default_tools,
+            system_prompt=system_prompt, cwd=str(self.run_dir), env=v2_env,
+            thinking_level="off", session_file=str(fork_session),
+            cancel_event=self.cancel_event,
+            run_timeout_seconds=self.cfg.agent_run_timeout_seconds,
+            timeout_retry_enabled=self.cfg.agent_timeout_retry_enabled,
+            timeout_max_retries=self.cfg.agent_timeout_max_retries,
+            pi_max_retries=self.cfg.pi_max_retries, pi_retry_delay=self.cfg.pi_retry_delay,
+            task_context={"task_id": getattr(ctx, "path_id", ""), "task_root": str(self.run_dir.parent),
+                          "task_run_root": str(self.run_dir), "task_pi_dir": self.cfg.role_pi_dir("workers"),
+                          "agent_role": "workers", "fork_purpose": "taint_analysis"},
+            parse_check=_parse_and_check,
+            rollback_session=base_session,
+            error_session_fn=lambda n: str(_session_path(self.sessions_dir, ctx.depth, func.name, f"error{n}")),
+            on_event=_v2_on_event if self.on_event else None,
+            on_result=_on_result,
+            label=func.name, retry_max=3,
+        )
         if parse_warn:
-            self.on_event("v2_taint_analysis_failed", function=func.name,
-                          retry_used=retry_used, reason=parse_warn)
             parsed = parsed or {}
 
         # taint 分析失败时跳过后续 mining — 无污点分析结果, 挖掘无意义

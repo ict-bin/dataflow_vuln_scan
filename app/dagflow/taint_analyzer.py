@@ -77,7 +77,7 @@ class TaintAnalyzer:
         if self._acfg is None:
             raise RuntimeError("no agent configured for dagflow taint_analyzer")
         from ..dataflow_v2.function_extractor import read_function_body
-        from ..runner import run_agent
+        from ..llm_retry import run_agent_with_design_retry
         from ..parsers import _extract_json_object
         from .line_filler import fill_lines
         import time as _time
@@ -93,8 +93,17 @@ class TaintAnalyzer:
             self.graph_recorder.record_node(
                 func_id=func.func_id, func_name=func.name, file=func.file,
                 depth=getattr(self, "_cur_depth", 0), status="analyzing", analysis_status="pending")
-        output = run_agent(
-            prompt=prompt, model=self._acfg.model,
+        def _parse_check(res, all_texts):
+            text = getattr(res, "output", "") or ""
+            p = _extract_json_object(text, "nodes")
+            if p is None:
+                p = _greedy_json_object(text)
+            if not isinstance(p, dict) or not isinstance(p.get("nodes"), list):
+                return None, f"dagflow taint JSON parse failed for {func.name}/{taint_sig}"
+            return p, ""
+
+        output, parsed, _warn = run_agent_with_design_retry(
+            prompt, model=self._acfg.model,
             tools=self._acfg.tools or self._default_tools or [],
             cwd=str(self.source_root), env=v2_env, session_file=sp,
             system_prompt=_system_prompt(),
@@ -110,11 +119,12 @@ class TaintAnalyzer:
                           "task_run_root": str(self.sessions_dir.parent),
                           "task_pi_dir": self.config.role_pi_dir("workers"),
                           "agent_role": "workers", "fork_purpose": "taint_analysis"},
+            parse_check=_parse_check,
+            rollback_session=None,
+            error_session_fn=lambda n: str(Path(sp).with_name(Path(sp).stem + f"-error{n}.jsonl")),
+            on_event=getattr(self, "on_event", None),
+            label=f"dagflow/{func.name}", retry_max=3,
         )
-        text = output.output or ""
-        parsed = _extract_json_object(text, "nodes")
-        if parsed is None:
-            parsed = _greedy_json_object(text)
         if not isinstance(parsed, dict) or not isinstance(parsed.get("nodes"), list):
             raise RuntimeError(f"dagflow taint JSON parse failed for {func.name}/{taint_sig}")
         parsed["func_id"] = func.func_id

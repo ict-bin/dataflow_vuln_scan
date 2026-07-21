@@ -64,7 +64,7 @@ class FunctionResolver:
     def resolve(self, pointer_expr: str, origin_func: str) -> list[str]:
         if self._acfg is None:
             return []
-        from ..runner import run_agent
+        from ..llm_retry import run_agent_with_design_retry
         from ..parsers import _extract_json_object
         from .session_naming import session_path
         sp = str(session_path(self.sessions_dir, origin_func[:40],
@@ -91,8 +91,15 @@ class FunctionResolver:
             f"请按系统提示词策略, 用 v2_db 搜该指针被赋值/注册为哪个真实函数。\n"
         )
         env = {"DVS_V2_DB_DIR": str(self.v2_db_dir), "DVS_SOURCE_ROOT": str(self.source_root)}
-        output = run_agent(
-            prompt=prompt, model=self._acfg.model,
+        def _parse_check(res, all_texts):
+            text = getattr(res, "output", "") or ""
+            p = _extract_json_object(text, "resolved") or _greedy_json_object(text)
+            if not isinstance(p, dict) or not isinstance(p.get("resolved"), list):
+                return None, "dagflow function-resolver JSON parse failed"
+            return p, ""
+
+        output, parsed, _warn = run_agent_with_design_retry(
+            prompt, model=self._acfg.model,
             tools=self._acfg.tools or self.config.workers.default_tools,
             cwd=str(self.source_root), env=env, session_file=sp,
             system_prompt=_system_prompt(), cancel_event=self.cancel_event,
@@ -107,9 +114,14 @@ class FunctionResolver:
                           "task_run_root": str(self.sessions_dir.parent),
                           "task_pi_dir": self.config.role_pi_dir("workers"),
                           "agent_role": "workers", "fork_purpose": "external_tracking"},
+            parse_check=_parse_check,
+            rollback_session=None,
+            error_session_fn=lambda n: str(Path(sp).with_name(Path(sp).stem + f"-error{n}.jsonl")),
+            on_event=getattr(self, "on_event", None),
+            label=f"dagflow-resolver/{func.name}", retry_max=3,
         )
-        text = output.output or ""
-        parsed = _extract_json_object(text, "resolved") or _greedy_json_object(text) or {}
+        if parsed is None:
+            parsed = {}
         out = []
         resolved = parsed.get("resolved") or []
         for item in resolved:

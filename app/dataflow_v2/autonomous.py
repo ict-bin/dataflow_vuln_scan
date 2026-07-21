@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..models import SwarmEvent, TaskConfig
-from ..runner import run_agent
+from ..llm_retry import run_agent_with_design_retry, _last_stop_reason
 from ..vuln_report_utils import build_v2_system_prompt
 from .function_extractor import ensure_file_indexed, find_func_in_source
 from .store import DataflowStore
@@ -178,8 +178,22 @@ class AutonomousRunner:
                 logger.info("[AUTO] round=%d START session=%s", rnd, str(round_session)[-60:])
                 # 本轮 context session 路径 (report_finding 用)
                 base_env["DVS_CONTEXT_SESSION"] = str(round_session)
-                result = run_agent(
-                    prompt=prompt, model=acfg.model, tools=acfg.tools or cfg.workers.default_tools,
+                def _auto_parse_check(_res, _all_texts):
+                    _ec = getattr(_res, "exit_code", None)
+                    _co = getattr(_res, "context_overflow_failed_after_compaction", False)
+                    # 异常退出 (pod killed) → 不重试, 交回自主模式 raise _PiKilledExternally
+                    if _ec is not None and _ec not in (0, 1) and not _co:
+                        return None, ""
+                    _stop = _last_stop_reason(_res)
+                    if _stop == "length" or (_stop == "error" and _all_texts):
+                        return None, f"stop={_stop} partial output, continue"
+                    if _stop == "error" and not _all_texts:
+                        return None, "stop=error no output, rollback"
+                    _ck = self._read_checkpoint(shared_run_dir)
+                    return (_ck, "" if _ck else "no checkpoint written")
+
+                result, _parsed, _warn = run_agent_with_design_retry(
+                    prompt, model=acfg.model, tools=acfg.tools or cfg.workers.default_tools,
                     cwd=str(shared_run_dir), session_file=str(round_session), system_prompt=system_prompt,
                     cancel_event=self._cancel_event, env=base_env,
                     thinking_level="off",
@@ -194,7 +208,12 @@ class AutonomousRunner:
                     retry_prompt=("## 续探 (重试)\n刚才你的探索因 pi 崩溃/超时中断。session 历史仍在。"
                                   "请**从上次中断处继续**探索, 不要从头重来。回顾你已读的函数 + 正在追的污点路径,"
                                   "继续往深挖 + 发现漏洞即 report_finding。结束时 checkpoint。"),
-                    extension="/opt/dataflow_vuln_scan/extensions/restricted-bash.ts")
+                    extension="/opt/dataflow_vuln_scan/extensions/restricted-bash.ts",
+                    parse_check=_auto_parse_check,
+                    rollback_session=None,
+                    error_session_fn=lambda n: str(sessions_dir / f"autonomous-r{rnd:02d}-error{n}.jsonl"),
+                    on_event=self._emit, label=f"auto/r{rnd}", retry_max=3,
+                )
                 # 诊断日志: 记录每轮 run_agent 结果 (error/exit/timeout) 供后续判断
                 _err = getattr(result, "error", "") or ""
                 logger.info("[AUTO] round=%d DONE exit=%s error=%s output_len=%d",

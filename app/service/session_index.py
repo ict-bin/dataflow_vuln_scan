@@ -7,6 +7,14 @@ import time as _time
 from pathlib import Path
 
 
+# 设计②: 错误会话 (-error{N} 后缀) 仅供排障, 前端不展示
+_ERROR_SESSION_RE = re.compile(r"-error\d+$", re.IGNORECASE)
+
+
+def _is_error_session(name: str) -> bool:
+    return bool(_ERROR_SESSION_RE.search(name))
+
+
 _STAGE_ORDER = {
     "worker": 10,
     "judge": 20,
@@ -260,6 +268,9 @@ def build_session_catalog(*, task_id: str, row_status: str, sessions_root: Path,
             relative_path = _normalize_relative_path(str(session_file.relative_to(sessions_root)))
             relative_path = f"sessions/{relative_path}"
             if relative_path.endswith("index.jsonl"):
+                continue
+            # 设计②: 错误会话 (-error{N} 后缀) 仅供排障, 前端不展示
+            if _is_error_session(session_file.stem):
                 continue
             stage_group = relative_path.split("/")[0] if "/" in relative_path else "root"
             session_name = session_file.stem
