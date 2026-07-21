@@ -518,10 +518,8 @@ class DataflowStore:
         self._exec("functions",
             "INSERT OR IGNORE INTO processed_taints (func_id, taint_signature, pre_validation_signature, taint_params, sessions_path) VALUES (?,?,?,?,?)",
             (func_id, ts, pvs, json.dumps(pt.taint_params, ensure_ascii=False), pt.sessions_path))
-        if self._mysql:
-            try: self._mysql.add_processed_taint(func_id, ts,
-                json.dumps(pt.taint_params, ensure_ascii=False), pt.sessions_path)
-            except Exception: pass
+        # 注: processed_taints 不双写 MySQL — 它是"本任务 BFS 去重/占位"状态, 必须任务级隔离;
+        # per-source-dir MySQL 跨任务共享, 双写会导致新任务根函数被前任务残留记录跳过 (0 分析)。
 
     def try_reserve_processed_taint(self, func_id: str, pt: ProcessedTaint) -> bool:
         """分析前预留占位 (MySQL 优先原子占位, SQLite 为本地缓存)。
@@ -532,22 +530,8 @@ class DataflowStore:
         ts = _norm_sig(pt.taint_signature or "")
         pvs = pt.pre_validation_signature or ""
         tp_json = json.dumps(pt.taint_params, ensure_ascii=False)
-        # MySQL 优先: 跨 worker 原子占位
-        if self._mysql:
-            try:
-                reserved = self._mysql.try_reserve_processed_taint(
-                    func_id, ts, tp_json, pt.sessions_path)
-                if reserved:
-                    # 写 SQLite 本地缓存
-                    with self._locks["functions"]:
-                        self._conns["functions"].execute(
-                            "INSERT OR IGNORE INTO processed_taints (func_id, taint_signature, pre_validation_signature, taint_params, sessions_path) VALUES (?,?,?,?,?)",
-                            (func_id, ts, pvs, tp_json, pt.sessions_path))
-                        self._conns["functions"].commit()
-                return reserved
-            except Exception:
-                pass  # MySQL 失败, 回退 SQLite
-        # SQLite fallback (单 pod 内原子)
+        # processed_taints 仅用任务本地 SQLite (per-epoch): 单 worker/单进程内原子占位即可。
+        # 不走 MySQL: per-source-dir 库跨任务共享, 会导致跨任务残留跳过根分析。
         with self._locks["functions"]:
             row = self._conns["functions"].execute(
                 "SELECT 1 FROM processed_taints WHERE func_id=? AND taint_signature=? LIMIT 1",
@@ -566,9 +550,7 @@ class DataflowStore:
         self._exec("functions",
             "DELETE FROM processed_taints WHERE func_id=? AND taint_signature=?",
             (func_id, ts))
-        if self._mysql:
-            try: self._mysql.delete_processed_taint(func_id, ts)
-            except Exception: pass
+        # 不双写 MySQL (见 try_reserve 注释)
 
     def find_processed_taint(self, func_id: str, taint_signature: str,
                              pre_validation_signature: str = "") -> ProcessedTaint | None:
@@ -578,9 +560,7 @@ class DataflowStore:
         pre_validation_signature 参数保留兼容签名但不参与查询。
         """
         ts = _norm_sig(taint_signature)
-        if self._mysql:
-            pt = self._mysql.read_processed_taint(func_id, ts)
-            if pt: return pt
+        # 仅查任务本地 SQLite (per-epoch); 不查共享 MySQL 避免跨任务残留误判"已分析"。
         rows = self._q("functions",
             "SELECT taint_signature, pre_validation_signature, taint_params, sessions_path FROM processed_taints WHERE func_id=? AND taint_signature=? LIMIT 1",
             (func_id, ts))

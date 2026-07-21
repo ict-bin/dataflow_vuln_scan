@@ -182,6 +182,8 @@ class DfsOrchestrator:
         # "LLM 主动判定无可跟踪污点(合法空)" vs "解析失败/格式错误"。
         # 仅在 _process depth==0 时写入; BFS 去重保证根只分析一次, 无并发竞争。
         self.root_taint_failed = False
+        # 根函数(depth=0) 是否真正跑了 LLM 分析 (区别于"被 processed_taints 跳过")
+        self.root_analyzed = False
 
     def _run_llm(self, fn: Callable, *args: Any, **kw: Any) -> Any:
         """LLM 调用限流: 信号量 cap 并发 analyze/mine/track 调用, 避免打爆配额。
@@ -394,8 +396,9 @@ class DfsOrchestrator:
             self.store.delete_processed_taint(func.func_id, _nts)
             raise
         if depth == 0:
-            # 供 runner 在 0 边 0 传播时区分 "合法空" vs "解析失败"
+            # 供 runner 在 0 边 0 传播时区分 "合法空" vs "解析失败" vs "被跳过"
             self.root_taint_failed = bool(getattr(result, "taint_failed", False))
+            self.root_analyzed = True
         for t in result.taints:
             self.store.upsert_taint(t)
         for p in result.propagations:

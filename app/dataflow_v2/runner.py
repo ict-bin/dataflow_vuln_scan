@@ -223,12 +223,16 @@ class DataflowV2Runner:
                         status = TaskStatus.COMPLETED_LIMITED
                         err_msg = "v2: taint 分析未产出传播边 (LLM 识别了污点但未报告传播路径, 可能漏报)"
                     else:
-                        # 无污点也无传播: 用根函数 taint_failed 区分
-                        #   taint_failed=True  -> 解析失败/格式错误 (真失败)
-                        #   taint_failed=False -> LLM 合法返回空 JSON, 判定无可跟踪污点
+                        # 无污点也无传播: 用根函数状态区分
+                        #   root_analyzed=False -> 根被跳过 (processed_taints 残留/占位冲突, LLM 没跑)
+                        #   root_taint_failed=True  -> 解析失败/格式错误 (真失败)
+                        #   root_taint_failed=False -> LLM 合法返回空, 判定无可跟踪污点
+                        _root_analyzed = bool(getattr(orch, "root_analyzed", False))
                         _root_failed = bool(getattr(orch, "root_taint_failed", False))
                         status = TaskStatus.COMPLETED_LIMITED
-                        if _root_failed:
+                        if not _root_analyzed:
+                            err_msg = "v2: taint 分析未产出传播边 (根函数未执行分析, 可能 processed_taints 残留/占位冲突)"
+                        elif _root_failed:
                             err_msg = "v2: taint 分析未产出传播边 (LLM 输出可能截断或格式错误)"
                         else:
                             err_msg = "v2: taint 分析未产出传播边 (LLM 判定无可跟踪污点, 合法空结果)"
