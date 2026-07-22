@@ -36,7 +36,7 @@ def save_findings(vuln_store: Any, findings: list[Finding], *, run_id: str,
             exploitability=str(f.exploitability) if not isinstance(f.exploitability, str) else f.exploitability,
             confidence=f.confidence, output_dir=output_dir)
         try:
-            vuln_store.upsert_finding(rec)
+            vuln_store.add_finding(rec)
             n += 1
         except Exception as e:
             logger.exception("save finding %s failed: %s", fid, e)
