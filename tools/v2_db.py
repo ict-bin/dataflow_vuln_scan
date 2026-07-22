@@ -71,8 +71,10 @@ def _query(db_name: str, sql: str, params: tuple = ()) -> list[dict]:
         print(f"ERROR: 数据库不存在: {db_name}", file=sys.stderr)
         return []
     try:
-        conn = sqlite3.connect(db, timeout=10)
+        conn = sqlite3.connect(db, timeout=30, check_same_thread=False)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=30000")
         rows = [dict(r) for r in conn.execute(sql, params).fetchall()]
         conn.close()
         return rows

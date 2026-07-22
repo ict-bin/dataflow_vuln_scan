@@ -33,8 +33,10 @@ class FuncIndex:
         if not self.db.is_file():
             return None
         from ..dataflow_v2.models import FunctionRecord
-        conn = sqlite3.connect(str(self.db))
+        conn = sqlite3.connect(str(self.db), timeout=30)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=30000")
         try:
             rows = conn.execute(
                 "SELECT func_id,file,name,signature,start_line,end_line,description "
@@ -52,8 +54,10 @@ class FuncIndex:
             if rec: return rec
         if not self.db.is_file():
             return None
-        conn = sqlite3.connect(str(self.db))
+        conn = sqlite3.connect(str(self.db), timeout=30)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=30000")
         try:
             rows = conn.execute(
                 "SELECT func_id,file,name,signature,start_line,end_line,description "
