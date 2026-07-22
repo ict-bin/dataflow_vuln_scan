@@ -67,11 +67,14 @@ class FuncIndex:
     def _ondemand(self, name: str):
         """按需: 逐个文件 extract 直到函数被索引 (.h 只有声明, .c 才有定义)。"""
         if self._v2_store is None:
+            logger.info("[ondemand] SKIP (v2_store is None): name=%s", name)
             return None
         from ..dataflow_v2.function_extractor import find_func_in_source, extract_file_functions
         hits = find_func_in_source(name, self.source_root)
         if not hits:
+            logger.info("[ondemand] find_func_in_source returned no hits: name=%s", name)
             return None
+        logger.info("[ondemand] found %d hits for %s, indexing...", len(hits), name)
         import sqlite3
         for rel_file, _ in hits:
             try:
@@ -180,8 +183,9 @@ class DagflowPipeline:
         try:
             from ..dataflow_v2.store import DataflowStore
             v2_store = DataflowStore(epoch_dir / "dataflow-v2", mysql_store=mysql_store)
-        except Exception:
-            pass
+            logger.info("[dagflow] v2_store OK: %s", epoch_dir / "dataflow-v2")
+        except Exception as e:
+            logger.warning("[dagflow] v2_store FAILED: %s", e)
         func_index = FuncIndex(self.source_root, functions_db, v2_store, mysql_store=mysql_store)
 
         # 索引根函数所在文件 (function_extractor 填 functions.db)
