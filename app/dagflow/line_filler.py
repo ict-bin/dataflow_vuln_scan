@@ -168,7 +168,7 @@ def _extract_return_expr(fdef: Any, start: int, end: int, source: bytes) -> str 
             if nl == start or (start <= nl <= end) or (nl <= start and n.end_point[0] + 1 >= start):
                 # return_statement 的子节点 = 返回表达式 (无 return 关键字)
                 for c in n.children:
-                    if c.type not in ("return_keyword", "RETURN_KEYWORD", ";"):
+                    if c.type not in ("return_keyword", "RETURN_KEYWORD", ";", "return"):
                         txt = _node_text(c, source)
                         if txt:
                             if best is None or abs(nl - start) < abs(best[1] - start):
