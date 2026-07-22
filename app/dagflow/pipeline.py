@@ -188,10 +188,12 @@ class DagflowPipeline:
             try:
                 from sqlalchemy import text as sa_text
                 with mysql_store._engine.connect() as conn:
-                    conn.execute(sa_text("DELETE FROM dag_processed_taints WHERE source_dir_id=:sid AND task_id=:tid"),
-                                 {"sid": mysql_store.source_dir_id, "tid": mysql_store.task_id})
+                    for table in ['dag_processed_taints', 'dag_nodes', 'dag_edges', 'dag_meta']:
+                        conn.execute(sa_text(
+                            f"DELETE FROM {table} WHERE source_dir_id=:sid AND task_id=:tid"),
+                            {"sid": mysql_store.source_dir_id, "tid": mysql_store.task_id})
                     conn.commit()
-                logger.info("[dagflow] cleared stale MySQL dag_processed_taints")
+                logger.info("[dagflow] cleared stale MySQL dag tables (4)")
             except Exception as e:
                 logger.warning("[dagflow] clear MySQL failed: %s", e)
         logger.info("[dagflow] cleared stale dagflow.db data")
