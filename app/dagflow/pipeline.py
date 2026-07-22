@@ -185,17 +185,17 @@ class DagflowPipeline:
         store._exec("DELETE FROM taint_dag_edges")
         store._exec("DELETE FROM taint_dag_meta")
         if mysql_store:
-            try:
-                from sqlalchemy import text as sa_text
-                with mysql_store._engine.connect() as conn:
-                    for table in ['dag_processed_taints', 'dag_nodes', 'dag_edges', 'dag_meta']:
+            from sqlalchemy import text as sa_text
+            params = {"sid": mysql_store.source_dir_id, "tid": mysql_store.task_id}
+            for table in ['dag_processed_taints', 'dag_nodes', 'dag_edges', 'dag_meta']:
+                try:
+                    with mysql_store._engine.begin() as conn:
                         conn.execute(sa_text(
                             f"DELETE FROM {table} WHERE source_dir_id=:sid AND task_id=:tid"),
-                            {"sid": mysql_store.source_dir_id, "tid": mysql_store.task_id})
-                    conn.commit()
-                logger.info("[dagflow] cleared stale MySQL dag tables (4)")
-            except Exception as e:
-                logger.warning("[dagflow] clear MySQL failed: %s", e)
+                            params)
+                except Exception as e:
+                    logger.debug("[dagflow] clear MySQL %s: %s", table, str(e)[:80])
+            logger.info("[dagflow] cleared stale MySQL dag tables")
         logger.info("[dagflow] cleared stale dagflow.db data")
         sessions_dir = epoch_dir / "sessions"  # sessions -> epoch /tmp (与 V2 一致, 大文件 ephemeral)
         functions_db = epoch_dir / "dataflow-v2" / "functions.db"  # functions.db -> epoch (重建, 与 V2 一致)
