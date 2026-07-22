@@ -86,7 +86,16 @@ class FuncIndex:
             except Exception as e:
                 logger.debug("ondemand extract %s failed: %s", rel_file, e)
                 continue
-            # 每个 extract 后查一次
+            # MySQL 优先查 (extract 可能写到 MySQL)
+            if self._mysql:
+                try:
+                    recs = self._mysql.read_functions(name)
+                    if recs:
+                        logger.info("[ondemand] %s found in MySQL after extract", name)
+                        return recs[0]
+                except Exception:
+                    pass
+            # SQLite 回退
             conn = sqlite3.connect(str(self.db))
             conn.row_factory = sqlite3.Row
             try:
@@ -94,11 +103,13 @@ class FuncIndex:
                     "SELECT func_id,file,name,signature,start_line,end_line,description "
                     "FROM functions WHERE name=?", (name,)).fetchall()
                 if rows:
+                    logger.info("[ondemand] %s found in SQLite after extract", name)
                     return self._row_to_rec(rows[0])
             except sqlite3.Error:
                 pass
             finally:
                 conn.close()
+        logger.info("[ondemand] %s not found after extracting %d files", name, len(hits))
         return None  # 所有文件都试过, 仍未索引
 
     @staticmethod
