@@ -175,6 +175,12 @@ class DagflowPipeline:
             project_id=getattr(self, 'task_id', '') and getattr(self.config, 'project_id', '') or '') \
             if hasattr(self, '_mysql_url') and self._mysql_url else None
         store = DagflowStore(nfs_run, mysql_store=mysql_store)  # dagflow.db -> run/dagflow/ (NFS, 持久)
+        # 清空旧数据 (restart 时 dagflow.db 在 NFS 持久, 需手动清空防秒过)
+        store._exec("DELETE FROM dag_processed_taints")
+        store._exec("DELETE FROM taint_dag_nodes")
+        store._exec("DELETE FROM taint_dag_edges")
+        store._exec("DELETE FROM taint_dag_meta")
+        logger.info("[dagflow] cleared stale dagflow.db data")
         sessions_dir = epoch_dir / "sessions"  # sessions -> epoch /tmp (与 V2 一致, 大文件 ephemeral)
         functions_db = epoch_dir / "dataflow-v2" / "functions.db"  # functions.db -> epoch (重建, 与 V2 一致)
         (epoch_dir / "dataflow-v2").mkdir(parents=True, exist_ok=True)
