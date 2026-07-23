@@ -124,6 +124,11 @@ class AutonomousRunner:
             script_dir = Path("/opt/dataflow_vuln_scan/scripts/autonomous")
             wrapper_dir = "/opt/dataflow_vuln_scan/bin/restricted"  # find/grep/cat 限源码目录
             # 环境变量: 让脚本能找到 run_dir/v2_db/source_root + intake 元数据
+            import hashlib as _hl
+            _db_cfg = getattr(cfg, "db", None)
+            _mysql_url = _db_cfg.url if _db_cfg else \
+                "mysql+pymysql://root:Huawei12%23$@secflow-app-dataflow-vuln-scan-mysql.secflow-ns.svc.cluster.local:3306"
+            _source_dir_id = _hl.sha1(str(source_root).encode("utf-8")).hexdigest()[:16]
             base_env = {
                 "DVS_RUN_DIR": str(shared_run_dir),
                 "DVS_V2_DB_DIR": str(v2_run_dir),
@@ -136,6 +141,10 @@ class AutonomousRunner:
                 "DVS_PARENT_TASK_NAME": cfg.parent_task_name,
                 "DVS_PARENT_TASK_TYPE": cfg.parent_task_type,
                 "DVS_TASK_ORIGIN_TYPE": cfg.task_origin_type,
+                # MySQL finding 双写: report_finding 脚本据此构造 MysqlGraphStore,
+                # 否则自主模式 findings 只写 SQLite, graph-view (MySQL 优先) 读出 0
+                "DVS_MYSQL_URL": _mysql_url,
+                "DVS_SOURCE_DIR_ID": _source_dir_id,
                 # 显式把 restricted wrapper 放 PATH 最前 (find/grep/cat 只能在 source_root 内),
                 # 双保险 (_build_agent_env 也会 prepend, 这里再保一次防 pi bash 工具 env 差异)
                 "PATH": wrapper_dir + os.pathsep + os.environ.get("PATH", "") + os.pathsep + str(script_dir) + os.pathsep + "/opt/venv/bin",

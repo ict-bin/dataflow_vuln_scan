@@ -42,7 +42,21 @@ def main():
     from app.vuln_store import VulnScanStore
     from app.dataflow_v2.finding_store import persist_finding
     from pathlib import Path
-    gs = VulnScanStore(GRAPH_DB)
+    # MySQL finding 双写: 据 env 构造 MysqlGraphStore 传给 VulnStoreStore,
+    # 否则 persist_finding 的 insert_finding 跳过 → graph-view (MySQL) 读 0
+    _mysql_store = None
+    _mysql_url = os.environ.get("DVS_MYSQL_URL") or ""
+    if _mysql_url:
+        try:
+            from app.db.mysql_graph_store import create_mysql_graph_store
+            _mysql_store = create_mysql_graph_store(
+                _mysql_url,
+                project_id=os.environ.get("DVS_PROJECT_ID", ""),
+                source_dir_id=os.environ.get("DVS_SOURCE_DIR_ID", ""),
+                source_root=SOURCE_ROOT)
+        except Exception as e:
+            print(f"[report_finding] mysql store init failed: {e}", file=sys.stderr)
+    gs = VulnScanStore(GRAPH_DB, mysql_store=_mysql_store)
     func_file = str(item.get("source_file") or "")
     func_name = str(item.get("function_name") or "")
     func_desc = str(item.get("function_description") or "")
