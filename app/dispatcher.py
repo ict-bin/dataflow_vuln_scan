@@ -21,12 +21,23 @@ PUMP_INTERVAL = float(os.environ.get("DVS_DISPATCHER_PUMP_INTERVAL", "3"))
 STALE_INTERVAL = float(os.environ.get("DVS_DISPATCHER_STALE_INTERVAL", "30"))
 PUMP_BATCH = int(os.environ.get("DVS_DISPATCHER_PUMP_BATCH", "20"))
 STALE_HEARTBEAT_SECONDS = int(os.environ.get("DVS_DISPATCHER_STALE_HEARTBEAT_SECONDS", "60"))  # 60s 无心跳=卡死
+PENDING_CELERY_STALE_SECONDS = int(os.environ.get("DVS_PENDING_CELERY_STALE_SECONDS", "600"))  # 10min 未消费=重投
 INSPECT_TIMEOUT = float(os.environ.get("DVS_DISPATCHER_INSPECT_TIMEOUT", "3"))
 DEBUG_DISPATCH_INTERVAL = float(os.environ.get("DVS_DISPATCHER_DEBUG_INTERVAL", "15"))
 DEBUGGER_HOST = os.environ.get("DVS_DEBUGGER_HOST", "secflow-app-dataflow-vuln-scan-debugger")
 DEBUGGER_PORT = int(os.environ.get("DVS_DEBUGGER_PORT", "8080"))
 # 需调试的终态
 _DEBUG_STATUSES = ("failed", "error", "completed_limited")
+
+
+def _collect_known_celery_ids(payload: Any) -> set[str]:
+    known_ids: set[str] = set()
+    for tasks in (payload or {}).values():
+        for task in (tasks or []):
+            cid = task.get("id") if isinstance(task, dict) else None
+            if cid:
+                known_ids.add(str(cid))
+    return known_ids
 
 
 class Dispatcher:
@@ -153,19 +164,19 @@ class Dispatcher:
         from app.db.models import AppDvsTask
         from app.time_utils import now_local
         from app.celery_app import app as celery_app
-        # 1. 取所有活 worker 在跑的 celery_id
+        # 1. 取所有活 worker 已知的 celery_id
         active_ids: set[str] = set()
+        reserved_ids: set[str] = set()
+        scheduled_ids: set[str] = set()
         try:
             inspect = celery_app.control.inspect(timeout=INSPECT_TIMEOUT)
-            active = inspect.active() or {}
-            for _pod, tasks in active.items():
-                for t in (tasks or []):
-                    cid = t.get("id") if isinstance(t, dict) else None
-                    if cid:
-                        active_ids.add(cid)
+            active_ids = _collect_known_celery_ids(inspect.active() or {})
+            reserved_ids = _collect_known_celery_ids(inspect.reserved() or {})
+            scheduled_ids = _collect_known_celery_ids(inspect.scheduled() or {})
         except Exception as exc:
             logger.warning("inspect.active failed: %s (skip this round)", exc)
             return 0
+        known_ids = active_ids | reserved_ids | scheduled_ids
         # 2. DB running 任务: celery_id 不在 active 且 心跳超时 → 孤儿/卡死
         db_gen = get_db()
         db = next(db_gen)
@@ -200,6 +211,35 @@ class Dispatcher:
                 reset += 1
                 logger.warning("stale reset task=%s celery_id=%s in_active=%s hb_stale=%s",
                                row.task_id, cid, in_active, heartbeat_stale)
+            pending_rows = db.query(AppDvsTask).filter(
+                AppDvsTask.status == "pending",
+                AppDvsTask.is_deleted.is_(False),
+                AppDvsTask.celery_task_id.is_not(None),
+            ).all()
+            for row in pending_rows:
+                cid = str(row.celery_task_id or "").strip()
+                if not cid or cid in known_ids:
+                    continue
+                last_seen_at = row.updated_at or row.execution_heartbeat_at or row.created_at
+                if last_seen_at is None:
+                    continue
+                pending_age_seconds = (now - last_seen_at).total_seconds()
+                if pending_age_seconds <= PENDING_CELERY_STALE_SECONDS:
+                    continue
+                row.celery_task_id = None
+                row.execution_owner_id = None
+                row.execution_lease_until = None
+                row.dispatch_status = None
+                reset += 1
+                logger.warning(
+                    "pending stale celery reset task=%s celery_id=%s age=%.1fs active=%s reserved=%s scheduled=%s",
+                    row.task_id,
+                    cid,
+                    pending_age_seconds,
+                    cid in active_ids,
+                    cid in reserved_ids,
+                    cid in scheduled_ids,
+                )
             if reset:
                 db.commit()
         finally:

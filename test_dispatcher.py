@@ -11,28 +11,38 @@ from app.time_utils import now_local
 
 
 class _FakeInspect:
-    def __init__(self, active_payload):
+    def __init__(self, active_payload, reserved_payload=None, scheduled_payload=None):
         self._active_payload = active_payload
+        self._reserved_payload = reserved_payload or {}
+        self._scheduled_payload = scheduled_payload or {}
 
     def active(self):
         return self._active_payload
 
+    def reserved(self):
+        return self._reserved_payload
+
+    def scheduled(self):
+        return self._scheduled_payload
+
 
 class _FakeControl:
-    def __init__(self, active_payload):
+    def __init__(self, active_payload, reserved_payload=None, scheduled_payload=None):
         self._active_payload = active_payload
+        self._reserved_payload = reserved_payload or {}
+        self._scheduled_payload = scheduled_payload or {}
         self.revoked: list[tuple[str, bool, str]] = []
 
     def inspect(self, timeout=None):
-        return _FakeInspect(self._active_payload)
+        return _FakeInspect(self._active_payload, self._reserved_payload, self._scheduled_payload)
 
     def revoke(self, task_id, terminate=False, signal=None):
         self.revoked.append((task_id, terminate, signal))
 
 
 class _FakeCeleryApp:
-    def __init__(self, active_payload):
-        self.control = _FakeControl(active_payload)
+    def __init__(self, active_payload, reserved_payload=None, scheduled_payload=None):
+        self.control = _FakeControl(active_payload, reserved_payload, scheduled_payload)
 
 
 class DispatcherStaleLoopTests(unittest.TestCase):
@@ -117,6 +127,98 @@ class DispatcherStaleLoopTests(unittest.TestCase):
             self.assertIsNone(row.execution_owner_id)
             self.assertIsNone(row.execution_lease_until)
             self.assertIsNone(row.dispatch_status)
+        finally:
+            db.close()
+
+    def test_stale_loop_keeps_recent_pending_task_with_celery_id(self):
+        self._insert_task(
+            task_id="dvs_dispatcher_3",
+            status="pending",
+            celery_task_id="celery-3",
+            execution_owner_id=None,
+            execution_lease_until=None,
+            execution_heartbeat_at=None,
+            dispatch_status=None,
+        )
+        fake_app = _FakeCeleryApp(active_payload={})
+        dispatcher = Dispatcher()
+
+        with patch("app.db.get_db", self._get_db), patch("app.celery_app.app", fake_app):
+            reset = dispatcher._stale_once()
+
+        self.assertEqual(0, reset)
+        db = self.SessionLocal()
+        try:
+            row = db.query(AppDvsTask).filter_by(task_id="dvs_dispatcher_3").first()
+            self.assertEqual("pending", row.status)
+            self.assertEqual("celery-3", row.celery_task_id)
+        finally:
+            db.close()
+
+    def test_stale_loop_resets_old_pending_task_with_lost_celery_message(self):
+        self._insert_task(
+            task_id="dvs_dispatcher_4",
+            status="pending",
+            celery_task_id="celery-4",
+            execution_owner_id=None,
+            execution_lease_until=None,
+            execution_heartbeat_at=None,
+            dispatch_status=None,
+        )
+        db = self.SessionLocal()
+        try:
+            row = db.query(AppDvsTask).filter_by(task_id="dvs_dispatcher_4").first()
+            row.updated_at = now_local() - timedelta(seconds=601)
+            db.commit()
+        finally:
+            db.close()
+        fake_app = _FakeCeleryApp(active_payload={})
+        dispatcher = Dispatcher()
+
+        with patch("app.db.get_db", self._get_db), patch("app.celery_app.app", fake_app):
+            reset = dispatcher._stale_once()
+
+        self.assertEqual(1, reset)
+        db = self.SessionLocal()
+        try:
+            row = db.query(AppDvsTask).filter_by(task_id="dvs_dispatcher_4").first()
+            self.assertEqual("pending", row.status)
+            self.assertIsNone(row.celery_task_id)
+            self.assertIsNone(row.execution_owner_id)
+            self.assertIsNone(row.execution_lease_until)
+            self.assertIsNone(row.dispatch_status)
+        finally:
+            db.close()
+
+    def test_stale_loop_keeps_pending_task_when_celery_is_reserved(self):
+        self._insert_task(
+            task_id="dvs_dispatcher_5",
+            status="pending",
+            celery_task_id="celery-5",
+            execution_owner_id=None,
+            execution_lease_until=None,
+            execution_heartbeat_at=None,
+            dispatch_status=None,
+        )
+        db = self.SessionLocal()
+        try:
+            row = db.query(AppDvsTask).filter_by(task_id="dvs_dispatcher_5").first()
+            row.updated_at = now_local() - timedelta(seconds=601)
+            db.commit()
+        finally:
+            db.close()
+        fake_app = _FakeCeleryApp(active_payload={}, reserved_payload={"worker-a": [{"id": "celery-5"}]})
+        dispatcher = Dispatcher()
+
+        with patch("app.db.get_db", self._get_db), patch("app.celery_app.app", fake_app):
+            reset = dispatcher._stale_once()
+
+        self.assertEqual(0, reset)
+        db = self.SessionLocal()
+        try:
+            row = db.query(AppDvsTask).filter_by(task_id="dvs_dispatcher_5").first()
+            self.assertEqual("pending", row.status)
+            self.assertEqual("celery-5", row.celery_task_id)
         finally:
             db.close()
 
