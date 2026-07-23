@@ -88,8 +88,9 @@ class GraphRecorder:
                 started_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"),
                 session_group_key=f"d{depth:02d}::{func_name}",
             ))
+            logger.info("[graph] record_node OK: func=%s status=%s node_id=%s", func_name, status, node_id[:40])
         except Exception as e:
-            logger.warning("graph record_node failed: %s", e)
+            logger.warning("[graph] record_node FAILED: func=%s status=%s err=%s", func_name, status, e)
         return node_id
 
     # ── 边 (传播/callee/return/escape) ────────────────────────────────

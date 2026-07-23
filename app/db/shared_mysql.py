@@ -310,7 +310,7 @@ class SharedMysqlStore(MysqlReadMixin):
                         conn.execute(sa_text(s))
                         conn.commit()
                 except Exception as e:
-                    logger.debug("DDL skip: %s (%s)", s[:60], e)
+                    logger.warning("DDL skip: %s (%s)", s[:60], e)
         _exec_multi(_DDL_NO_TASK)
         if self.mode in ("complete", "autonomous"):
             _exec_multi(_DDL_WITH_TASK_V2)

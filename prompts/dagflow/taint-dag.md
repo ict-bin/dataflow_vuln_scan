@@ -84,8 +84,8 @@
 - `check_lines`：**对污点本身做约束的校验**行号列表。每个元素是行号(int)或行号范围 `[start, end]`。**纯路径条件不进 check_lines**（选分支的条件上 `cond_lines`）。
 
 ### 边字段（edges 数组的每一项）
-- `from`：**起始节点数组下标**（0-based）。必填。
-- `to`：目标节点**数组下标**（0-based）。return 边 `to`=-1。
+- `from`：**起始节点在 nodes 数组中的下标**（0-based，不是行号！）。node[0] 是 nodes 数组第一个元素。必填。
+- `to`：目标节点在 **nodes 数组中的下标**（0-based，不是行号！）。return 边 `to`=-1。
 - `kind`：`inside` | `callee` | `extern` | `container` | `return`。
 - `taints`：沿边传播的污点签名列表。**return 边不需要输出 taints**——脚本会从 return 语句行号读源码自动提取返回表达式。
 - `line`：传播发生的代码行号。多行时 `[start, end]`。
@@ -112,6 +112,7 @@ true=本函数自身存在 sink（危险操作即触发点）；false=中转/转
 
 ## 关键约束
 - **edges 是顶层独立数组，不是嵌套在 nodes 里**。每条边必须有 `from` 和 `to`。
+- **`from` 和 `to` 是 nodes 数组的下标（0, 1, 2...），不是代码行号**。node[0] 是 nodes 数组第一个元素，node[1] 是第二个，以此类推。
 - callee 名必须**限定**（含类/命名空间），便于去重不合并 overload。
 - `tainted_args` 的 `i` 是实参在**调用表达式中的位置**（0=第一个参数），不是 callee 形参位置。脚本会按位置映射到形参名。
 - escape 不清洗污点（同一污点可继续传播到其他 sink）。
