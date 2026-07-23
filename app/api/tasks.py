@@ -1504,6 +1504,26 @@ def get_task_vuln_findings(task_id: str, db: Session = Depends(get_db)):
     }
 
 
+@router.get("/tasks/{task_id}/vuln-findings/{finding_id}/report")
+def get_task_vuln_finding_report(task_id: str, finding_id: str, db: Session = Depends(get_db)):
+    """返回单条漏洞的 vulnerability-report.md 内容 (前端点开漏洞渲染)。"""
+    row = _get_task_row(db, task_id)
+    root = _task_root(row)
+    latest_run_root = _latest_epoch_run_root(root) if str(root) else Path()
+    run_root = latest_run_root if latest_run_root.exists() else root / "run"
+    view = _load_task_graph_view(run_root, task_id)
+    findings = list(view.get("findings") or [])
+    finding = next((f for f in findings if str(f.get("finding_id") or "") == finding_id), None)
+    if not finding:
+        raise HTTPException(status_code=404, detail=f"finding {finding_id} not found")
+    output_dir = str(finding.get("output_dir") or "")
+    report_path = Path(output_dir) / "vulnerability-report.md" if output_dir else None
+    if not report_path or not report_path.exists():
+        raise HTTPException(status_code=404, detail="vulnerability-report.md not found")
+    return {"task_id": task_id, "finding_id": finding_id,
+            "content": report_path.read_text(encoding="utf-8", errors="replace")}
+
+
 @router.get("/tasks/{task_id}/propagations", response_model=TaskPropagationsResponse)
 def get_task_propagations(task_id: str, db: Session = Depends(get_db)):
     row = _get_task_row(db, task_id)
