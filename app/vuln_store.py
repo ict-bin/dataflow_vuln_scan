@@ -186,6 +186,9 @@ class VulnFindingRecord:
     exploitability: str = ""
     confidence: float = 0.0
     output_dir: str = ""
+    code_snippet: str = ""
+    code_explanation: str = ""
+    fix_suggestion: str = ""
 
 
 class VulnScanStore:
@@ -306,6 +309,9 @@ class VulnScanStore:
                   output_dir TEXT NOT NULL DEFAULT '',
                   report_status TEXT NOT NULL DEFAULT '',
                   report_case_id TEXT NOT NULL DEFAULT '',
+                  code_snippet TEXT NOT NULL DEFAULT '',
+                  code_explanation TEXT NOT NULL DEFAULT '',
+                  fix_suggestion TEXT NOT NULL DEFAULT '',
                   created_at REAL NOT NULL DEFAULT (strftime('%s','now')),
                   FOREIGN KEY(run_id) REFERENCES analysis_runs(run_id)
                 );
@@ -472,6 +478,9 @@ class VulnScanStore:
                 ("vulnerability_findings", "line", "ALTER TABLE vulnerability_findings ADD COLUMN line TEXT NOT NULL DEFAULT ''"),
                 ("vulnerability_findings", "report_status", "ALTER TABLE vulnerability_findings ADD COLUMN report_status TEXT NOT NULL DEFAULT ''"),
                 ("vulnerability_findings", "report_case_id", "ALTER TABLE vulnerability_findings ADD COLUMN report_case_id TEXT NOT NULL DEFAULT ''"),
+                ("vulnerability_findings", "code_snippet", "ALTER TABLE vulnerability_findings ADD COLUMN code_snippet TEXT NOT NULL DEFAULT ''"),
+                ("vulnerability_findings", "code_explanation", "ALTER TABLE vulnerability_findings ADD COLUMN code_explanation TEXT NOT NULL DEFAULT ''"),
+                ("vulnerability_findings", "fix_suggestion", "ALTER TABLE vulnerability_findings ADD COLUMN fix_suggestion TEXT NOT NULL DEFAULT ''"),
                 ("taint_edges", "validation_facts_json", "ALTER TABLE taint_edges ADD COLUMN validation_facts_json TEXT NOT NULL DEFAULT '[]'"),
                 ("taint_edges", "validation_signature", "ALTER TABLE taint_edges ADD COLUMN validation_signature TEXT NOT NULL DEFAULT 'none'"),
                 ("taint_edges", "validation_risk_rank", "ALTER TABLE taint_edges ADD COLUMN validation_risk_rank INTEGER NOT NULL DEFAULT 100"),

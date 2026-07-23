@@ -27,6 +27,23 @@ def safe_name(value: str, *, max_len: int = 96) -> str:
     return f"{safe[:max_len - 9]}-{hashlib.sha1(value.encode()).hexdigest()[:8]}"
 
 
+def _flow(text: Any) -> str:
+    """把 LLM 输出规整成多行, 保证 .md 可读。
+
+    - 拆 `→` 串联的步骤为独立行
+    - 把 `步骤N:` / `行 N:` 提到行首 (若被 `→` 黏在一起)
+    - 多余空行收敛
+    """
+    if not text:
+        return ""
+    s = str(text)
+    s = s.replace("→", "\n")
+    s = re.sub(r'(?<!\n)(步骤\d+[:：])', r'\n\1', s)
+    s = re.sub(r'(?<!\n)(行\s*\d+[:：])', r'\n\1', s)
+    s = re.sub(r'\n{3,}', '\n\n', s)
+    return s.strip()
+
+
 def format_exploitability_md(value: Any) -> str:
     """Render the exploitability field as Markdown (struct or legacy string)."""
     if not value:
@@ -88,7 +105,7 @@ def format_dimensions_md(value: Any) -> str:
 
 def format_vuln_report_md(item: dict, finding_id: str, source_file: str,
                           function_name: str, line: str) -> str:
-    """Build the vulnerability-report.md body with 9 standardized sections."""
+    """Build the vulnerability-report.md body with standardized sections."""
     title = str(item.get("title") or finding_id)
     summary = str(item.get("summary") or "")
     entry_point = str(item.get("entry_point") or "")
@@ -97,16 +114,25 @@ def format_vuln_report_md(item: dict, finding_id: str, source_file: str,
     vuln_type = str(item.get("vuln_type") or "unknown")
     severity = str(item.get("severity") or "unknown")
     confidence = item.get("confidence")
+    code_snippet = str(item.get("code_snippet") or "").strip()
+    code_explanation = str(item.get("code_explanation") or "").strip()
+    fix_suggestion = str(item.get("fix_suggestion") or "").strip()
     sections = [
         f"# {title}", "",
-        "## 漏洞最初入口", entry_point or "（未提供）", "",
+        "## 漏洞最初入口", _flow(entry_point) or "（未提供）", "",
         "## 漏洞所在文件", f"`{source_file}`", "",
         "## 漏洞所在函数", f"`{function_name}`", "",
         "## 漏洞所在行号", f"`{line or 'unknown'}`", "",
-        "## 漏洞概述", summary, "",
-        "## 漏洞判断依据", evidence, "",
-        "## 漏洞触发路径", trigger_path or "（未提供）", "",
+        "## 漏洞源码",
+        (f"```c\n{code_snippet}\n```" if code_snippet else "（未提供）"), "",
+        "## 漏洞概述", _flow(summary), "",
+        "## 漏洞结合代码说明",
+        (_flow(code_explanation) or "（未提供）"), "",
+        "## 漏洞判断依据", _flow(evidence), "",
+        "## 漏洞触发路径", (_flow(trigger_path) or "（未提供）"), "",
         "## 漏洞危害", format_exploitability_md(item.get("exploitability")), "",
+        "## 修复建议",
+        (_flow(fix_suggestion) or "（未提供）"), "",
         "## 漏洞基本信息",
         f"- **漏洞类型**: `{vuln_type}`",
         f"- **严重程度**: `{severity}`",
@@ -117,7 +143,13 @@ def format_vuln_report_md(item: dict, finding_id: str, source_file: str,
         sections.append("")
         sections.append("## 四维度判断指标")
         sections.append(dim_md.replace("## 四维度自检", "", 1).strip())
-    return "\n".join(sections) + "\n"
+    # 章节间插 --- (平台不渲染 markdown 时也有视觉分隔)
+    out = []
+    for i, s in enumerate(sections):
+        out.append(s)
+        if s == "" and i + 1 < len(sections) and sections[i + 1].startswith("## "):
+            out.append("---")
+    return "\n".join(out) + "\n"
 
 
 # 内嵌技能文本 (v1 vuln_workflow 与 v2 mine_vulns 共用)

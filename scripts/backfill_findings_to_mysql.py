@@ -24,10 +24,10 @@ MYSQL_PWD = os.environ.get("DVS_MYSQL_PASSWORD", "Huawei12#$")
 
 SQLITE_COLS = ['finding_id','run_id','node_id','edge_id','source_file','function_name','line',
                'vuln_type','severity','title','summary','evidence','exploitability','confidence',
-               'output_dir','report_status','report_case_id','created_at']
+               'output_dir','report_status','report_case_id','code_snippet','code_explanation','fix_suggestion','created_at']
 MYSQL_COLS = ['finding_id','run_id','task_id','node_id','edge_id','source_file','function_name','line',
               'vuln_type','severity','title','summary','evidence','exploitability','confidence',
-              'output_dir','report_status','report_case_id','created_at']
+              'output_dir','report_status','report_case_id','code_snippet','code_explanation','fix_suggestion','created_at']
 SEL = ','.join(SQLITE_COLS)
 INS = f"INSERT IGNORE INTO dvs_vuln_findings ({','.join(MYSQL_COLS)}) VALUES ({','.join(['%s']*len(MYSQL_COLS))})"
 AR_SQL = "INSERT IGNORE INTO dvs_analysis_runs (run_id,task_id,root_file,root_function,source_root,status,started_at) VALUES (%s,%s,%s,%s,%s,%s,%s)"

@@ -81,7 +81,10 @@ def persist_finding(
         evidence=str(item.get("evidence") or ""),
         exploitability=expl_str,
         confidence=float(item.get("confidence") or 0),
-        output_dir=str(fdir))
+        output_dir=str(fdir),
+        code_snippet=str(item.get("code_snippet") or ""),
+        code_explanation=str(item.get("code_explanation") or ""),
+        fix_suggestion=str(item.get("fix_suggestion") or ""))
 
     # FK 满足 + INSERT (同一 connection, 避免 FK 跨连接不可见)
     try:
@@ -94,7 +97,10 @@ def persist_finding(
                 'evidence': str(item.get('evidence') or ''),
                 'exploitability': expl_str,
                 'confidence': float(item.get('confidence') or 0),
-                'output_dir': str(fdir)}
+                'output_dir': str(fdir),
+                'code_snippet': str(item.get('code_snippet') or ''),
+                'code_explanation': str(item.get('code_explanation') or ''),
+                'fix_suggestion': str(item.get('fix_suggestion') or '')}
         cols = list(data)
         with graph_store.connect() as conn:
             conn.execute("INSERT OR IGNORE INTO analysis_runs (run_id,task_id,root_file,root_function,source_root,status,started_at) VALUES (?,?,?,?,?,?,?)",

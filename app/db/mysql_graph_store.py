@@ -126,6 +126,9 @@ CREATE TABLE IF NOT EXISTS dvs_vuln_findings (
     output_dir TEXT,
     report_status VARCHAR(32) NOT NULL DEFAULT '',
     report_case_id VARCHAR(128) NOT NULL DEFAULT '',
+    code_snippet TEXT,
+    code_explanation TEXT,
+    fix_suggestion TEXT,
     created_at VARCHAR(40) NOT NULL DEFAULT ''
 );
 CREATE INDEX ix_dvs_vf_run ON dvs_vuln_findings(run_id);

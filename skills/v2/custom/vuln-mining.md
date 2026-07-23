@@ -8,7 +8,7 @@
 2. 用 `v2_db lookup <callee_name>` 查看 callee 行为 (如返回借用指针/分配/不释放)
 3. 用 `v2_db propagations <func_name>` 查看传播详情
 4. 判断是否存在漏洞 (D1-D4 推理)
-5. 输出 JSON: findings[]
+5. 输出 JSON: `findings[]`。字段与格式要求见 `mine-dataflow-vulnerability` skill (vuln_type/severity/title/summary/evidence/trigger_path/exploitability/confidence/code_snippet/code_explanation/fix_suggestion/dimensions)。**多行字段必须用 `\n` 真实换行, 禁止 `→` 串联**。
 
 ## 关键约束
 
