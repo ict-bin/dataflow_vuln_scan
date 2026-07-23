@@ -553,12 +553,16 @@ class MysqlGraphStore:
                 "dvs_task_graph_nodes",
                 "dvs_task_graph_edges",
                 "dvs_task_graph_sessions",
-                "dvs_vuln_findings",
                 "dvs_analysis_runs",
             ):
                 conn.execute(sa_text(
                     f"DELETE FROM {t} WHERE task_id=:tid"),
                     {"tid": task_id})
+            # dvs_vuln_findings: 老 finding 行可能 task_id='' (persist_finding 旧版未设),
+            # 用 run_id 兜底 (run_id=task_id); 同时清 task_id 命中的
+            conn.execute(sa_text(
+                "DELETE FROM dvs_vuln_findings WHERE task_id=:tid OR run_id=:tid"),
+                {"tid": task_id})
             conn.execute(sa_text(
                 "DELETE FROM dvs_task_graph_runs WHERE task_id=:tid"),
                 {"tid": task_id})

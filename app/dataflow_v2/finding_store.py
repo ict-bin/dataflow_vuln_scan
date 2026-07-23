@@ -88,7 +88,7 @@ def persist_finding(
 
     # FK 满足 + INSERT (同一 connection, 避免 FK 跨连接不可见)
     try:
-        data = {'finding_id': finding_id, 'run_id': run_id, 'node_id': node,
+        data = {'finding_id': finding_id, 'run_id': run_id, 'task_id': task_id, 'node_id': node,
                 'source_file': fsrc, 'function_name': ffn, 'line': fline,
                 'vuln_type': str(item.get('vuln_type') or 'unknown'),
                 'severity': str(item.get('severity') or 'unknown'),
