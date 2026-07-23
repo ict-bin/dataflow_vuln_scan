@@ -1520,6 +1520,14 @@ def get_task_vuln_finding_report(task_id: str, finding_id: str, db: Session = De
     fid = finding_id
     # 1) 运行中/最新: output_dir (run/epochs/.../vulnerabilities/<fid>)
     report_path = Path(output_dir) / "vulnerability-report.md" if output_dir else None
+    # 1b) output_dir 可能是缺前缀的相对路径 (如 /epochs/0007/..., 旧版/自主模式写入),
+    #     解析到 <task_root>/run/<output_dir> 重试
+    if (not report_path or not report_path.exists()) and output_dir:
+        rel = output_dir.lstrip("/")
+        run_resolved = root / "run" / rel
+        cand = run_resolved / "vulnerability-report.md"
+        if cand.exists():
+            report_path = cand
     # 2) 归档副本: <task_root>/output/vulnerabilities/<fid>/vulnerability-report.md
     #    (任务完成后 _archive 复制到 output/; 重启清空 run/epochs 后归档仍在)
     if not report_path or not report_path.exists():
