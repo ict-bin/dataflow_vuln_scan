@@ -823,28 +823,30 @@ def _sync_task_abnormal_reason(row: AppDvsTask) -> tuple[dict | None, bool]:
 
 
 def _sync_task_vuln_stats(row: AppDvsTask) -> bool:
-    """Sync vuln stats from task SQLite to MySQL row. Returns True if changed."""
-    from app.vuln_store import VulnScanStore
-    root = _task_root(row)
-    if not str(root):
+    """Sync vuln stats from authoritative MySQL graph findings into task snapshot."""
+    from app.db.mysql_graph_store import create_mysql_graph_store
+    import hashlib
+
+    source_root = str(row.source_root_path or row.input_path or "").strip()
+    project_id = str(row.project_id or "").strip()
+    task_id = str(row.task_id or "").strip()
+    if not source_root or not task_id:
         return False
-    # Prefer run/vuln-scan.sqlite (always complete), fallback to latest epoch
-    run_sqlite = root / "run" / "vuln-scan.sqlite"
-    if not run_sqlite.exists():
-        latest = _latest_epoch_run_root(row) if str(root) else None
-        run_root = latest if latest and latest.exists() else root / "run"
-    else:
-        run_root = root / "run"
-    if not run_root.exists():
+
+    source_dir_id = hashlib.sha1(source_root.encode("utf-8")).hexdigest()[:16]
+    store = create_mysql_graph_store(
+        "mysql+pymysql://root:Huawei12%23$@secflow-app-dataflow-vuln-scan-mysql.secflow-ns.svc.cluster.local:3306",
+        project_id=project_id,
+        source_dir_id=source_dir_id,
+        source_root=source_root,
+    )
+    if store is None:
         return False
-    db_path = run_root / "vuln-scan.sqlite"
-    if not db_path.exists():
-        return False
-    store = VulnScanStore(db_path)
-    findings = list(store.list_task_findings(str(row.task_id or "")))
-    total = len(findings)
-    reported = sum(1 for f in findings if f.get("report_status") == "reported")
-    unreported = total - reported
+
+    stats = store.get_task_finding_stats(task_id)
+    total = int(stats.get("total") or 0)
+    reported = int(stats.get("reported") or 0)
+    unreported = int(stats.get("unreported") or 0)
     changed = (row.vuln_total_count != total or row.vuln_reported_count != reported or row.vuln_unreported_count != unreported)
     if changed:
         row.vuln_total_count = total
@@ -1333,7 +1335,12 @@ class TaskService:
         }
 
     def get_task(self, db: Session, task_id: str) -> dict:
-        return self._row_to_dict(self._get_or_404(db, task_id))
+        row = self._get_or_404(db, task_id)
+        if _sync_task_vuln_stats(row):
+            db.add(row)
+            db.commit()
+            db.refresh(row)
+        return self._row_to_dict(row)
 
     def get_task_execution(self, db: Session, task_id: str) -> dict:
         row = self._get_or_404(db, task_id)

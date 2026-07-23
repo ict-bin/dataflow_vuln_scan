@@ -7,6 +7,8 @@ class _FakeConn:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict]] = []
         self.commits = 0
+        self.fetchall_results: list[list] = []
+        self.fetchone_results: list[object] = []
 
     def __enter__(self):
         return self
@@ -16,7 +18,12 @@ class _FakeConn:
 
     def execute(self, stmt, params=None):
         self.calls.append((str(stmt), dict(params or {})))
-        return None
+        if self.fetchone_results or self.fetchall_results:
+            return _FakeResult(
+                fetchone_result=self.fetchone_results.pop(0) if self.fetchone_results else None,
+                fetchall_result=self.fetchall_results.pop(0) if self.fetchall_results else [],
+            )
+        return _FakeResult()
 
     def commit(self):
         self.commits += 1
@@ -28,6 +35,23 @@ class _FakeEngine:
 
     def connect(self):
         return self._conn
+
+
+class _FakeRow:
+    def __init__(self, mapping):
+        self._mapping = mapping
+
+
+class _FakeResult:
+    def __init__(self, fetchone_result=None, fetchall_result=None) -> None:
+        self._fetchone_result = fetchone_result
+        self._fetchall_result = fetchall_result or []
+
+    def fetchone(self):
+        return self._fetchone_result
+
+    def fetchall(self):
+        return self._fetchall_result
 
 
 def _build_store(conn: _FakeConn) -> MysqlGraphStore:
@@ -114,3 +138,33 @@ def test_clear_task_removes_task_scoped_findings():
     assert any("DELETE FROM dvs_vuln_findings WHERE task_id=:tid" in sql for sql in sql_calls)
     assert any("DELETE FROM dvs_task_graph_runs WHERE task_id=:tid" in sql for sql in sql_calls)
     assert conn.commits == 1
+
+
+def test_export_task_graph_view_exposes_sqlite_compatible_summary_keys():
+    conn = _FakeConn()
+    conn.fetchone_results = [_FakeRow({"task_id": "task-a", "epoch": "0001", "run_root": "/tmp/run", "generated_at": 1.0})]
+    conn.fetchall_results = [
+        [],
+        [_FakeRow({"node_id": "node-1", "task_id": "task-a", "depth": 0, "status": "done", "analysis_status": "done", "findings_count": 0, "function_name_resolved": "Root", "function_name_raw": "Root", "source_file": "", "primary_session_relpath": ""})],
+        [],
+        [],
+        [_FakeRow({"finding_id": "finding-1", "task_id": "task-a", "run_id": "run-a", "created_at": "2026-07-23T00:00:00", "severity": "high"})],
+    ]
+    store = _build_store(conn)
+
+    view = store.export_task_graph_view("task-a")
+
+    assert view["summary"]["nodes_total"] == 1
+    assert view["summary"]["edges_total"] == 0
+    assert view["summary"]["findings_total"] == 1
+    assert view["summary"]["findings"] == 1
+
+
+def test_get_task_finding_stats_uses_task_scoped_mysql_rows():
+    conn = _FakeConn()
+    conn.fetchone_results = [_FakeRow({"total": 4, "reported": 1})]
+    store = _build_store(conn)
+
+    stats = store.get_task_finding_stats("task-a")
+
+    assert stats == {"total": 4, "reported": 1, "unreported": 3}

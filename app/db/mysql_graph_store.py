@@ -356,6 +356,9 @@ class MysqlGraphStore:
             "sessions": sessions,
             "findings": findings,
             "summary": {
+                "nodes_total": len(nodes),
+                "edges_total": len(edges),
+                "findings_total": len(findings),
                 "nodes": len(nodes),
                 "edges": len(edges),
                 "sessions": len(sessions),
@@ -380,6 +383,26 @@ class MysqlGraphStore:
                 "SELECT * FROM dvs_vuln_findings ORDER BY created_at")
             ).fetchall()
             return [dict(r._mapping) for r in rows]
+
+    def get_task_finding_stats(self, task_id: str) -> dict[str, int]:
+        with self._engine.connect() as conn:
+            row = conn.execute(
+                sa_text(
+                    "SELECT "
+                    "COUNT(*) AS total, "
+                    "SUM(CASE WHEN report_status='reported' THEN 1 ELSE 0 END) AS reported "
+                    "FROM dvs_vuln_findings "
+                    "WHERE task_id=:tid"
+                ),
+                {"tid": task_id},
+            ).fetchone()
+        total = int((row._mapping.get("total") if row else 0) or 0)
+        reported = int((row._mapping.get("reported") if row else 0) or 0)
+        return {
+            "total": total,
+            "reported": reported,
+            "unreported": max(0, total - reported),
+        }
 
     # ── 双写方法 (worker 调, 与 VulnStore 同名同签名) ──────────────
 

@@ -195,9 +195,15 @@ def _record_intake_result(*, graph_store, run_id, finding_id, rec, res, on_event
 
 def _sync_vuln_count_mysql(graph_store: VulnScanStore, run_id: str, task_id: str):
     try:
-        with graph_store.connect() as _conn:
-            _tot = _conn.execute("SELECT count(*) FROM vulnerability_findings WHERE run_id=?", (run_id,)).fetchone()[0]
-            _rep = _conn.execute("SELECT count(*) FROM vulnerability_findings WHERE run_id=? AND report_status='reported'", (run_id,)).fetchone()[0]
+        mysql_store = getattr(graph_store, "_mysql", None)
+        if mysql_store is not None and hasattr(mysql_store, "get_task_finding_stats"):
+            _stats = mysql_store.get_task_finding_stats(task_id)
+            _tot = int(_stats.get("total") or 0)
+            _rep = int(_stats.get("reported") or 0)
+        else:
+            with graph_store.connect() as _conn:
+                _tot = _conn.execute("SELECT count(*) FROM vulnerability_findings WHERE run_id=?", (run_id,)).fetchone()[0]
+                _rep = _conn.execute("SELECT count(*) FROM vulnerability_findings WHERE run_id=? AND report_status='reported'", (run_id,)).fetchone()[0]
         from app.db import get_db
         from app.db.models import AppDvsTask
         _db = next(get_db())

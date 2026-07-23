@@ -1058,12 +1058,18 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
         # vuln_total_count 默认 -1, 之前只在任务完成 _record_terminal_event 时同步)
         if self._graph_store_ready():
             try:
-                with self.graph_store.connect() as _conn:
-                    _tot = _conn.execute(
-                        "SELECT count(*) FROM vulnerability_findings WHERE run_id=?", (self.run_id,)).fetchone()[0]
-                    _rep = _conn.execute(
-                        "SELECT count(*) FROM vulnerability_findings WHERE run_id=? AND report_status='reported'",
-                        (self.run_id,)).fetchone()[0]
+                mysql_store = getattr(self.graph_store, "_mysql", None)
+                if mysql_store is not None and hasattr(mysql_store, "get_task_finding_stats"):
+                    _stats = mysql_store.get_task_finding_stats(self.task_id)
+                    _tot = int(_stats.get("total") or 0)
+                    _rep = int(_stats.get("reported") or 0)
+                else:
+                    with self.graph_store.connect() as _conn:
+                        _tot = _conn.execute(
+                            "SELECT count(*) FROM vulnerability_findings WHERE run_id=?", (self.run_id,)).fetchone()[0]
+                        _rep = _conn.execute(
+                            "SELECT count(*) FROM vulnerability_findings WHERE run_id=? AND report_status='reported'",
+                            (self.run_id,)).fetchone()[0]
                 from app.db import get_db
                 from app.db.models import AppDvsTask
                 _db = next(get_db())
