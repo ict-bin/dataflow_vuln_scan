@@ -26,6 +26,7 @@ import time
 from dataclasses import dataclass
 
 import pymysql
+from pymysql.err import ProgrammingError
 
 MYSQL_HOST = os.environ.get("DVS_MYSQL_HOST", "secflow-app-dataflow-vuln-scan-mysql")
 MYSQL_USER = os.environ.get("DVS_MYSQL_USER", "root")
@@ -176,7 +177,12 @@ def sqlite_paths_for_task(task_dir: str) -> list[str]:
 
 
 def count_mysql_findings(cur, task_id: str) -> int:
-    cur.execute("SELECT count(*) FROM dvs_vuln_findings WHERE task_id=%s", (task_id,))
+    try:
+        cur.execute("SELECT count(*) FROM dvs_vuln_findings WHERE task_id=%s", (task_id,))
+    except ProgrammingError as exc:
+        if exc.args and int(exc.args[0]) == 1146:
+            return -1
+        raise
     row = cur.fetchone()
     return int(row[0] or 0) if row else 0
 
@@ -224,6 +230,8 @@ def backfill_task(cur, task_dir: str, *, dry_run: bool = False) -> TaskBackfillS
     task_id = str(task_id_from_runs or fallback_task_id)
     stats.sqlite_count = len(sqlite_rows)
     stats.mysql_before_count = count_mysql_findings(cur, task_id)
+    if stats.mysql_before_count < 0:
+        return stats
 
     if not dry_run:
         for run_row in analysis_runs:
@@ -318,8 +326,18 @@ def main() -> int:
                     conn.rollback()
                 else:
                     conn.commit()
-                cur.execute("SELECT count(*) FROM dvs_vuln_findings")
-                db_total = int(cur.fetchone()[0] or 0)
+                try:
+                    cur.execute("SELECT count(*) FROM dvs_vuln_findings")
+                    db_total = int(cur.fetchone()[0] or 0)
+                except ProgrammingError as exc:
+                    if exc.args and int(exc.args[0]) == 1146:
+                        print(f"  跳过 {database} (缺少 dvs_vuln_findings 表)")
+                        if args.dry_run:
+                            conn.rollback()
+                        else:
+                            conn.commit()
+                        continue
+                    raise
             print(f"  {database}: writes={db_inserted}, tasks={db_tasks}, 库内共 {db_total}")
             total_inserted += db_inserted
             total_tasks += db_tasks
