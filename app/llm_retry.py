@@ -76,6 +76,12 @@ _CONTINUE_PROMPT = (
     "如果你刚才已经输出了 JSON，请重新完整输出该 JSON。"
 )
 
+# ①' 空输出重试提示词 (stop=stop 但无文本, 模型只产生了 thinking 没输出正文)
+_EMPTY_OUTPUT_PROMPT = (
+    "你的上一轮回复没有文本输出。请直接输出 DAG JSON，不要使用思维链。"
+    "按系统提示词要求，输出顶层唯一一个 ```json 块。"
+)
+
 
 def run_agent_with_design_retry(
     prompt: str,
@@ -130,6 +136,7 @@ def run_agent_with_design_retry(
     attempt = 0
     cycle_fails = 0
     compacted = False
+    ever_had_partial = False  # 是否出现过部分输出 (用于判断 compact 是否有意义)
     cur_prompt = prompt
     result = None
     parsed = None
@@ -184,8 +191,9 @@ def run_agent_with_design_retry(
                 pass
 
         # ④ 本轮 compact 周期重试预算用尽 → compact 一次再开新一轮
+        # (仅当出现过部分输出才 compact; 全空输出不是 context overflow, compact 无用)
         if cycle_fails >= retry_max:
-            if compact_then_retry and not compacted:
+            if compact_then_retry and not compacted and ever_had_partial:
                 _emit("llm_compact_retry", label=label,
                       reason=f"{retry_max} retries failed, compact then retry once")
                 compact_session(session_file, model=model, tools=tools,
@@ -202,9 +210,23 @@ def run_agent_with_design_retry(
 
         # ① 截断输出不全 (length 或 error 带部分输出) → 继续工作
         has_partial = bool(all_texts)
+        if has_partial:
+            ever_had_partial = True
         if stop_reason == "length" or (stop_reason == "error" and has_partial):
             _emit("llm_length_continue", label=label, stop_reason=stop_reason, attempt=attempt)
             cur_prompt = _CONTINUE_PROMPT
+            continue
+
+        # ①' 空输出 (stop=stop 但无文本, 模型只产生了 thinking 没输出正文)
+        # → 不走 compact (不是 context overflow), 用专门提示词重试
+        if not has_partial and stop_reason == "stop":
+            _emit("llm_empty_output_retry", label=label, stop_reason=stop_reason, attempt=attempt)
+            try:
+                if session_file:
+                    Path(session_file).unlink(missing_ok=True)
+            except OSError:
+                pass
+            cur_prompt = _EMPTY_OUTPUT_PROMPT
             continue
 
         # ② 超时/无输出 → 回退到上一个 user, 重发原始 prompt
