@@ -1517,9 +1517,18 @@ def get_task_vuln_finding_report(task_id: str, finding_id: str, db: Session = De
     if not finding:
         raise HTTPException(status_code=404, detail=f"finding {finding_id} not found")
     output_dir = str(finding.get("output_dir") or "")
+    fid = finding_id
+    # 1) 运行中/最新: output_dir (run/epochs/.../vulnerabilities/<fid>)
     report_path = Path(output_dir) / "vulnerability-report.md" if output_dir else None
+    # 2) 归档副本: <task_root>/output/vulnerabilities/<fid>/vulnerability-report.md
+    #    (任务完成后 _archive 复制到 output/; 重启清空 run/epochs 后归档仍在)
     if not report_path or not report_path.exists():
-        raise HTTPException(status_code=404, detail="vulnerability-report.md not found")
+        archived = root / "output" / "vulnerabilities" / fid / "vulnerability-report.md"
+        if archived.exists():
+            report_path = archived
+    if not report_path or not report_path.exists():
+        raise HTTPException(status_code=404,
+                            detail="vulnerability-report.md not found (neither run/epochs nor output/ archive)")
     return {"task_id": task_id, "finding_id": finding_id,
             "content": report_path.read_text(encoding="utf-8", errors="replace")}
 
