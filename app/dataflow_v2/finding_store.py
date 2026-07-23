@@ -106,6 +106,14 @@ def persist_finding(
     except Exception as _fe:
         logger.warning("persist_finding FK+insert failed: %s", _fe, exc_info=True)
 
+    # MySQL 双写 finding 行: graph-view 优先读 MySQL dvs_vuln_findings, 缺此则前端漏洞图谱 0 findings
+    _mysql = getattr(graph_store, "_mysql", None)
+    if _mysql is not None:
+        try:
+            _mysql.insert_finding(**data)
+        except Exception as _me:
+            logger.debug("persist_finding mysql insert_finding failed: %s", _me, exc_info=True)
+
     # intake 上报 (退避: 父任务 → 自身; 失败不影响)
     _intake_report(run_id, task_id, source_root, fdir, rec, finding_id,
                    cfg_project_id, cfg_task_name, cfg_parent_task_name,
