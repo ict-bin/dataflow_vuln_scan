@@ -108,7 +108,7 @@ CREATE TABLE IF NOT EXISTS dvs_task_graph_sessions (
 );
 CREATE INDEX ix_dvs_tgs_task ON dvs_task_graph_sessions(task_id);
 CREATE TABLE IF NOT EXISTS dvs_vuln_findings (
-    finding_id VARCHAR(128) PRIMARY KEY,
+    finding_id VARCHAR(128) NOT NULL,
     run_id VARCHAR(64) NOT NULL,
     task_id VARCHAR(64) NOT NULL DEFAULT '',
     node_id VARCHAR(256) NOT NULL DEFAULT '',
@@ -131,6 +131,7 @@ CREATE TABLE IF NOT EXISTS dvs_vuln_findings (
     fix_suggestion TEXT,
     created_at VARCHAR(40) NOT NULL DEFAULT ''
 );
+CREATE UNIQUE INDEX ux_dvs_vf_task_finding ON dvs_vuln_findings(task_id, finding_id);
 CREATE INDEX ix_dvs_vf_run ON dvs_vuln_findings(run_id);
 CREATE INDEX ix_dvs_vf_task ON dvs_vuln_findings(task_id);
 CREATE TABLE IF NOT EXISTS dvs_analysis_runs (
@@ -146,6 +147,19 @@ CREATE TABLE IF NOT EXISTS dvs_analysis_runs (
 );
 CREATE INDEX ix_dvs_ar_task ON dvs_analysis_runs(task_id);
 """
+
+_POST_DDL_MIGRATIONS = (
+    """
+    ALTER TABLE dvs_vuln_findings
+        DROP PRIMARY KEY,
+        ADD PRIMARY KEY (task_id, finding_id)
+    """,
+    """
+    ALTER TABLE dvs_vuln_findings
+        MODIFY finding_id VARCHAR(128) NOT NULL
+    """,
+    "CREATE INDEX ix_dvs_vf_finding ON dvs_vuln_findings(finding_id)",
+)
 
 
 def _get_engine(mysql_url: str) -> Engine:
@@ -164,6 +178,11 @@ def _get_engine(mysql_url: str) -> Engine:
                         conn.execute(sa_text(s))
                     except Exception as e:
                         logger.debug("DDL skip: %s", e)
+            for stmt in _POST_DDL_MIGRATIONS:
+                try:
+                    conn.execute(sa_text(stmt))
+                except Exception as e:
+                    logger.debug("DDL post-migration skip: %s", e)
             conn.commit()
         _ENGINE = eng
         return eng
@@ -516,14 +535,31 @@ class MysqlGraphStore:
                 {"tid": task_id})
             conn.commit()
 
-    def update_finding_report_status(self, finding_id: str,
-                                      status: str,
-                                      case_id: str = "") -> None:
+    def update_finding_report_status(
+        self,
+        finding_id: str,
+        status: str,
+        case_id: str = "",
+        *,
+        task_id: str = "",
+    ) -> None:
         with self._engine.connect() as conn:
-            conn.execute(sa_text(
-                "UPDATE dvs_vuln_findings SET report_status=:st,"
-                "report_case_id=:cid WHERE finding_id=:fid"),
-                {"st": status, "cid": case_id, "fid": finding_id})
+            if str(task_id or "").strip():
+                conn.execute(
+                    sa_text(
+                        "UPDATE dvs_vuln_findings SET report_status=:st,"
+                        "report_case_id=:cid WHERE task_id=:tid AND finding_id=:fid"
+                    ),
+                    {"st": status, "cid": case_id, "tid": task_id, "fid": finding_id},
+                )
+            else:
+                conn.execute(
+                    sa_text(
+                        "UPDATE dvs_vuln_findings SET report_status=:st,"
+                        "report_case_id=:cid WHERE finding_id=:fid"
+                    ),
+                    {"st": status, "cid": case_id, "fid": finding_id},
+                )
             conn.commit()
 
     def insert_finding(self, **kw) -> None:
@@ -533,8 +569,12 @@ class MysqlGraphStore:
         cols = list(kw.keys())
         col_list = ",".join(cols)
         ph = ",".join(f":{c}" for c in cols)
-        sql = (f"INSERT IGNORE INTO dvs_vuln_findings "
-               f"({col_list}) VALUES ({ph})")
+        update_cols = [col for col in cols if col not in {"task_id", "finding_id"}]
+        update_sql = ",".join(f"{col}=VALUES({col})" for col in update_cols)
+        sql = (
+            f"INSERT INTO dvs_vuln_findings ({col_list}) VALUES ({ph}) "
+            f"ON DUPLICATE KEY UPDATE {update_sql}"
+        )
         with self._engine.connect() as conn:
             conn.execute(sa_text(sql), kw)
             conn.commit()

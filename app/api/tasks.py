@@ -1616,6 +1616,7 @@ def _do_report_finding(task_id: str, finding_id: str, db: Session):
                 finding_id,
                 status="reported",
                 case_id=str(result.get("case_id") or ""),
+                task_id=task_id,
             )
         from app.service.task_service import _sync_task_vuln_stats
         _sync_task_vuln_stats(row)

@@ -718,7 +718,14 @@ class VulnScanStore:
                 [[row[c] for c in cols] for row in rows],
             )
 
-    def update_finding_report_status(self, finding_id: str, *, status: str = "reported", case_id: str = "") -> None:
+    def update_finding_report_status(
+        self,
+        finding_id: str,
+        *,
+        status: str = "reported",
+        case_id: str = "",
+        task_id: str = "",
+    ) -> None:
         if not finding_id:
             return
         with self.connect() as conn:
@@ -727,7 +734,7 @@ class VulnScanStore:
                 (status, case_id, finding_id),
             )
         if self._mysql:
-            try: self._mysql.update_finding_report_status(finding_id, status, case_id)
+            try: self._mysql.update_finding_report_status(finding_id, status, case_id, task_id=task_id)
             except Exception: pass
 
     def add_finding(self, rec: VulnFindingRecord) -> None:

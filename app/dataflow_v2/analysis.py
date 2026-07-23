@@ -1157,7 +1157,11 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
         if self._graph_store_ready():
             try:
                 self.graph_store.update_finding_report_status(
-                    finding_id, status=status, case_id=case_id)
+                    finding_id,
+                    status=status,
+                    case_id=case_id,
+                    task_id=str(self.task_id or ""),
+                )
             except Exception:
                 logger.debug("v2 update_finding_report_status failed for %s", finding_id, exc_info=True)
         if status == "reported":

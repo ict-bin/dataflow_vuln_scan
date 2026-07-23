@@ -177,11 +177,12 @@ def _is_task_id_rejection(res: dict) -> bool:
 def _record_intake_result(*, graph_store, run_id, finding_id, rec, res, on_event):
     status = str(res.get("status") or "")
     case_id = str(res.get("case_id") or res.get("report_id") or "")
+    task_id = str(run_id or "")
     # 回写 report_status 到 vuln-scan.sqlite (findings 表)
     if graph_store is not None:
         try:
             graph_store.update_finding_report_status(
-                finding_id, status=status, case_id=case_id)
+                finding_id, status=status, case_id=case_id, task_id=task_id)
         except Exception:
             logger.debug("finding_store update_finding_report_status failed for %s", finding_id, exc_info=True)
     try:
