@@ -58,7 +58,7 @@ from .runner_helpers import (
 
 logger = logging.getLogger("dvs.runner")
 
-_MAX_BACKOFF = 300
+_MAX_BACKOFF = 3
 _QUERY_ENGINE_401_MAX_RETRIES = 3
 _DEFAULT_CONTEXT_WINDOW = 128_000
 _SINGLE_INPUT_CONTEXT_RATIO = 0.75
@@ -74,7 +74,7 @@ _FATAL_PATTERNS: list[list[str]] = [
 # 设计③: 致命/不可重试错误重试上限, 达到后直接报错退出 (不再 [N/inf] 无限重试)
 _FATAL_RETRY_MAX = 3
 _RATE_LIMIT_PATTERNS = ["rate limit", "too many requests", "429"]
-_RATE_LIMIT_EXTRA_DELAY = 30.0
+_RATE_LIMIT_EXTRA_DELAY = 3.0
 
 
 def _should_emit_rate_limit_event(streak: int) -> bool:
@@ -514,10 +514,10 @@ def _run_with_pi_retry(
                     _log_error(f"{_kind.lower()} error exhausted after {fatal_retry_count} attempts, giving up: {reason[:200]}")
                     return result
                 _mark_infinite_retry(result, kind="fatal", count=fatal_retry_count, reason=reason)
-                _log_warn(f"pi infrastructure error [{fatal_retry_count}/{_FATAL_RETRY_MAX}], retry in 30s: {reason[:200]}")
+                _log_warn(f"pi infrastructure error [{fatal_retry_count}/{_FATAL_RETRY_MAX}], retry in 3s: {reason[:200]}")
                 if on_stream:
-                    on_stream("\n⚠️ PI infrastructure error, retry in 30s...\n")
-                if _sleep_with_cancel(30.0, cancel_event):
+                    on_stream("\n⚠️ PI infrastructure error, retry in 3s...\n")
+                if _sleep_with_cancel(3.0, cancel_event):
                     return result
                 continue
 
@@ -547,10 +547,10 @@ def _run_with_pi_retry(
                     r.error = str(exc)
                     r.exit_code = -1
                     _mark_infinite_retry(r, kind="fatal", count=fatal_retry_count, reason=str(exc))
-                    _log_warn(f"pi infrastructure error [{fatal_retry_count}/inf], retry in 30s: {exc}")
+                    _log_warn(f"pi infrastructure error [{fatal_retry_count}/{_FATAL_RETRY_MAX}], retry in 3s: {exc}")
                     if on_stream:
-                        on_stream("\n⚠️ PI infrastructure error, retry in 30s...\n")
-                    if _sleep_with_cancel(30.0, cancel_event):
+                        on_stream("\n⚠️ PI infrastructure error, retry in 3s...\n")
+                    if _sleep_with_cancel(3.0, cancel_event):
                         return r
                     fatal_handled = True
                     break

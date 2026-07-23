@@ -404,7 +404,7 @@ def _run_db_write_with_retries(label: str, operation, *, attempts: int | None = 
             )
             if not retryable or attempt >= max_attempts:
                 raise
-            _time.sleep(DB_RETRY_BASE_DELAY_SECONDS * attempt)
+            _time.sleep(3.0)  # 固定 3s 重试 (DB 可重试错误, 不指数退避)
         finally:
             try:
                 next(gen)
@@ -1140,7 +1140,7 @@ class TaskService:
                         return
             except Exception as exc:
                 logger.warning("failure-debug dispatch attempt %d for %s failed: %s", attempt, task_id, exc)
-            _time.sleep(5)
+            _time.sleep(3)  # 固定 3s 重试
         logger.error("failure-debug dispatch exhausted for task %s (debugger unreachable)", task_id)
 
     def list_task_sessions(self, db: Session, task_id: str) -> list[dict[str, object]]:

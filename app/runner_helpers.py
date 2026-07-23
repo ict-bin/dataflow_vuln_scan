@@ -24,7 +24,7 @@ logger = logging.getLogger("dvs.runner")
 
 # ─── Configuration constants ──────────────────────────────────────────────────
 
-_MAX_BACKOFF = 300  # 退避上限 5 分钟
+_MAX_BACKOFF = 3  # 固定 3s 重试间隔 (API 抢占式调度保调度权)
 _QUERY_ENGINE_401_MAX_RETRIES = 3
 _DEFAULT_CONTEXT_WINDOW = 128_000
 _SINGLE_INPUT_CONTEXT_RATIO = 0.75
@@ -118,7 +118,9 @@ def _log_info(msg: str, *args: Any) -> None:
 # ─── Backoff / retry helpers ──────────────────────────────────────────────────
 
 def _backoff(base_delay: float, attempt: int) -> float:
-    return min(_MAX_BACKOFF, base_delay * (2 ** max(0, attempt - 1)))
+    # 固定 3s 重试间隔 (不再指数退避): 其他区域 API 抢占式调度下, 长退避会让 worker
+    # 长时间不请求 API 从而丢失调度权; 3s 快速重试以保住调度槽。
+    return 3.0
 
 
 def _fmt_max(n: int) -> str:
