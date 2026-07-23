@@ -125,7 +125,6 @@ class Dispatcher:
                 .filter(
                     AppDvsTask.status == "pending",
                     AppDvsTask.is_deleted.is_(False),
-                    AppDvsTask.celery_task_id.is_(None),
                 )
                 .order_by(AppDvsTask.created_at.asc())
                 .limit(PUMP_BATCH)
@@ -165,19 +164,8 @@ class Dispatcher:
         from app.time_utils import now_local
         from app.celery_app import app as celery_app
         # 1. 取所有活 worker 已知的 celery_id
-        active_ids: set[str] = set()
-        reserved_ids: set[str] = set()
-        scheduled_ids: set[str] = set()
-        try:
-            inspect = celery_app.control.inspect(timeout=INSPECT_TIMEOUT)
-            active_ids = _collect_known_celery_ids(inspect.active() or {})
-            reserved_ids = _collect_known_celery_ids(inspect.reserved() or {})
-            scheduled_ids = _collect_known_celery_ids(inspect.scheduled() or {})
-        except Exception as exc:
-            logger.warning("inspect.active failed: %s (skip this round)", exc)
-            return 0
-        known_ids = active_ids | reserved_ids | scheduled_ids
-        # 2. DB running 任务: celery_id 不在 active 且 心跳超时 → 孤儿/卡死
+        # DB lease 为死亡判定真相源 (不查 celery inspect, 避免 inspect 超时/worker 不可达误判):
+        # running + 心跳超时(lease 过期) = worker 死了 → revoke 兜底 + 回 pending (pump 重发)
         db_gen = get_db()
         db = next(db_gen)
         reset = 0
@@ -189,15 +177,13 @@ class Dispatcher:
             ).all()
             for row in rows:
                 cid = row.celery_task_id
-                in_active = cid is not None and cid in active_ids
                 heartbeat_stale = (
                     row.execution_heartbeat_at is None
                     or (now - row.execution_heartbeat_at).total_seconds() > STALE_HEARTBEAT_SECONDS
                 )
                 if not heartbeat_stale:
-                    continue  # 心跳新鲜时以 DB lease/heartbeat 为准，不因 inspect 短暂漏报误杀
-                # 心跳陈旧时，无论 inspect 是否命中都视为孤儿/卡死 → 重置
-                # 先 revoke 兜底杀残留进程 (best-effort)
+                    continue  # 心跳新鲜 = worker 活着, 不动
+                # 心跳陈旧 = worker 死了 (rollout/SIGKILL/崩溃) → revoke 兜底 + 回 pending
                 if cid:
                     try:
                         celery_app.control.revoke(cid, terminate=True, signal="SIGKILL")
@@ -209,37 +195,9 @@ class Dispatcher:
                 row.execution_lease_until = None
                 row.dispatch_status = None
                 reset += 1
-                logger.warning("stale reset task=%s celery_id=%s in_active=%s hb_stale=%s",
-                               row.task_id, cid, in_active, heartbeat_stale)
-            pending_rows = db.query(AppDvsTask).filter(
-                AppDvsTask.status == "pending",
-                AppDvsTask.is_deleted.is_(False),
-                AppDvsTask.celery_task_id.is_not(None),
-            ).all()
-            for row in pending_rows:
-                cid = str(row.celery_task_id or "").strip()
-                if not cid or cid in known_ids:
-                    continue
-                last_seen_at = row.updated_at or row.execution_heartbeat_at or row.created_at
-                if last_seen_at is None:
-                    continue
-                pending_age_seconds = (now - last_seen_at).total_seconds()
-                if pending_age_seconds <= PENDING_CELERY_STALE_SECONDS:
-                    continue
-                row.celery_task_id = None
-                row.execution_owner_id = None
-                row.execution_lease_until = None
-                row.dispatch_status = None
-                reset += 1
-                logger.warning(
-                    "pending stale celery reset task=%s celery_id=%s age=%.1fs active=%s reserved=%s scheduled=%s",
-                    row.task_id,
-                    cid,
-                    pending_age_seconds,
-                    cid in active_ids,
-                    cid in reserved_ids,
-                    cid in scheduled_ids,
-                )
+                logger.warning("stale reset task=%s celery_id=%s hb_stale=%s (lease expired, worker dead)",
+                               row.task_id, cid, heartbeat_stale)
+            # pending 任务: pump 每 3s 重发 (无 celery_id 门), 不需要 stale 恢复
             if reset:
                 db.commit()
         finally:
