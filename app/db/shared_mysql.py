@@ -191,7 +191,7 @@ CREATE TABLE IF NOT EXISTS dag_nodes (
 CREATE TABLE IF NOT EXISTS dag_edges (
     source_dir_id      VARCHAR(64) NOT NULL,
     func_id            VARCHAR(128) NOT NULL,
-    taint_signature    VARCHAR(512) NOT NULL,
+    taint_signature    VARCHAR(256) NOT NULL,
     edge_id            VARCHAR(128) NOT NULL,
     from_node          INTEGER NOT NULL,
     to_node            INTEGER NOT NULL,
@@ -347,12 +347,14 @@ class SharedMysqlStore(MysqlReadMixin):
     def clear_task_analysis(self):
         """清本任务在本源码目录的所有分析记录 (不清函数索引)。"""
         tables = _V2_TASK_TABLES if self.mode in ("complete", "autonomous") else _DAG_TASK_TABLES
-        with self._engine.connect() as conn:
-            for t in tables:
-                conn.execute(sa_text(
-                    f"DELETE FROM {t} WHERE source_dir_id=:sid AND task_id=:tid"),
-                    {"sid": self.source_dir_id, "tid": self.task_id})
-            conn.commit()
+        for t in tables:
+            try:
+                with self._engine.begin() as conn:
+                    conn.execute(sa_text(
+                        f"DELETE FROM {t} WHERE source_dir_id=:sid AND task_id=:tid"),
+                        {"sid": self.source_dir_id, "tid": self.task_id})
+            except Exception as e:
+                logger.warning("[shared_mysql] clear %s failed: %s", t, str(e)[:120])
         logger.info("[shared_mysql] cleared task %s analysis records (mode=%s, source_dir=%s, tables=%s)",
                     self.task_id, self.mode, self.source_dir_id, tables)
 
