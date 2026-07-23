@@ -102,3 +102,15 @@ def test_update_finding_report_status_keeps_legacy_fallback_without_task():
         "fid": "finding-1",
     }
     assert conn.commits == 1
+
+
+def test_clear_task_removes_task_scoped_findings():
+    conn = _FakeConn()
+    store = _build_store(conn)
+
+    store.clear_task("task-a")
+
+    sql_calls = [sql for sql, _ in conn.calls]
+    assert any("DELETE FROM dvs_vuln_findings WHERE task_id=:tid" in sql for sql in sql_calls)
+    assert any("DELETE FROM dvs_task_graph_runs WHERE task_id=:tid" in sql for sql in sql_calls)
+    assert conn.commits == 1

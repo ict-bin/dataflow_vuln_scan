@@ -525,8 +525,12 @@ class MysqlGraphStore:
     def clear_task(self, task_id: str) -> None:
         """清本任务图谱数据 (restart 用)。"""
         with self._engine.connect() as conn:
-            for t in ("dvs_task_graph_nodes", "dvs_task_graph_edges",
-                      "dvs_task_graph_sessions"):
+            for t in (
+                "dvs_task_graph_nodes",
+                "dvs_task_graph_edges",
+                "dvs_task_graph_sessions",
+                "dvs_vuln_findings",
+            ):
                 conn.execute(sa_text(
                     f"DELETE FROM {t} WHERE task_id=:tid"),
                     {"tid": task_id})
