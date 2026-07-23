@@ -404,7 +404,7 @@ def _run_db_write_with_retries(label: str, operation, *, attempts: int | None = 
             )
             if not retryable or attempt >= max_attempts:
                 raise
-            _time.sleep(3.0)  # 固定 3s 重试 (DB 可重试错误, 不指数退避)
+            _time.sleep(min(3.0, DB_RETRY_BASE_DELAY_SECONDS * attempt))  # 梯度退避 (1,2,3,3,3) 上限 3s
         finally:
             try:
                 next(gen)
