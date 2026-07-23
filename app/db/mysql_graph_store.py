@@ -530,6 +530,7 @@ class MysqlGraphStore:
                 "dvs_task_graph_edges",
                 "dvs_task_graph_sessions",
                 "dvs_vuln_findings",
+                "dvs_analysis_runs",
             ):
                 conn.execute(sa_text(
                     f"DELETE FROM {t} WHERE task_id=:tid"),

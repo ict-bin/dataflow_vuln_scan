@@ -1851,6 +1851,26 @@ class TaskService:
                 "status_before_delete": row.status,
             },
         )
+        # MySQL: 清除本任务所有分析数据 (findings/graph/taints/propagations)
+        try:
+            from app.db.shared_mysql import create_shared_store
+            from app.db.mysql_graph_store import create_mysql_graph_store
+            import hashlib as _hl
+            source_root = _task_source_root(row) or ""
+            if source_root:
+                _sid = _hl.sha1(source_root.encode("utf-8")).hexdigest()[:16]
+                _url = "mysql+pymysql://root:Huawei12%23$@secflow-app-dataflow-vuln-scan-mysql.secflow-ns.svc.cluster.local:3306"
+                for mode in ("complete", "autonomous", "dagflow"):
+                    ms = create_shared_store(_url, mode, source_root, task_id,
+                                             project_id=str(row.project_id or ""))
+                    if ms:
+                        ms.clear_task_analysis()
+                mgs = create_mysql_graph_store(_url, project_id=str(row.project_id or ""),
+                                                source_dir_id=_sid, source_root=source_root)
+                if mgs:
+                    mgs.clear_task(task_id)
+        except Exception as e:
+            logger.warning("delete_task MySQL cleanup failed: %s", e)
         row.is_deleted = True
         # 硬删除: 清除 MySQL 内的大字段 (避免累积导致 sort memory 不足)
         # 保留行记录用于审计, 但清空 JSON 大字段
