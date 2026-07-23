@@ -167,4 +167,8 @@ def test_get_task_finding_stats_uses_task_scoped_mysql_rows():
 
     stats = store.get_task_finding_stats("task-a")
 
+    sql, params = conn.calls[0]
+    assert "JOIN dvs_analysis_runs ar ON ar.run_id = vf.run_id" in sql
+    assert "WHERE ar.task_id=:tid" in sql
+    assert params == {"tid": "task-a"}
     assert stats == {"total": 4, "reported": 1, "unreported": 3}

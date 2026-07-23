@@ -391,8 +391,9 @@ class MysqlGraphStore:
                     "SELECT "
                     "COUNT(*) AS total, "
                     "SUM(CASE WHEN report_status='reported' THEN 1 ELSE 0 END) AS reported "
-                    "FROM dvs_vuln_findings "
-                    "WHERE task_id=:tid"
+                    "FROM dvs_vuln_findings vf "
+                    "JOIN dvs_analysis_runs ar ON ar.run_id = vf.run_id "
+                    "WHERE ar.task_id=:tid"
                 ),
                 {"tid": task_id},
             ).fetchone()
