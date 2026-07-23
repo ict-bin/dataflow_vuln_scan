@@ -247,16 +247,29 @@ class TaintDAG:
             description=str(d.get("description", "")),
             taint_failed=bool(d.get("taint_failed", False)),
         )
-        # 兼容顶层 edges 数组格式 (golden 文件)
+        # 顶层 edges 数组 (扁平格式, LLM 自然输出): 每条有 from+to, 分发到 from 节点的 children
         top_edges = d.get("edges")
         if top_edges:
+            import logging as _log
+            _l = _log.getLogger("dvs.dagflow.models")
             by_id = {n.id: n for n in dag.nodes}
             for er in top_edges:
                 e = TaintEdge.from_dict(er)
                 fr = er.get("from", er.get("from_node"))
-                fn = by_id.get(int(fr) if fr is not None else -1)
+                if fr is None:
+                    _l.warning("top-level edge missing 'from', skipped: to=%s kind=%s", er.get("to"), er.get("kind"))
+                    continue
+                try:
+                    fr = int(fr)
+                except (ValueError, TypeError):
+                    _l.warning("top-level edge 'from' not int: %r, skipped", fr)
+                    continue
+                fn = by_id.get(fr)
                 if fn is not None:
                     fn.children.append(e)
+                else:
+                    _l.warning("top-level edge 'from'=%d out of range (nodes=%d), skipped", fr, len(dag.nodes))
+            _l.info("top-level edges: %d parsed, distributed to nodes", len(top_edges))
         return dag
 
 

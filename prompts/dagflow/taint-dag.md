@@ -23,7 +23,7 @@
 入口污点签名 X（已给）。**先在本函数定位 X 的真实入口**：
 - X 是本函数参数？→ 根节点 `line`=该参数声明行，`source`=null。
 - X 是本函数内自生（返回值源 / 被动输入）？→ 节点 `source`=该调用名，`line`=该调用行。
-- **X 不是本函数参数、也不是函数内外部输入源？→ `taint_failed=true`，description 说明"X 非有效污点源"，nodes 只放根节点无 edges。**
+- **X 不是本函数参数、也不是函数内外部输入源？→ `taint_failed=true`，description 说明"X 非有效污点源"，nodes 只放根节点，edges 为空数组。**
 
 ## source 识别（必须检查，漏报导致 tracker 不跑）
 
@@ -47,44 +47,44 @@
 
 ## 必须输出 JSON（顶层唯一一个 ```json 块，最后输出）
 
+**nodes 和 edges 是两个独立的顶层数组**。先列所有节点，再列所有边。每条边必须有 `from` 和 `to`（节点数组下标，0-based）。
+
 ```json
 {
   "description": "本函数功能（一句话）",
   "self_contained": false,
   "taint_failed": false,
   "nodes": [
-    {
-      "taint": "events",
-      "line": 765,
-      "source": "epoll_wait",
-      "check_lines": [786, [746, 748]],
-      "edges": [
-        {"to": 1, "kind": "inside", "taints": ["event"], "line": 776},
-        {"to": 2, "kind": "callee", "callee": "_dns_server_process",
-         "taints": ["event"], "line": 796,
-         "tainted_args": [{"i": 1, "taint": "event"}, {"i": 2, "taint": "now"}],
-         "cond_lines": [786]
-        },
-        {"to": 3, "kind": "extern", "taints": ["conn->last_request_time"],
-         "line": 480, "carrier": "conn->last_request_time",
-         "escape_via": "_dns_server_client_touch"
-        },
-        {"to": -1, "kind": "return", "line": 850}
-      ]
-    }
+    {"taint": "events", "line": 765, "source": "epoll_wait", "check_lines": [786, [746, 748]]},
+    {"taint": "event", "line": 776, "source": null},
+    {"taint": "conn_head", "line": 796, "source": null},
+    {"taint": "conn->last_request_time", "line": 480, "source": null}
+  ],
+  "edges": [
+    {"from": 0, "to": 1, "kind": "inside", "taints": ["event"], "line": 776},
+    {"from": 1, "to": 2, "kind": "callee", "callee": "_dns_server_process",
+     "taints": ["event"], "line": 796,
+     "tainted_args": [{"i": 1, "taint": "event"}, {"i": 2, "taint": "now"}],
+     "cond_lines": [786]
+    },
+    {"from": 1, "to": 3, "kind": "extern", "taints": ["conn->last_request_time"],
+     "line": 480, "carrier": "conn->last_request_time",
+     "escape_via": "_dns_server_client_touch"
+    },
+    {"from": 1, "to": -1, "kind": "return", "line": 850}
   ],
   "prunes": {"0": "low_value_callee"}
 }
 ```
 
-### 节点字段
+### 节点字段（nodes 数组的每一项）
 - `taint`：该节点处的污点签名（归一化变量名）。
 - `line`：该节点对应的代码行号。多行时输出 `[起始行, 结束行]`。
 - `source`：null=非源节点；"epoll_wait"=源调用名（函数内自生污点）。
 - `check_lines`：**对污点本身做约束的校验**行号列表。每个元素是行号(int)或行号范围 `[start, end]`。**纯路径条件不进 check_lines**（选分支的条件上 `cond_lines`）。
-- `edges`：出边列表。
 
-### 边字段
+### 边字段（edges 数组的每一项）
+- `from`：**起始节点数组下标**（0-based）。必填。
 - `to`：目标节点**数组下标**（0-based）。return 边 `to`=-1。
 - `kind`：`inside` | `callee` | `extern` | `container` | `return`。
 - `taints`：沿边传播的污点签名列表。**return 边不需要输出 taints**——脚本会从 return 语句行号读源码自动提取返回表达式。
@@ -111,10 +111,11 @@
 true=本函数自身存在 sink（危险操作即触发点）；false=中转/转发无自身 sink。不确定取 false。
 
 ## 关键约束
+- **edges 是顶层独立数组，不是嵌套在 nodes 里**。每条边必须有 `from` 和 `to`。
 - callee 名必须**限定**（含类/命名空间），便于去重不合并 overload。
 - `tainted_args` 的 `i` 是实参在**调用表达式中的位置**（0=第一个参数），不是 callee 形参位置。脚本会按位置映射到形参名。
 - escape 不清洗污点（同一污点可继续传播到其他 sink）。
 - 多污点参数一条 callee 边（`taints` 多值 + `tainted_args` 多项），不拆边。
 - return 边不输出 `taints`——脚本从行号提取。
-- 本函数无任何污点传播时 `nodes` 只放根节点（无 edges）。
+- 本函数无任何污点传播时 `nodes` 只放根节点，`edges` 为空数组。
 - JSON 代码块之后不要输出额外内容。
