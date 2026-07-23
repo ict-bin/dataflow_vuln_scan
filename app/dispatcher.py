@@ -163,9 +163,10 @@ class Dispatcher:
         from app.db.models import AppDvsTask
         from app.time_utils import now_local
         from app.celery_app import app as celery_app
+        from app.service.task_paths import cleanup_task_data
         # 1. 取所有活 worker 已知的 celery_id
         # DB lease 为死亡判定真相源 (不查 celery inspect, 避免 inspect 超时/worker 不可达误判):
-        # running + 心跳超时(lease 过期) = worker 死了 → revoke 兜底 + 回 pending (pump 重发)
+        # running + 心跳超时(lease 过期) = worker 死了 → revoke 兜底 + 清理 + 回 pending (pump 重发)
         db_gen = get_db()
         db = next(db_gen)
         reset = 0
@@ -183,19 +184,24 @@ class Dispatcher:
                 )
                 if not heartbeat_stale:
                     continue  # 心跳新鲜 = worker 活着, 不动
-                # 心跳陈旧 = worker 死了 (rollout/SIGKILL/崩溃) → revoke 兜底 + 回 pending
+                # 心跳陈旧 = worker 死了 (rollout/SIGKILL/崩溃) → revoke 兜底 + 清理 + 回 pending
                 if cid:
                     try:
                         celery_app.control.revoke(cid, terminate=True, signal="SIGKILL")
                     except Exception:
                         pass
+                # 清理该任务的所有关联数据 (NFS run/+output/, MySQL 任务表, MySQL graph store)
+                try:
+                    cleanup_task_data(row, reason="stale_reset")
+                except Exception as exc:
+                    logger.warning("stale cleanup_task_data failed: task=%s err=%s", row.task_id, exc)
                 row.status = "pending"
                 row.celery_task_id = None
                 row.execution_owner_id = None
                 row.execution_lease_until = None
                 row.dispatch_status = None
                 reset += 1
-                logger.warning("stale reset task=%s celery_id=%s hb_stale=%s (lease expired, worker dead)",
+                logger.warning("stale reset task=%s celery_id=%s hb_stale=%s (lease expired, worker dead, data cleaned)",
                                row.task_id, cid, heartbeat_stale)
             # pending 任务: pump 每 3s 重发 (无 celery_id 门), 不需要 stale 恢复
             if reset:

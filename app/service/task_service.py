@@ -1564,51 +1564,9 @@ class TaskService:
         previous_epoch = int(row.execution_epoch or 0)
         self.request_cancel(task_id, reason="restart_requested")
         restart_cleanup_groups = self._cleanup_worker_runtime(label=f"task_restart:{task_id}", task_id=task_id, reason="restart_requested_before_pending")
-        task_root = _task_root(row)
-        run_dir_removed = False
-        output_dir_removed = False
-        cleanup_errors: list[str] = []
-        if task_root is not None:
-            # 清除该任务的本地临时 workspace（防止跨任务污染）
-            WorkspaceManager.cleanup_temp_for_task(task_id)
-            for child_name in ("run", "output"):
-                child = task_root / child_name
-                if child.exists():
-                    try:
-                        shutil.rmtree(child)
-                        if child_name == "run":
-                            run_dir_removed = True
-                        if child_name == "output":
-                            output_dir_removed = True
-                    except Exception as exc:
-                        cleanup_errors.append(f"{child_name}: {exc}")
-        # MySQL 共享存储: 清除本任务的分析记录 (不清函数索引, 不影响其他任务)
-        try:
-            from app.db.shared_mysql import create_shared_store
-            source_root = _task_source_root(row)
-            if source_root:
-                for mode in ("complete", "autonomous", "dagflow"):
-                    ms = create_shared_store(
-                        "mysql+pymysql://root:Huawei12%23$@secflow-app-dataflow-vuln-scan-mysql.secflow-ns.svc.cluster.local:3306",
-                        mode, source_root, task_id, project_id=str(row.project_id or ""))
-                    if ms:
-                        ms.clear_task_analysis()
-        except Exception as e:
-            logger.warning("mysql shared store cleanup failed: %s", e)
-        # 清 MySQL 图谱表 (task_graph 双写镜像)
-        try:
-            from app.db.mysql_graph_store import create_mysql_graph_store
-            source_root = _task_source_root(row) or ""
-            import hashlib as _hl
-            _sid = _hl.sha1(source_root.encode("utf-8")).hexdigest()[:16] if source_root else ""
-            mgs = create_mysql_graph_store(
-                "mysql+pymysql://root:Huawei12%23$@secflow-app-dataflow-vuln-scan-mysql.secflow-ns.svc.cluster.local:3306",
-                project_id=str(row.project_id or ""),
-                source_dir_id=_sid, source_root=source_root)
-            if mgs:
-                mgs.clear_task(task_id)
-        except Exception as e:
-            logger.warning("mysql graph store cleanup failed: %s", e)
+        # 清理该任务的所有关联数据 (NFS run/+output/, MySQL 任务表, MySQL graph store)
+        from app.service.task_paths import cleanup_task_data
+        cleanup_task_data(row, reason="restart")
         # 保留历史时间线事件（app_dvs_task_events）：这些事件已携带
         # execution_epoch / control_version。显式 restart 从头重跑时会把
         # execution_epoch 归零，由下一次 claim 从 1 重新开始；跨重启审计

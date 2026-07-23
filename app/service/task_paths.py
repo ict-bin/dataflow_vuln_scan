@@ -7,12 +7,15 @@ a symlink to local storage (DVS_LOCAL_WORKSPACE_ENABLED).
 
 from __future__ import annotations
 
-import logging
+import hashlib, logging, shutil
 from pathlib import Path
 
 from app.db.models import AppDvsTask
 
 logger = logging.getLogger("dvs.task_paths")
+
+# MySQL URL (固定, 与 restart_task 一致)
+_MYSQL_URL = "mysql+pymysql://root:Huawei12%23$@secflow-app-dataflow-vuln-scan-mysql.secflow-ns.svc.cluster.local:3306"
 
 # NFS mirror directory name used by WorkspaceManager periodic sync
 _NFS_MIRROR_DIR = ".run_nfs"
@@ -137,3 +140,59 @@ def _epoch_label_from_path(path: Path | None) -> str | None:
         if idx + 1 < len(parts):
             return parts[idx + 1]
     return None
+
+
+# ── 任务级清理: 清除该任务的所有关联数据 (restart/stale/运行前 都调) ──
+
+def cleanup_task_data(row: AppDvsTask, *, reason: str = "cleanup") -> None:
+    """清除该任务的所有任务关联数据 (公用表 functions 等不清)。
+
+    清理范围:
+    1. NFS run/ + output/ 目录 (SQLite dagflow.db, vuln-scan.sqlite, sessions)
+    2. MySQL 共享存储: 所有 mode 的任务表 (V2 + DAG)
+    3. MySQL graph store: task_graph_* + findings
+    """
+    task_id = str(row.task_id or "")
+    source_root = _task_source_root(row)
+    project_id = str(row.project_id or "")
+
+    # 1. 删 NFS run/ + output/ 目录
+    task_root = _task_root(row)
+    if task_root is not None:
+        try:
+            from app.service.workspace_manager import WorkspaceManager
+            WorkspaceManager.cleanup_temp_for_task(task_id)
+        except Exception:
+            pass
+        for child_name in ("run", "output"):
+            child = task_root / child_name
+            if child.exists():
+                try:
+                    shutil.rmtree(child)
+                    logger.info("cleanup_task_data: removed %s/ (%s)", child_name, reason)
+                except Exception as exc:
+                    logger.warning("cleanup_task_data: remove %s/ failed: %s", child_name, exc)
+
+    # 2. MySQL 共享存储: 所有 mode 的任务表
+    if source_root:
+        try:
+            from app.db.shared_mysql import create_shared_store
+            for mode in ("complete", "autonomous", "dagflow"):
+                ms = create_shared_store(_MYSQL_URL, mode, source_root, task_id, project_id=project_id)
+                if ms:
+                    ms.clear_task_analysis()
+        except Exception as e:
+            logger.warning("cleanup_task_data: MySQL shared store cleanup failed: %s", e)
+
+    # 3. MySQL graph store: task_graph_* + findings
+    try:
+        from app.db.mysql_graph_store import create_mysql_graph_store
+        _sid = hashlib.sha1(source_root.encode("utf-8")).hexdigest()[:16] if source_root else ""
+        mgs = create_mysql_graph_store(_MYSQL_URL, project_id=project_id,
+                                       source_dir_id=_sid, source_root=source_root)
+        if mgs:
+            mgs.clear_task(task_id)
+    except Exception as e:
+        logger.warning("cleanup_task_data: MySQL graph store cleanup failed: %s", e)
+
+    logger.info("cleanup_task_data: task=%s reason=%s (run/+output/ removed, MySQL cleared)", task_id, reason)
