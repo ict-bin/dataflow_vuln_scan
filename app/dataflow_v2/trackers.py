@@ -76,6 +76,7 @@ def resolve_external(
 
     prompt = (
         f"## 源函数\n{func.file}::{func.name}\n\n"
+        f"源码绝对根目录: `{source_root}`。`{func.file}` 是相对该根目录的源码路径；如果需要使用 read/find 读取源码，请基于这个绝对根目录定位文件，不要基于当前工作目录拼接路径。\n\n"
         f"## 逃逸 propagation\n"
         f"- escape_kind: {prop.escape_kind or '(未指定)'}\n"
         f"- carrier: {prop.carrier or '(无)'}\n"
@@ -205,6 +206,7 @@ def resolve_indirect(
                  for c in candidates]
     prompt = (
         f"## 父函数: {func.file}::{func.name}\n"
+        f"源码绝对根目录: `{source_root}`。`{func.file}` 是相对该根目录的源码路径；如果需要使用 read/find 读取源码，请基于这个绝对根目录定位文件，不要基于当前工作目录拼接路径。\n"
         f"函数指针: `{fp_expr}`\n"
         f"污点: {prop.target_taint_name or prop.source_taint_name}\n"
         f"调用点: L{prop.call_line}\n\n"

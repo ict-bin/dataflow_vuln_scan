@@ -166,6 +166,7 @@ class AutonomousRunner:
             _desc = ("来源说明: " + cfg.function_description) if cfg.function_description else ""
             entry_prompt = (
                 f"## 入口\n目标函数: `{root_func.file}::{root_func.name}` (行 {root_func.start_line}-{root_func.end_line})\n"
+                f"源码绝对根目录: `{source_root}`。`{root_func.file}` 是相对该根目录的源码路径；如果需要使用 read/find 读取源码，请基于这个绝对根目录定位文件，不要基于当前工作目录拼接路径。\n"
                 f"签名: {root_func.signature}\n"
                 f"入口污点: {taint_desc}\n"
                 f"{_desc}\n\n"

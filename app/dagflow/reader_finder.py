@@ -79,6 +79,10 @@ class ReaderFinder:
         prompt = (
             f"## 源函数\n{func_name} ({func_file}, 行 {func_start}-{func_end})\n\n"
         )
+        prompt += (
+            f"源码绝对根目录: `{self.source_root}`。`{func_file}` 是相对该根目录的源码路径；"
+            "如果需要使用 read/find 读取源码，请基于这个绝对根目录定位文件，不要基于当前工作目录拼接路径。\n\n"
+        )
         if body_text:
             prompt += f"## 源函数体 (行号已标记)\n```\n{body_text}\n```\n\n"
         prompt += (

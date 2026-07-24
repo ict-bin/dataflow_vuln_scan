@@ -63,6 +63,7 @@ class TaintAnalyzer:
         prompt = (
             f"# 阶段：单函数污点传播 DAG 分析\n\n"
             f"目标函数: `{func.file}::{func.name}` (行 {func.start_line}-{func.end_line})\n"
+            f"源码绝对根目录: `{self.source_root}`。`{func.file}` 是相对该根目录的源码路径；如果需要使用 read/find 读取源码，请基于这个绝对根目录定位文件，不要基于当前工作目录拼接路径。\n"
             f"{taint_desc}\n\n"
             f"## 函数体 (行号已标记)\n```\n{numbered}\n```\n\n"
             f"按系统提示词要求输出 DAG JSON（顶层唯一一个 ```json 块，最后输出）。"

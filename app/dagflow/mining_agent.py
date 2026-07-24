@@ -129,6 +129,7 @@ class MiningAgent:
         return (
             f"# 阶段: dagflow 漏洞挖掘\n\n"
             f"目标函数: `{func.file}::{func.name}` (行 {func.start_line}-{func.end_line})\n"
+            f"源码绝对根目录: `{self.source_root}`。`{func.file}` 是相对该根目录的源码路径；如果需要使用 read/find 读取源码，请基于这个绝对根目录定位文件，不要基于当前工作目录拼接路径。\n"
             f"挖掘污点: {taint_sig}\n\n"
             f"## 正向数据流链 (入口 → callee 效应序列 → sink)\n"
             f"```json\n{_json.dumps(chain, ensure_ascii=False, indent=2)[:20000]}\n```\n\n"
