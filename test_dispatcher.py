@@ -155,7 +155,7 @@ class DispatcherStaleLoopTests(unittest.TestCase):
         finally:
             db.close()
 
-    def test_stale_loop_resets_old_pending_task_with_lost_celery_message(self):
+    def test_stale_loop_keeps_old_pending_task_with_lost_celery_message(self):
         self._insert_task(
             task_id="dvs_dispatcher_4",
             status="pending",
@@ -178,12 +178,12 @@ class DispatcherStaleLoopTests(unittest.TestCase):
         with patch("app.db.get_db", self._get_db), patch("app.celery_app.app", fake_app):
             reset = dispatcher._stale_once()
 
-        self.assertEqual(1, reset)
+        self.assertEqual(0, reset)
         db = self.SessionLocal()
         try:
             row = db.query(AppDvsTask).filter_by(task_id="dvs_dispatcher_4").first()
             self.assertEqual("pending", row.status)
-            self.assertIsNone(row.celery_task_id)
+            self.assertEqual("celery-4", row.celery_task_id)
             self.assertIsNone(row.execution_owner_id)
             self.assertIsNone(row.execution_lease_until)
             self.assertIsNone(row.dispatch_status)

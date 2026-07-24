@@ -833,8 +833,8 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                     "target_function": str(p.target_function or ""),
                     "source_taint": str(p.source_taint_name or ""),
                     "target_taint": str(p.target_taint_name or ""),
-                    "call_line": int(p.call_line or 0),
-                    "source_func_id": str(p.source_func_id or ""),
+                    "call_line": int(getattr(p, "call_line", 0) or 0),
+                    "source_func_id": str(getattr(p, "source_func_id", "") or ""),
                 }
                 for p in external_props
             ],

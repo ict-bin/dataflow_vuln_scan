@@ -2033,12 +2033,8 @@ def get_task_logs(task_id: str, db: Session = Depends(get_db)):
 def generate_prompt(body: GeneratePromptRequest):
     """Auto-generate a data flow analysis prompt from an input path."""
     return {"prompt": generate_prompt_from_path(body.input_path)}
-_MYSQL_GRAPH_STORES: dict[str, Any] = {}
-
 def _get_mysql_graph_store_for_task(task_id: str):
     """获取 per-source-dir MysqlGraphStore (API 优先读 MySQL)。"""
-    if task_id in _MYSQL_GRAPH_STORES:
-        return _MYSQL_GRAPH_STORES[task_id]
     try:
         from app.db import get_db as _get_db
         from app.db.models import AppDvsTask
@@ -2049,18 +2045,37 @@ def _get_mysql_graph_store_for_task(task_id: str):
             project_id = str(row.project_id or "") if row else ""
             source_root = str(row.source_root_path or row.input_path or "") if row else ""
         finally:
-            try: next(_get_db())
-            except StopIteration: pass
+            db.close()
         sid = hashlib.sha1(source_root.encode("utf-8")).hexdigest()[:16] if source_root else ""
         url = "mysql+pymysql://root:Huawei12%23$@secflow-app-dataflow-vuln-scan-mysql.secflow-ns.svc.cluster.local:3306"
         from app.db.mysql_graph_store import create_mysql_graph_store
-        store = create_mysql_graph_store(url, project_id=project_id,
-                                           source_dir_id=sid, source_root=source_root)
-        if store:
-            _MYSQL_GRAPH_STORES[task_id] = store
+        store = create_mysql_graph_store(
+            url,
+            project_id=project_id,
+            source_dir_id=sid,
+            source_root=source_root,
+        )
         return store
-    except Exception:
+    except Exception as exc:
+        logger.warning(
+            "mysql graph store init failed: task_id=%s error=%s",
+            task_id,
+            exc,
+            exc_info=True,
+        )
         return None
+
+def _task_root_from_run_root(run_root: Path) -> Path:
+    parts = run_root.parts
+    if "epochs" in parts:
+        epochs_idx = parts.index("epochs")
+        if epochs_idx > 0:
+            return Path(*parts[:epochs_idx])
+    if "run" in parts:
+        run_idx = len(parts) - 1 - parts[::-1].index("run")
+        if run_idx > 0:
+            return Path(*parts[:run_idx])
+    return run_root.parent
 
 def _graph_store_for_run_root(run_root: Path, task_id: str = ""):
     """优先返回 per-project MySQL 图谱存储; 回退 SQLite VulnScanStore。"""
@@ -2068,13 +2083,17 @@ def _graph_store_for_run_root(run_root: Path, task_id: str = ""):
         mysql_store = _get_mysql_graph_store_for_task(task_id)
         if mysql_store is not None:
             return mysql_store
-    db_path = run_root / "vuln-scan.sqlite"
+    task_root = _task_root_from_run_root(run_root)
+    db_path = task_root / "output" / "vuln-scan.sqlite"
     if not db_path.exists():
-        parent_output = run_root.parent / "output" / "vuln-scan.sqlite"
-        if parent_output.exists():
-            db_path = parent_output
-        else:
-            return None
+        logger.warning(
+            "graph view sqlite fallback missing: task_id=%s run_root=%s task_root=%s db_path=%s",
+            task_id,
+            run_root,
+            task_root,
+            db_path,
+        )
+        return None
     return VulnScanStore(db_path)
 
 

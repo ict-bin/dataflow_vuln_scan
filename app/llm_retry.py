@@ -146,7 +146,8 @@ def run_agent_with_design_retry(
         if cancel_event is not None and cancel_event.is_set():
             break
         result = run_agent(
-            cur_prompt, delegate_api_retry=True,
+            prompt=cur_prompt,
+            delegate_api_retry=True,
             model=model, tools=tools, system_prompt=system_prompt, cwd=cwd, env=env,
             thinking_level=thinking_level, session_file=session_file,
             cancel_event=cancel_event, on_stream=on_stream,

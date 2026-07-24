@@ -13,6 +13,7 @@ from app.api.tasks import (
     get_task_session_file,
     get_task_session_index,
     get_task_vuln_graph,
+    _graph_store_for_run_root,
     list_task_sessions,
     _load_task_graph_view,
     _load_task_vulnerability_findings,
@@ -49,6 +50,10 @@ def _write_session_file(path: Path, *, session_id: str | None = None, extra_head
     events = extra_events or [{"type": "assistant", "timestamp": "2026-07-20T00:00:01Z", "content": "ok"}]
     lines = [header, *events]
     path.write_text("\n".join(json.dumps(item, ensure_ascii=False) for item in lines) + "\n", encoding="utf-8")
+
+
+def _graph_sqlite_path(run_root: Path) -> Path:
+    return tasks_module._task_root_from_run_root(run_root) / "output" / "vuln-scan.sqlite"
 
 
 def test_load_task_propagations_includes_followed_and_unfollowed(tmp_path: Path):
@@ -1161,10 +1166,10 @@ def test_project_session_views_from_graph_allow_empty_sessions_without_fallback_
 def test_load_task_vulnerability_findings_reads_vuln_scan_sqlite(tmp_path: Path):
     run_root = tmp_path / "run"
     run_root.mkdir(parents=True, exist_ok=True)
-    store = VulnScanStore(run_root / "vuln-scan.sqlite")
+    store = VulnScanStore(_graph_sqlite_path(run_root))
 
     _exec_sql(
-        run_root / "vuln-scan.sqlite",
+        _graph_sqlite_path(run_root),
         """
         INSERT INTO analysis_runs(
             run_id, task_id, root_file, root_function, source_root, status, started_at, config_json
@@ -1173,7 +1178,7 @@ def test_load_task_vulnerability_findings_reads_vuln_scan_sqlite(tmp_path: Path)
         ("run-1", "task-1", "src/root.cpp", "Root", "/src", "done", 1780000000.0, "{}"),
     )
     _exec_sql(
-        run_root / "vuln-scan.sqlite",
+        _graph_sqlite_path(run_root),
         """
         INSERT INTO vulnerability_findings(
             finding_id, run_id, node_id, edge_id, source_file, function_name, line,
@@ -1212,10 +1217,10 @@ def test_load_task_vulnerability_findings_reads_vuln_scan_sqlite(tmp_path: Path)
 def test_load_task_vulnerability_findings_does_not_fallback_to_other_tasks(tmp_path: Path):
     run_root = tmp_path / "run"
     run_root.mkdir(parents=True, exist_ok=True)
-    VulnScanStore(run_root / "vuln-scan.sqlite")
+    VulnScanStore(_graph_sqlite_path(run_root))
 
     _exec_sql(
-        run_root / "vuln-scan.sqlite",
+        _graph_sqlite_path(run_root),
         """
         INSERT INTO analysis_runs(
             run_id, task_id, root_file, root_function, source_root, status, started_at, config_json
@@ -1224,7 +1229,7 @@ def test_load_task_vulnerability_findings_does_not_fallback_to_other_tasks(tmp_p
         ("run-2", "task-other", "src/other.cpp", "Other", "/src", "done", 1780000002.0, "{}"),
     )
     _exec_sql(
-        run_root / "vuln-scan.sqlite",
+        _graph_sqlite_path(run_root),
         """
         INSERT INTO vulnerability_findings(
             finding_id, run_id, node_id, edge_id, source_file, function_name, line,
@@ -1288,7 +1293,7 @@ def test_load_task_vulnerability_findings_returns_empty_without_authoritative_gr
 def test_task_graph_view_findings_match_compat_findings_loader(tmp_path: Path):
     run_root = tmp_path / "run"
     run_root.mkdir(parents=True, exist_ok=True)
-    store = VulnScanStore(run_root / "vuln-scan.sqlite")
+    store = VulnScanStore(_graph_sqlite_path(run_root))
     store.start_task_graph_run(TaskGraphRunRecord(
         task_id="task-graph",
         epoch="1",
@@ -1297,7 +1302,7 @@ def test_task_graph_view_findings_match_compat_findings_loader(tmp_path: Path):
     ))
 
     _exec_sql(
-        run_root / "vuln-scan.sqlite",
+        _graph_sqlite_path(run_root),
         """
         INSERT INTO analysis_runs(
             run_id, task_id, root_file, root_function, source_root, status, started_at, config_json
@@ -1306,7 +1311,7 @@ def test_task_graph_view_findings_match_compat_findings_loader(tmp_path: Path):
         ("run-graph", "task-graph", "src/root.cpp", "Root", "/src", "done", 1780000001.0, "{}"),
     )
     _exec_sql(
-        run_root / "vuln-scan.sqlite",
+        _graph_sqlite_path(run_root),
         """
         INSERT INTO vulnerability_findings(
             finding_id, run_id, node_id, edge_id, source_file, function_name, line,
@@ -1346,7 +1351,7 @@ def test_task_graph_view_findings_match_compat_findings_loader(tmp_path: Path):
 def test_legacy_vuln_graph_projection_stays_consistent_with_graph_view_facts(tmp_path: Path):
     run_root = tmp_path / "run"
     run_root.mkdir(parents=True, exist_ok=True)
-    store = VulnScanStore(run_root / "vuln-scan.sqlite")
+    store = VulnScanStore(_graph_sqlite_path(run_root))
     store.start_task_graph_run(TaskGraphRunRecord(
         task_id="task-projection",
         epoch="7",
@@ -1449,6 +1454,82 @@ def test_load_task_graph_view_without_authoritative_store_stays_empty(tmp_path: 
     assert session_index["edges"] == []
     assert session_index["groups"] == []
     assert session_index["summary"] == {}
+
+
+def test_graph_store_for_run_root_uses_task_output_sqlite_fallback(tmp_path: Path, monkeypatch):
+    task_root = tmp_path / "task-root"
+    run_root = task_root / "epochs" / "epoch-1" / "run"
+    run_root.mkdir(parents=True, exist_ok=True)
+    output_db = task_root / "output" / "vuln-scan.sqlite"
+    store = VulnScanStore(output_db)
+    store.start_task_graph_run(TaskGraphRunRecord(
+        task_id="task-fallback",
+        epoch="1",
+        run_root=str(run_root),
+        root_function="Root",
+    ))
+    store.upsert_task_graph_node(TaskGraphNodeRecord(
+        node_id="node-root",
+        task_id="task-fallback",
+        epoch="1",
+        func_id="root-func",
+        function_name_resolved="Root",
+        function_name_raw="Root",
+        source_file="src/root.cpp",
+        depth=0,
+        status="done",
+        analysis_status="done",
+    ))
+    monkeypatch.setattr(tasks_module, "_get_mysql_graph_store_for_task", lambda task_id: None)
+
+    resolved_store = _graph_store_for_run_root(run_root, task_id="task-fallback")
+    view = resolved_store.export_task_graph_view("task-fallback")
+
+    assert isinstance(resolved_store, VulnScanStore)
+    assert resolved_store.db_path == output_db
+    assert view["available"] is True
+    assert view["summary"]["nodes_total"] == 1
+
+
+def test_load_task_graph_view_rebuilds_mysql_store_each_call(tmp_path: Path, monkeypatch):
+    run_root = tmp_path / "task-root" / "epochs" / "epoch-1" / "run"
+    run_root.mkdir(parents=True, exist_ok=True)
+    calls: list[str] = []
+
+    class _FakeStore:
+        def __init__(self, label: str):
+            self.label = label
+
+        def export_task_graph_view(self, task_id: str) -> dict[str, object]:
+            return {
+                "task_id": task_id,
+                "epoch": "1",
+                "available": True,
+                "summary": {"nodes_total": 1 if self.label == "first" else 2},
+                "nodes": [{"node_id": self.label}],
+                "edges": [],
+                "tree": None,
+                "sessions": [],
+                "findings": [],
+                "generated_at": None,
+                "store_label": self.label,
+            }
+
+    def _fake_get_mysql_graph_store_for_task(task_id: str):
+        calls.append(task_id)
+        label = "first" if len(calls) == 1 else "second"
+        return _FakeStore(label)
+
+    monkeypatch.setattr(tasks_module, "_get_mysql_graph_store_for_task", _fake_get_mysql_graph_store_for_task)
+
+    first = _load_task_graph_view(run_root, "task-mysql-refresh")
+    second = _load_task_graph_view(run_root, "task-mysql-refresh")
+
+    assert calls == ["task-mysql-refresh", "task-mysql-refresh"]
+    assert first["store_label"] == "first"
+    assert second["store_label"] == "second"
+    assert first["summary"]["nodes_total"] == 1
+    assert second["summary"]["nodes_total"] == 2
 
 
 def test_project_session_index_from_graph_marks_graph_view_as_authoritative_source(tmp_path: Path):
@@ -1557,7 +1638,7 @@ def test_get_task_result_summary_uses_authoritative_graph_view_counts(tmp_path: 
     run_root = task_root / "run"
     run_root.mkdir(parents=True, exist_ok=True)
 
-    store = VulnScanStore(run_root / "vuln-scan.sqlite")
+    store = VulnScanStore(_graph_sqlite_path(run_root))
     store.start_task_graph_run(TaskGraphRunRecord(
         task_id=task_id,
         epoch="9",
@@ -1649,7 +1730,7 @@ def test_route_level_projections_stay_aligned_on_same_authoritative_graph_view(t
     _write_session_file(sessions_root / "root.jsonl")
     _write_session_file(sessions_root / "child.jsonl")
 
-    store = VulnScanStore(run_root / "vuln-scan.sqlite")
+    store = VulnScanStore(_graph_sqlite_path(run_root))
     store.start_task_graph_run(TaskGraphRunRecord(
         task_id=task_id,
         epoch="12",
@@ -1798,7 +1879,7 @@ def test_route_level_projections_preserve_one_to_many_bridge_edges(tmp_path: Pat
     _write_session_file(sessions_root / "emit.jsonl")
     _write_session_file(sessions_root / "emit-uv.jsonl")
 
-    store = VulnScanStore(run_root / "vuln-scan.sqlite")
+    store = VulnScanStore(_graph_sqlite_path(run_root))
     store.start_task_graph_run(TaskGraphRunRecord(
         task_id=task_id,
         epoch="12m",
@@ -1939,7 +2020,7 @@ def test_route_level_projections_keep_findings_queryable_when_graph_has_only_fin
     run_root = task_root / "run"
     run_root.mkdir(parents=True, exist_ok=True)
 
-    store = VulnScanStore(run_root / "vuln-scan.sqlite")
+    store = VulnScanStore(_graph_sqlite_path(run_root))
     store.start_task_graph_run(TaskGraphRunRecord(
         task_id=task_id,
         epoch="13",
@@ -2008,7 +2089,7 @@ def test_route_level_session_index_does_not_invent_edges_from_orphan_sessions(tm
     _write_session_file(sessions_root / "child.jsonl")
     _write_session_file(sessions_root / "orphan.jsonl")
 
-    store = VulnScanStore(run_root / "vuln-scan.sqlite")
+    store = VulnScanStore(_graph_sqlite_path(run_root))
     store.start_task_graph_run(TaskGraphRunRecord(
         task_id=task_id,
         epoch="14",
@@ -2153,7 +2234,7 @@ def test_route_level_projections_preserve_terminal_and_hidden_followup_statuses(
     run_root = task_root / "run"
     run_root.mkdir(parents=True, exist_ok=True)
 
-    store = VulnScanStore(run_root / "vuln-scan.sqlite")
+    store = VulnScanStore(_graph_sqlite_path(run_root))
     store.start_task_graph_run(TaskGraphRunRecord(
         task_id=task_id,
         epoch="14",
@@ -2331,7 +2412,7 @@ def test_route_level_projections_preserve_unresolved_tracker_observability_field
     run_root = task_root / "run"
     run_root.mkdir(parents=True, exist_ok=True)
 
-    store = VulnScanStore(run_root / "vuln-scan.sqlite")
+    store = VulnScanStore(_graph_sqlite_path(run_root))
     store.start_task_graph_run(TaskGraphRunRecord(
         task_id=task_id,
         epoch="15",
@@ -3003,7 +3084,7 @@ def test_route_level_projections_cover_edge_kind_and_status_matrix(tmp_path: Pat
     for relname in ["discovered.jsonl", "running.jsonl", "scheduled.jsonl", "done.jsonl", "failed.jsonl", "cancelled.jsonl"]:
         _write_session_file(sessions_root / relname)
 
-    store = VulnScanStore(run_root / "vuln-scan.sqlite")
+    store = VulnScanStore(_graph_sqlite_path(run_root))
     store.start_task_graph_run(TaskGraphRunRecord(
         task_id=task_id,
         epoch="16",

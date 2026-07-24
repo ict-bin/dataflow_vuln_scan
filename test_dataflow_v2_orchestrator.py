@@ -804,7 +804,7 @@ class TestGraphCancellationWrites(unittest.TestCase):
                 messages: list[dict] = []
 
             with patch("app.dataflow_v2.analysis.ensure_file_indexed", lambda *args, **kwargs: None), \
-                 patch("app.dataflow_v2.analysis.run_agent", side_effect=lambda *args, **kwargs: (cancel_event.set() or _FakeAgentResult())):
+                 patch("app.runner.run_agent", side_effect=lambda *args, **kwargs: (cancel_event.set() or _FakeAgentResult())):
                 cbs._read_body = lambda _func: "void Root(msg_t* msg) { return; }"  # type: ignore[method-assign]
                 cbs.analyze_function(store, func, TaintParamInfo([0], "msg_t*", ["msg"]), [], "", ctx)
 
