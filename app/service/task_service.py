@@ -47,6 +47,7 @@ from app.time_utils import isoformat_local, now_local
 from .task_events import _record_task_event, _task_event_dedupe_key, _build_task_event_response
 from .task_paths import _task_root, _task_run_root, _task_epoch_run_root, _task_result_path, _latest_epoch_run_root, _epoch_label_from_path, _resolve_run_path, _task_source_root
 from .task_session import _write_json_atomic, _safe_session_file, _parse_session_file, _build_task_session_catalog
+from .task_vuln_stats import sync_task_vuln_snapshot_row
 from .task_result import (
     _load_task_result_json, _write_task_result_json, _build_entry_analysis_context,
     _persist_terminal_failure, _input_manifest_path, _path_metadata,
@@ -823,36 +824,8 @@ def _sync_task_abnormal_reason(row: AppDvsTask) -> tuple[dict | None, bool]:
 
 
 def _sync_task_vuln_stats(row: AppDvsTask) -> bool:
-    """Sync vuln stats from authoritative MySQL graph findings into task snapshot."""
-    from app.db.mysql_graph_store import create_mysql_graph_store
-    import hashlib
-
-    source_root = str(row.source_root_path or row.input_path or "").strip()
-    project_id = str(row.project_id or "").strip()
-    task_id = str(row.task_id or "").strip()
-    if not source_root or not task_id:
-        return False
-
-    source_dir_id = hashlib.sha1(source_root.encode("utf-8")).hexdigest()[:16]
-    store = create_mysql_graph_store(
-        "mysql+pymysql://root:Huawei12%23$@secflow-app-dataflow-vuln-scan-mysql.secflow-ns.svc.cluster.local:3306",
-        project_id=project_id,
-        source_dir_id=source_dir_id,
-        source_root=source_root,
-    )
-    if store is None:
-        return False
-
-    stats = store.get_task_finding_stats(task_id)
-    total = int(stats.get("total") or 0)
-    reported = int(stats.get("reported") or 0)
-    unreported = int(stats.get("unreported") or 0)
-    changed = (row.vuln_total_count != total or row.vuln_reported_count != reported or row.vuln_unreported_count != unreported)
-    if changed:
-        row.vuln_total_count = total
-        row.vuln_reported_count = reported
-        row.vuln_unreported_count = unreported
-    return changed
+    """Sync vuln stats from authoritative task SQLite into task snapshot."""
+    return sync_task_vuln_snapshot_row(row, prefer_live=True)
 
 
 def _record_abnormal_reason(row: AppDvsTask, reason: dict | None, *, changed: bool) -> None:

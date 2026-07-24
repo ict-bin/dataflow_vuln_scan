@@ -7,7 +7,7 @@ a symlink to local storage (DVS_LOCAL_WORKSPACE_ENABLED).
 
 from __future__ import annotations
 
-import hashlib, logging, shutil
+import hashlib, logging, os, shutil
 from pathlib import Path
 
 from app.db.models import AppDvsTask
@@ -22,9 +22,14 @@ _NFS_MIRROR_DIR = ".run_nfs"
 
 
 def _task_root(row: AppDvsTask) -> Path | None:
-    if not row.output_path:
-        return None
-    return Path(row.output_path) / row.task_id
+    output_path = str(row.output_path or "").strip()
+    if output_path:
+        return Path(output_path).expanduser().resolve() / row.task_id
+    project_id = str(getattr(row, "project_id", "") or "").strip()
+    if project_id:
+        fileserver_root = os.environ.get("FILESERVER_ROOT", "/data/files")
+        return Path(fileserver_root) / project_id / "app" / "secflow-app-dataflow-vuln-scan" / row.task_id
+    return None
 
 
 def _task_source_root(row: AppDvsTask) -> str:
@@ -45,6 +50,49 @@ def _task_output_root(row: AppDvsTask) -> Path | None:
 def _task_output_sessions_root(row: AppDvsTask) -> Path | None:
     output_root = _task_output_root(row)
     return output_root / "sessions" if output_root else None
+
+
+def resolve_live_vuln_scan_sqlite(task_root: Path | None) -> Path | None:
+    if task_root is None:
+        return None
+    path = task_root / "run" / "vuln-scan.sqlite"
+    return path if path.exists() else None
+
+
+def resolve_archived_vuln_scan_sqlite(task_root: Path | None) -> Path | None:
+    if task_root is None:
+        return None
+    path = task_root / "output" / "vuln-scan.sqlite"
+    return path if path.exists() else None
+
+
+def resolve_authoritative_vuln_scan_sqlite(task_root: Path | None, *, prefer_live: bool = True) -> Path | None:
+    primary = resolve_live_vuln_scan_sqlite(task_root) if prefer_live else resolve_archived_vuln_scan_sqlite(task_root)
+    if primary is not None:
+        return primary
+    return resolve_archived_vuln_scan_sqlite(task_root) if prefer_live else resolve_live_vuln_scan_sqlite(task_root)
+
+
+def open_authoritative_vuln_scan_store(task_root: Path | None, *, prefer_live: bool = True):
+    db_path = resolve_authoritative_vuln_scan_sqlite(task_root, prefer_live=prefer_live)
+    if db_path is None:
+        return None
+    from app.vuln_store import VulnScanStore
+
+    return VulnScanStore(db_path)
+
+
+def authoritative_task_vuln_stats(task_root: Path | None, task_id: str, *, prefer_live: bool = True) -> tuple[int, int, int] | None:
+    normalized_task_id = str(task_id or "").strip()
+    if not normalized_task_id:
+        return None
+    store = open_authoritative_vuln_scan_store(task_root, prefer_live=prefer_live)
+    if store is None:
+        return None
+    findings = list(store.list_task_findings(normalized_task_id))
+    total = len(findings)
+    reported = sum(1 for item in findings if str(item.get("report_status") or "") == "reported")
+    return total, reported, max(0, total - reported)
 
 
 def _resolve_run_path(row: AppDvsTask, relative: str = "") -> Path | None:
@@ -129,6 +177,19 @@ def _latest_epoch_run_root(row: AppDvsTask) -> Path | None:
         return run_root
     candidates = sorted([path for path in epochs_root.iterdir() if path.is_dir()], key=lambda path: path.name)
     return candidates[-1] if candidates else run_root
+
+
+def latest_epoch_run_root_from_task_root(task_root: Path | None) -> Path | None:
+    if task_root is None:
+        return None
+    run_root = task_root / "run"
+    epochs_root = run_root / "epochs"
+    if not epochs_root.exists():
+        return run_root
+    candidates = [path for path in epochs_root.iterdir() if path.is_dir() and path.name.isdigit()]
+    if not candidates:
+        return run_root
+    return sorted(candidates, key=lambda path: int(path.name))[-1]
 
 
 def _epoch_label_from_path(path: Path | None) -> str | None:

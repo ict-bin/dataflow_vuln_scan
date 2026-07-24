@@ -21,6 +21,12 @@ from app.db.models import AppDvsTask
 from app.time_utils import isoformat_local
 from app.service.worker_snapshot import build_worker_cluster_snapshot
 from app.service.task_service import generate_prompt_from_path, get_task_service
+from app.service.task_paths import (
+    _task_root,
+    _epoch_label_from_path,
+    latest_epoch_run_root_from_task_root,
+    open_authoritative_vuln_scan_store,
+)
 from app.vuln_store import VulnScanStore
 from .deps import ensure_admin_user, ensure_project_access, get_current_user
 from .task_models import (
@@ -566,43 +572,6 @@ def _get_task_row(db: Session, task_id: str):
     if not row:
         raise HTTPException(404, f"任务不存在: {task_id}")
     return row
-
-
-def _task_root(row) -> Path:
-    output_path = row.output_path or ""
-    if output_path:
-        return Path(output_path).expanduser().resolve() / row.task_id
-    # Fallback for tasks where output_path was never persisted (EA-created / pre-fix).
-    project_id = str(getattr(row, "project_id", "") or "").strip()
-    if project_id:
-        import os as _os
-        _fs = _os.environ.get("FILESERVER_ROOT", "/data/files")
-        return Path(_fs) / project_id / "app" / "secflow-app-dataflow-vuln-scan" / row.task_id
-    return Path()
-
-
-def _latest_epoch_run_root(root: Path) -> Path:
-    run_root = root / "run"
-    epochs_root = run_root / "epochs"
-    if not epochs_root.exists():
-        return run_root
-    # Only numeric epoch directories are execution attempts.  Auxiliary folders
-    # such as run/epochs/output contain intermediate snapshots and must not win.
-    candidates = [path for path in epochs_root.iterdir() if path.is_dir() and path.name.isdigit()]
-    if not candidates:
-        return run_root
-    return sorted(candidates, key=lambda path: int(path.name))[-1]
-
-
-def _epoch_label(path: Path) -> str | None:
-    if not path:
-        return None
-    parts = path.parts
-    if "epochs" in parts:
-        idx = parts.index("epochs")
-        if idx + 1 < len(parts):
-            return parts[idx + 1]
-    return None
 
 
 def _read_text(path: Path, warnings: List[str], label: str, limit: int = 2_000_000) -> str:
@@ -1446,8 +1415,8 @@ def kill_all_agent_aggregate_suspected_orphans(
 def get_task_vuln_graph(task_id: str, db: Session = Depends(get_db)):
     row = _get_task_row(db, task_id)
     root = _task_root(row)
-    latest_run_root = _latest_epoch_run_root(root) if str(root) else Path()
-    run_root = latest_run_root if latest_run_root.exists() else root / "run"
+    latest_run_root = latest_epoch_run_root_from_task_root(root) or Path()
+    run_root = latest_run_root if latest_run_root.exists() else ((root / "run") if root else Path())
     view = _load_task_graph_view(run_root, task_id, task_root=root)
     return {
         "task_id": task_id,
@@ -1470,8 +1439,8 @@ def get_task_vuln_graph(task_id: str, db: Session = Depends(get_db)):
 def get_task_graph_view(task_id: str, db: Session = Depends(get_db)):
     row = _get_task_row(db, task_id)
     root = _task_root(row)
-    latest_run_root = _latest_epoch_run_root(root) if str(root) else Path()
-    run_root = latest_run_root if latest_run_root.exists() else root / "run"
+    latest_run_root = latest_epoch_run_root_from_task_root(root) or Path()
+    run_root = latest_run_root if latest_run_root.exists() else ((root / "run") if root else Path())
     view = _load_task_graph_view(run_root, task_id, task_root=root)
     return TaskGraphViewResponse(
         task_id=task_id,
@@ -1492,8 +1461,8 @@ def get_task_graph_view(task_id: str, db: Session = Depends(get_db)):
 def get_task_vuln_findings(task_id: str, db: Session = Depends(get_db)):
     row = _get_task_row(db, task_id)
     root = _task_root(row)
-    latest_run_root = _latest_epoch_run_root(root) if str(root) else Path()
-    run_root = latest_run_root if latest_run_root.exists() else root / "run"
+    latest_run_root = latest_epoch_run_root_from_task_root(root) or Path()
+    run_root = latest_run_root if latest_run_root.exists() else ((root / "run") if root else Path())
     view = _load_task_graph_view(run_root, task_id, task_root=root)
     findings = list(view.get("findings") or [])
     return {
@@ -1509,8 +1478,8 @@ def get_task_vuln_finding_report(task_id: str, finding_id: str, db: Session = De
     """返回单条漏洞的 vulnerability-report.md 内容 (前端点开漏洞渲染)。"""
     row = _get_task_row(db, task_id)
     root = _task_root(row)
-    latest_run_root = _latest_epoch_run_root(root) if str(root) else Path()
-    run_root = latest_run_root if latest_run_root.exists() else root / "run"
+    latest_run_root = latest_epoch_run_root_from_task_root(root) or Path()
+    run_root = latest_run_root if latest_run_root.exists() else ((root / "run") if root else Path())
     view = _load_task_graph_view(run_root, task_id, task_root=root)
     findings = list(view.get("findings") or [])
     finding = next((f for f in findings if str(f.get("finding_id") or "") == finding_id), None)
@@ -1545,8 +1514,8 @@ def get_task_vuln_finding_report(task_id: str, finding_id: str, db: Session = De
 def get_task_propagations(task_id: str, db: Session = Depends(get_db)):
     row = _get_task_row(db, task_id)
     root = _task_root(row)
-    latest_run_root = _latest_epoch_run_root(root) if str(root) else Path()
-    run_root = latest_run_root if latest_run_root.exists() else root / "run"
+    latest_run_root = latest_epoch_run_root_from_task_root(root) or Path()
+    run_root = latest_run_root if latest_run_root.exists() else ((root / "run") if root else Path())
     view = _load_task_graph_view(run_root, task_id, task_root=root)
     items = _project_propagations_from_graph(view)
     return TaskPropagationsResponse(
@@ -1571,9 +1540,9 @@ def report_all_task_vuln_findings(task_id: str, db: Session = Depends(get_db)):
     """一键上报所有未提交的漏洞疑点到漏洞中心。"""
     row = _get_task_row(db, task_id)
     root = _task_root(row)
-    latest_run_root = _latest_epoch_run_root(root) if str(root) else Path()
-    run_root = latest_run_root if latest_run_root.exists() else root / "run"
-    findings = _load_task_vulnerability_findings(run_root, task_id)
+    latest_run_root = latest_epoch_run_root_from_task_root(root) or Path()
+    run_root = latest_run_root if latest_run_root.exists() else ((root / "run") if root else Path())
+    findings = _load_task_vulnerability_findings(run_root, task_id, task_root=root)
     unreported = [f for f in findings if f.get("report_status") != "reported"]
     results = []
     for f in unreported:
@@ -1596,14 +1565,8 @@ def _do_report_finding(task_id: str, finding_id: str, db: Session):
     from app.vuln_store import VulnFindingRecord
     row = _get_task_row(db, task_id)
     root = _task_root(row)
-    # Prefer run/vuln-scan.sqlite (always complete), fallback to latest epoch
-    run_sqlite = root / "run" / "vuln-scan.sqlite"
-    if run_sqlite.exists():
-        run_root = root / "run"
-    else:
-        latest_run_root = _latest_epoch_run_root(root) if str(root) else Path()
-        run_root = latest_run_root if latest_run_root.exists() else root / "run"
-    findings = _load_task_vulnerability_findings(run_root, task_id)
+    run_root = (root / "run") if root else Path()
+    findings = _load_task_vulnerability_findings(run_root, task_id, task_root=root)
     finding = next((f for f in findings if f.get("finding_id") == finding_id), None)
     if not finding:
         return None
@@ -1646,8 +1609,7 @@ def _do_report_finding(task_id: str, finding_id: str, db: Session):
     reported_ok = result.get("status") == "reported"
     # 无论上报成败都更新 SQLite 并同步 MySQL 统计
     try:
-        from app.vuln_store import VulnScanStore
-        store = VulnScanStore(run_root / "vuln-scan.sqlite")
+        store = _graph_store_for_run_root(run_root, task_id=task_id, task_root=root)
         if reported_ok:
             store.update_finding_report_status(
                 finding_id,
@@ -1714,9 +1676,9 @@ def report_all_project_vuln_findings(project_id: str = Query(...), db: Session =
     for row in rows:
         task_id = row.task_id
         root = _task_root(row)
-        latest_run_root = _latest_epoch_run_root(root) if str(root) else Path()
-        run_root = latest_run_root if latest_run_root.exists() else root / "run"
-        findings = _load_task_vulnerability_findings(run_root, task_id)
+        latest_run_root = latest_epoch_run_root_from_task_root(root) or Path()
+        run_root = latest_run_root if latest_run_root.exists() else ((root / "run") if root else Path())
+        findings = _load_task_vulnerability_findings(run_root, task_id, task_root=root)
         for f in findings:
             fid = f.get("finding_id", "")
             if not fid or f.get("report_status") == "reported":
@@ -1745,9 +1707,9 @@ def get_tasks_vuln_stats_batch(task_ids: str = Query(...), db: Session = Depends
             result[tid] = {"total": 0, "reported": 0, "unreported": 0}
             continue
         root = _task_root(row)
-        latest = _latest_epoch_run_root(root) if str(root) else Path()
-        run_root = latest if latest.exists() else root / "run"
-        findings = _load_task_vulnerability_findings(run_root, tid)
+        latest = latest_epoch_run_root_from_task_root(root) or Path()
+        run_root = latest if latest.exists() else ((root / "run") if root else Path())
+        findings = _load_task_vulnerability_findings(run_root, tid, task_root=root)
         total = len(findings)
         reported = sum(1 for f in findings if f.get("report_status") == "reported")
         result[tid] = {"total": total, "reported": reported, "unreported": total - reported}
@@ -1767,12 +1729,12 @@ def get_task_result(task_id: str, db: Session = Depends(get_db)):
     row = _get_task_row(db, task_id)
     root = _task_root(row)
     warnings: List[str] = []
-    output_root = root / "output" if str(root) else Path()
-    run_root = root / "run" if str(root) else Path()
-    result_json = _load_result_json(row, root, warnings) if str(root) else (row.result_json or {})
+    output_root = root / "output" if root else Path()
+    run_root = root / "run" if root else Path()
+    result_json = _load_result_json(row, root, warnings) if root else (row.result_json or {})
     rounds = _collect_rounds(result_json)
-    latest_run_root = _latest_epoch_run_root(root) if str(root) else Path()
-    current_epoch = _epoch_label(latest_run_root)
+    latest_run_root = latest_epoch_run_root_from_task_root(root) or Path()
+    current_epoch = _epoch_label_from_path(latest_run_root)
 
     output_files: List[Dict[str, Any]] = []
     dataflow_files: List[Dict[str, Any]] = []
@@ -2033,44 +1995,11 @@ def get_task_logs(task_id: str, db: Session = Depends(get_db)):
 def generate_prompt(body: GeneratePromptRequest):
     """Auto-generate a data flow analysis prompt from an input path."""
     return {"prompt": generate_prompt_from_path(body.input_path)}
-def _get_mysql_graph_store_for_task(task_id: str):
-    """获取 per-source-dir MysqlGraphStore (API 优先读 MySQL)。"""
-    try:
-        from app.db import get_db as _get_db
-        from app.db.models import AppDvsTask
-        import hashlib
-        db = next(_get_db())
-        try:
-            row = db.query(AppDvsTask).filter_by(task_id=task_id).first()
-            project_id = str(row.project_id or "") if row else ""
-            source_root = str(row.source_root_path or row.input_path or "") if row else ""
-        finally:
-            db.close()
-        sid = hashlib.sha1(source_root.encode("utf-8")).hexdigest()[:16] if source_root else ""
-        url = "mysql+pymysql://root:Huawei12%23$@secflow-app-dataflow-vuln-scan-mysql.secflow-ns.svc.cluster.local:3306"
-        from app.db.mysql_graph_store import create_mysql_graph_store
-        store = create_mysql_graph_store(
-            url,
-            project_id=project_id,
-            source_dir_id=sid,
-            source_root=source_root,
-        )
-        return store
-    except Exception as exc:
-        logger.warning(
-            "mysql graph store init failed: task_id=%s error=%s",
-            task_id,
-            exc,
-            exc_info=True,
-        )
-        return None
-
 def _graph_store_for_run_root(run_root: Path, task_id: str = "", *, task_root: Path | None = None):
-    """优先返回 per-project MySQL 图谱存储; 回退 SQLite VulnScanStore。"""
-    if task_id:
-        mysql_store = _get_mysql_graph_store_for_task(task_id)
-        if mysql_store is not None:
-            return mysql_store
+    """图谱详情固定从 task_root 下的 authoritative SQLite 读取。"""
+    store = open_authoritative_vuln_scan_store(task_root, prefer_live=True)
+    if store is not None:
+        return store
     if task_root is None:
         logger.warning(
             "graph view task_root missing: task_id=%s run_root=%s",
@@ -2078,17 +2007,15 @@ def _graph_store_for_run_root(run_root: Path, task_id: str = "", *, task_root: P
             run_root,
         )
         return None
-    db_path = task_root / "output" / "vuln-scan.sqlite"
-    if not db_path.exists():
-        logger.warning(
-            "graph view sqlite fallback missing: task_id=%s run_root=%s task_root=%s db_path=%s",
-            task_id,
-            run_root,
-            task_root,
-            db_path,
-        )
-        return None
-    return VulnScanStore(db_path)
+    logger.warning(
+        "graph view authoritative sqlite missing: task_id=%s run_root=%s task_root=%s run_db_path=%s output_db_path=%s",
+        task_id,
+        run_root,
+        task_root,
+        task_root / "run" / "vuln-scan.sqlite",
+        task_root / "output" / "vuln-scan.sqlite",
+    )
+    return None
 
 
 def _load_task_graph_view(run_root: Path, task_id: str, *, task_root: Path | None = None) -> dict[str, Any]:

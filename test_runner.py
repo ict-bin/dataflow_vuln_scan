@@ -648,6 +648,11 @@ class RunAgentPromptFileTests(unittest.TestCase):
             local_sessions = local_root / "sessions"
             local_sessions.mkdir(parents=True, exist_ok=True)
             (local_sessions / "live.jsonl").write_text("live\n", encoding="utf-8")
+            (local_root / "vuln-scan.sqlite").write_text("sqlite\n", encoding="utf-8")
+            (local_root / "result.json").write_text('{"status":"running"}\n', encoding="utf-8")
+            local_output = local_root.parent / "output"
+            local_output.mkdir(parents=True, exist_ok=True)
+            (local_output / "final_report.md").write_text("report\n", encoding="utf-8")
 
             wm._enabled = True
             wm._local_run_root = local_root
@@ -668,9 +673,16 @@ class RunAgentPromptFileTests(unittest.TestCase):
 
             target = nfs_run_root.parent.parent.parent / "output" / "sessions" / "live.jsonl"
             legacy_target = nfs_run_root.parent.parent / "output" / "sessions" / "live.jsonl"
+            live_db = nfs_run_root.parent.parent.parent / "run" / "vuln-scan.sqlite"
+            result_json = nfs_run_root.parent.parent.parent / "run" / "result.json"
+            synced_output_report = nfs_run_root.parent.parent.parent / "run" / "output" / "final_report.md"
             self.assertTrue(target.exists())
             self.assertEqual("live\n", target.read_text(encoding="utf-8"))
             self.assertFalse(legacy_target.exists())
+            self.assertTrue(live_db.exists())
+            self.assertEqual("sqlite\n", live_db.read_text(encoding="utf-8"))
+            self.assertFalse(result_json.exists())
+            self.assertFalse(synced_output_report.exists())
 
     def test_legacy_dagflow_vuln_mining_is_forced_off(self):
         from app.dagflow.mining_agent import MiningAgent

@@ -16,6 +16,7 @@ from app.api.tasks import (
     _graph_store_for_run_root,
     list_task_sessions,
     _load_task_graph_view,
+    _do_report_finding,
     _load_task_vulnerability_findings,
     _project_propagations_from_graph,
     _project_session_index_from_graph,
@@ -1360,6 +1361,96 @@ def test_task_graph_view_findings_match_compat_findings_loader(tmp_path: Path):
     assert view["findings"][0]["report_status"] == "reported"
 
 
+def test_do_report_finding_updates_output_sqlite_when_run_sqlite_missing(tmp_path: Path, monkeypatch):
+    task_id = "task-report-output-fallback"
+    output_root = tmp_path / "output"
+    task_root = output_root / task_id
+    run_root = task_root / "run"
+    run_root.mkdir(parents=True, exist_ok=True)
+
+    store = VulnScanStore(_graph_sqlite_path(run_root))
+    store.start_run(
+        run_id="run-report-output",
+        task_id=task_id,
+        root_file="src/root.cpp",
+        root_function="Root",
+        source_root="/src",
+    )
+    store.add_finding(VulnFindingRecord(
+        finding_id="finding-report-output",
+        run_id="run-report-output",
+        node_id="node-root",
+        edge_id="",
+        source_file="src/root.cpp",
+        function_name="Root",
+        line="15",
+        vuln_type="sql_injection",
+        severity="high",
+        title="Root issue",
+        summary="summary",
+        evidence="evidence",
+        exploitability="exploitability",
+        confidence=0.8,
+        output_dir=str(task_root / "artifacts" / "finding-report-output"),
+    ))
+
+    row = SimpleNamespace(
+        task_id=task_id,
+        output_path=str(output_root),
+        result_json={},
+        status="passed",
+        project_id="project-1",
+        task_name="Task One",
+        parent_task_id="parent-1",
+        parent_task_type="binary_security",
+        task_origin_type="manual",
+        source_root_path="/src",
+    )
+
+    monkeypatch.setattr(tasks_module, "_get_task_row", lambda db, value: row)
+    monkeypatch.setattr(
+        tasks_module,
+        "report_finding_to_intake",
+        lambda **kwargs: {
+            "status": "reported",
+            "report_id": "report-1",
+            "case_id": "case-1",
+            "duplicate": False,
+            "error": None,
+        },
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "app.vuln_intake_reporter.report_finding_to_intake",
+        lambda **kwargs: {
+            "status": "reported",
+            "report_id": "report-1",
+            "case_id": "case-1",
+            "duplicate": False,
+            "error": None,
+        },
+    )
+    monkeypatch.setattr("app.service.task_service._sync_task_vuln_stats", lambda row: None)
+
+    class DummyDB:
+        def __init__(self) -> None:
+            self.committed = False
+
+        def commit(self) -> None:
+            self.committed = True
+
+    db = DummyDB()
+    result = _do_report_finding(task_id, "finding-report-output", db)
+
+    assert result is not None
+    assert result["status"] == "reported"
+    assert db.committed is True
+
+    findings = _load_task_vulnerability_findings(run_root, task_id, task_root=task_root)
+    assert findings[0]["report_status"] == "reported"
+    assert findings[0]["report_case_id"] == "case-1"
+
+
 def test_legacy_vuln_graph_projection_stays_consistent_with_graph_view_facts(tmp_path: Path):
     run_root = tmp_path / "run"
     run_root.mkdir(parents=True, exist_ok=True)
@@ -1468,7 +1559,7 @@ def test_load_task_graph_view_without_authoritative_store_stays_empty(tmp_path: 
     assert session_index["summary"] == {}
 
 
-def test_graph_store_for_run_root_uses_task_output_sqlite_fallback(tmp_path: Path, monkeypatch):
+def test_graph_store_for_run_root_uses_task_output_sqlite_fallback(tmp_path: Path):
     task_root = tmp_path / "task-root"
     run_root = task_root / "epochs" / "epoch-1" / "run"
     run_root.mkdir(parents=True, exist_ok=True)
@@ -1492,8 +1583,6 @@ def test_graph_store_for_run_root_uses_task_output_sqlite_fallback(tmp_path: Pat
         status="done",
         analysis_status="done",
     ))
-    monkeypatch.setattr(tasks_module, "_get_mysql_graph_store_for_task", lambda task_id: None)
-
     resolved_store = _graph_store_for_run_root(run_root, task_id="task-fallback", task_root=task_root)
     view = resolved_store.export_task_graph_view("task-fallback")
 
@@ -1504,7 +1593,7 @@ def test_graph_store_for_run_root_uses_task_output_sqlite_fallback(tmp_path: Pat
 
 
 def test_graph_store_for_run_root_uses_task_output_sqlite_fallback_for_live_epoch_layout(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path
 ):
     task_root = tmp_path / "task-root"
     run_root = task_root / "run" / "epochs" / "0001"
@@ -1529,8 +1618,6 @@ def test_graph_store_for_run_root_uses_task_output_sqlite_fallback_for_live_epoc
         status="done",
         analysis_status="done",
     ))
-    monkeypatch.setattr(tasks_module, "_get_mysql_graph_store_for_task", lambda task_id: None)
-
     resolved_store = _graph_store_for_run_root(run_root, task_id="task-fallback-live-layout", task_root=task_root)
     view = resolved_store.export_task_graph_view("task-fallback-live-layout")
 
@@ -1540,45 +1627,60 @@ def test_graph_store_for_run_root_uses_task_output_sqlite_fallback_for_live_epoc
     assert view["summary"]["nodes_total"] == 1
 
 
-def test_load_task_graph_view_rebuilds_mysql_store_each_call(tmp_path: Path, monkeypatch):
-    run_root = tmp_path / "task-root" / "epochs" / "epoch-1" / "run"
+def test_graph_store_for_run_root_prefers_task_run_sqlite_over_output_sqlite(tmp_path: Path):
+    task_root = tmp_path / "task-root"
+    run_root = task_root / "run" / "epochs" / "0001"
     run_root.mkdir(parents=True, exist_ok=True)
-    calls: list[str] = []
+    run_db = task_root / "run" / "vuln-scan.sqlite"
+    output_db = task_root / "output" / "vuln-scan.sqlite"
 
-    class _FakeStore:
-        def __init__(self, label: str):
-            self.label = label
+    run_store = VulnScanStore(run_db)
+    run_store.start_task_graph_run(TaskGraphRunRecord(
+        task_id="task-run-preferred",
+        epoch="1",
+        run_root=str(run_root),
+        root_function="RunRoot",
+    ))
+    run_store.upsert_task_graph_node(TaskGraphNodeRecord(
+        node_id="node-run",
+        task_id="task-run-preferred",
+        epoch="1",
+        func_id="run-func",
+        function_name_resolved="RunRoot",
+        function_name_raw="RunRoot",
+        source_file="src/run.cpp",
+        depth=0,
+        status="done",
+        analysis_status="done",
+    ))
 
-        def export_task_graph_view(self, task_id: str) -> dict[str, object]:
-            return {
-                "task_id": task_id,
-                "epoch": "1",
-                "available": True,
-                "summary": {"nodes_total": 1 if self.label == "first" else 2},
-                "nodes": [{"node_id": self.label}],
-                "edges": [],
-                "tree": None,
-                "sessions": [],
-                "findings": [],
-                "generated_at": None,
-                "store_label": self.label,
-            }
+    output_store = VulnScanStore(output_db)
+    output_store.start_task_graph_run(TaskGraphRunRecord(
+        task_id="task-run-preferred",
+        epoch="1",
+        run_root=str(run_root),
+        root_function="OutputRoot",
+    ))
+    output_store.upsert_task_graph_node(TaskGraphNodeRecord(
+        node_id="node-output",
+        task_id="task-run-preferred",
+        epoch="1",
+        func_id="output-func",
+        function_name_resolved="OutputRoot",
+        function_name_raw="OutputRoot",
+        source_file="src/output.cpp",
+        depth=0,
+        status="done",
+        analysis_status="done",
+    ))
 
-    def _fake_get_mysql_graph_store_for_task(task_id: str):
-        calls.append(task_id)
-        label = "first" if len(calls) == 1 else "second"
-        return _FakeStore(label)
+    resolved_store = _graph_store_for_run_root(run_root, task_id="task-run-preferred", task_root=task_root)
+    view = resolved_store.export_task_graph_view("task-run-preferred")
 
-    monkeypatch.setattr(tasks_module, "_get_mysql_graph_store_for_task", _fake_get_mysql_graph_store_for_task)
-
-    first = _load_task_graph_view(run_root, "task-mysql-refresh", task_root=_task_root_for_test(run_root))
-    second = _load_task_graph_view(run_root, "task-mysql-refresh", task_root=_task_root_for_test(run_root))
-
-    assert calls == ["task-mysql-refresh", "task-mysql-refresh"]
-    assert first["store_label"] == "first"
-    assert second["store_label"] == "second"
-    assert first["summary"]["nodes_total"] == 1
-    assert second["summary"]["nodes_total"] == 2
+    assert isinstance(resolved_store, VulnScanStore)
+    assert resolved_store.db_path == run_db
+    assert view["available"] is True
+    assert view["nodes"][0]["node_id"] == "node-run"
 
 
 def test_project_session_index_from_graph_marks_graph_view_as_authoritative_source(tmp_path: Path):

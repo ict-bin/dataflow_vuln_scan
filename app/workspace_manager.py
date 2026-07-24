@@ -377,11 +377,14 @@ class WorkspaceManager:
             shutil.rmtree(str(tmp_path), ignore_errors=True)
 
     def _periodic_sync_loop(self) -> None:
-        """Background thread: periodically sync sessions and result files to NFS.
+        """Background thread: periodically sync the runtime minimum set to NFS.
 
         Sessions sync directly to output/sessions/ on NFS so runtime and
-        terminal reads use the same path. Other run/ artifacts still sync to
-        run/ for compatibility with existing task result readers.
+        terminal reads use the same path. The only other runtime artifact we
+        keep incrementally visible is run/vuln-scan.sqlite.
+
+        Large runtime trees such as output/, vulnerabilities/ and dataflow-v2/
+        stay local during execution and are published by the terminal archive.
         """
         interval = _sync_interval()
         while not self._stop_event.wait(interval):
@@ -395,6 +398,8 @@ class WorkspaceManager:
             task_root = self._nfs_run_root.parent.parent.parent
             nfs_run_parent = task_root / "run"
             try:
+                nfs_run_parent.mkdir(parents=True, exist_ok=True)
+
                 # Sync sessions/ to output/sessions/ on NFS (authoritative read path)
                 local_sessions = self._local_run_root / "sessions"
                 if local_sessions.exists():
@@ -409,19 +414,6 @@ class WorkspaceManager:
                 if local_db.exists():
                     nfs_db = nfs_run_parent / "vuln-scan.sqlite"
                     _safe_copyfile(str(local_db), str(nfs_db))
-
-                # Sync result.json
-                local_result = self._local_run_root / "result.json"
-                if local_result.exists():
-                    nfs_result = nfs_run_parent / "result.json"
-                    _safe_copyfile(str(local_result), str(nfs_result))
-
-                # Sync output/ directory
-                local_output = self._local_run_root.parent / "output"
-                if local_output.exists():
-                    nfs_output = nfs_run_parent / "output"
-                    nfs_output.mkdir(parents=True, exist_ok=True)
-                    _copy_tree(str(local_output), str(nfs_output))
             except Exception as exc:
                 logger.debug(
                     "workspace_manager: periodic sync failed: %s", exc,
