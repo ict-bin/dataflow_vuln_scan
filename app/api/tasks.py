@@ -2066,19 +2066,22 @@ def _get_mysql_graph_store_for_task(task_id: str):
         return None
 
 def _task_root_from_run_root(run_root: Path) -> Path:
-    parts = run_root.parts
-    if "epochs" in parts:
-        epochs_idx = parts.index("epochs")
+    if run_root.name == "run":
+        if run_root.parent.parent.name == "epochs":
+            return run_root.parent.parent.parent
+        return run_root.parent
+    if run_root.parent.name == "epochs":
+        if run_root.parent.parent.name == "run":
+            return run_root.parent.parent.parent
+        return run_root.parent.parent
+    if "epochs" in run_root.parts:
+        epochs_idx = run_root.parts.index("epochs")
         if epochs_idx > 0:
-            if parts[epochs_idx - 1] == "run":
-                if epochs_idx - 1 > 0:
-                    return Path(*parts[:epochs_idx - 1])
-                return Path(parts[0])
-            return Path(*parts[:epochs_idx])
-    if "run" in parts:
-        run_idx = len(parts) - 1 - parts[::-1].index("run")
+            return Path(*run_root.parts[:epochs_idx])
+    if "run" in run_root.parts:
+        run_idx = len(run_root.parts) - 1 - run_root.parts[::-1].index("run")
         if run_idx > 0:
-            return Path(*parts[:run_idx])
+            return Path(*run_root.parts[:run_idx])
     return run_root.parent
 
 def _graph_store_for_run_root(run_root: Path, task_id: str = ""):
