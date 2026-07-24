@@ -23,7 +23,7 @@ from sqlalchemy.engine import Engine
 
 logger = logging.getLogger("dvs.db.mysql_graph")
 
-_ENGINE: Engine | None = None
+_ENGINES: dict[str, Engine] = {}
 _ENGINE_LOCK = threading.Lock()
 
 _DDL = """
@@ -163,11 +163,11 @@ _POST_DDL_MIGRATIONS = (
 
 
 def _get_engine(mysql_url: str) -> Engine:
-    """获取/缓存 engine (连 secflow 库)。"""
-    global _ENGINE
+    """按最终 mysql_url 获取/缓存 engine，避免不同 source 库串用同一连接。"""
     with _ENGINE_LOCK:
-        if _ENGINE is not None:
-            return _ENGINE
+        cached = _ENGINES.get(mysql_url)
+        if cached is not None:
+            return cached
         eng = create_engine(mysql_url, pool_size=2, max_overflow=3,
                            pool_pre_ping=True, pool_recycle=3600)
         with eng.connect() as conn:
@@ -184,7 +184,7 @@ def _get_engine(mysql_url: str) -> Engine:
                 except Exception as e:
                     logger.debug("DDL post-migration skip: %s", e)
             conn.commit()
-        _ENGINE = eng
+        _ENGINES[mysql_url] = eng
         return eng
 
 

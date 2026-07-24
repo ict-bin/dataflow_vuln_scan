@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import app.db.mysql_graph_store as mysql_graph_store_module
 from app.db.mysql_graph_store import MysqlGraphStore, _POST_DDL_MIGRATIONS
 
 
@@ -172,3 +173,70 @@ def test_get_task_finding_stats_uses_task_scoped_mysql_rows():
     assert "WHERE ar.task_id=:tid" in sql
     assert params == {"tid": "task-a"}
     assert stats == {"total": 4, "reported": 1, "unreported": 3}
+
+
+def test_get_engine_is_scoped_by_final_mysql_url(monkeypatch):
+    created_urls: list[str] = []
+    engines: dict[str, object] = {}
+
+    class _AdminConn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, stmt, params=None):
+            return _FakeResult()
+
+        def commit(self):
+            return None
+
+    class _AdminEngine:
+        def connect(self):
+            return _AdminConn()
+
+        def dispose(self):
+            return None
+
+    class _FinalConn(_AdminConn):
+        pass
+
+    class _FinalEngine:
+        def __init__(self, url: str) -> None:
+            self.url = url
+
+        def connect(self):
+            return _FinalConn()
+
+    def _fake_create_engine(url: str, *args, **kwargs):
+        if url.endswith("/mysql?charset=utf8mb4"):
+            return _AdminEngine()
+        created_urls.append(url)
+        engine = engines.get(url)
+        if engine is None:
+            engine = _FinalEngine(url)
+            engines[url] = engine
+        return engine
+
+    monkeypatch.setattr(mysql_graph_store_module, "_ENGINES", {})
+    monkeypatch.setattr(mysql_graph_store_module, "create_engine", _fake_create_engine)
+
+    store_a = MysqlGraphStore(
+        "mysql+pymysql://root:pwd@mysql:3306/secflow?charset=utf8mb4",
+        project_id="project",
+        source_dir_id="source_a",
+        source_root="/src/a",
+    )
+    store_b = MysqlGraphStore(
+        "mysql+pymysql://root:pwd@mysql:3306/secflow?charset=utf8mb4",
+        project_id="project",
+        source_dir_id="source_b",
+        source_root="/src/b",
+    )
+
+    assert store_a._engine is not store_b._engine
+    assert created_urls == [
+        "mysql+pymysql://root:pwd@mysql:3306/dvs_source_a?charset=utf8mb4",
+        "mysql+pymysql://root:pwd@mysql:3306/dvs_source_b?charset=utf8mb4",
+    ]
