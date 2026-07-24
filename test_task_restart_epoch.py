@@ -6,11 +6,9 @@ from unittest.mock import patch
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.db.models import AppDvsTask, Base
+from app.db.models import AppDvsTask, AppDvsTaskEvent, Base
 from app.service.execution_coordinator import claim_one_runnable_task
 from app.service.task_service import TaskService
-
-
 class TaskRestartEpochTests(unittest.TestCase):
     def setUp(self):
         self.engine = create_engine("sqlite:///:memory:")
@@ -88,6 +86,66 @@ class TaskRestartEpochTests(unittest.TestCase):
                 self.assertEqual("leased", claimed_row.dispatch_status)
             finally:
                 db.close()
+
+    def test_cancel_task_preserves_input_config_for_future_restart(self):
+        db = self.SessionLocal()
+        try:
+            row = AppDvsTask(
+                task_id="dvs_cancel_keep_input",
+                project_id="p1",
+                task_name="cancel-keep-input",
+                input_path="/tmp/input",
+                output_path="/tmp/output",
+                source_root_path="/tmp/source-root",
+                prompt_content="analyze src/demo.c function demo_func",
+                status="running",
+                execution_owner_id=None,
+                execution_epoch=2,
+                control_version=3,
+                dispatch_status="running",
+                task_config_json={
+                    "source_file": "src/demo.c",
+                    "function_name": "demo_func",
+                    "line_hint": "L42",
+                    "keep": "yes",
+                },
+            )
+            db.add(row)
+            db.commit()
+
+            with patch("app.service.task_service._revoke_celery_task", return_value=None), \
+                 patch.object(TaskService, "request_cancel", return_value=False), \
+                 patch.object(TaskService, "_cleanup_worker_runtime", return_value=0):
+                payload = self.service.cancel_task(db, "dvs_cancel_keep_input")
+
+            self.assertEqual("cancelled", payload["status"])
+
+            refreshed = db.query(AppDvsTask).filter_by(task_id="dvs_cancel_keep_input").first()
+            self.assertIsNotNone(refreshed)
+            self.assertEqual("cancelled", refreshed.status)
+            self.assertEqual(
+                {
+                    "source_file": "src/demo.c",
+                    "function_name": "demo_func",
+                    "line_hint": "L42",
+                    "keep": "yes",
+                },
+                refreshed.task_config_json,
+            )
+            self.assertEqual("analyze src/demo.c function demo_func", refreshed.prompt_content)
+            self.assertIsNone(refreshed.result_json)
+            self.assertIsNotNone(refreshed.latest_abnormal_reason_json)
+
+            timeline = self.service.get_task_timeline(db, "dvs_cancel_keep_input")
+            event_types = [str(item.get("event_type") or "") for item in timeline.get("events", [])]
+            self.assertIn("abnormal_reason_recorded", event_types)
+            db_event_types = [
+                str(item.event_type or "")
+                for item in db.query(AppDvsTaskEvent).filter_by(task_id="dvs_cancel_keep_input").all()
+            ]
+            self.assertIn("task_cancelled", db_event_types)
+        finally:
+            db.close()
 
 
 if __name__ == "__main__":

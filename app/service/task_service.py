@@ -1682,12 +1682,10 @@ class TaskService:
         row.execution_heartbeat_at = None
         row.dispatch_status = None
         row.celery_task_id = None
-        # 清空大字段 (避免累积导致 sort memory 不足)
+        # 清空运行结果大字段，保留任务输入定义以支持后续 restart/resume。
         row.stages_json = None
         row.result_json = None
         row.latest_abnormal_reason_json = None
-        row.task_config_json = None
-        row.prompt_content = ""
         reason, changed = _sync_task_abnormal_reason(row)
         _record_abnormal_reason(row, reason, changed=changed)
         _record_abnormal_reason_timeline(db, row, reason, changed=changed)
