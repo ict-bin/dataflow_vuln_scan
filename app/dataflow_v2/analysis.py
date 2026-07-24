@@ -1103,9 +1103,17 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
         if self._is_task_id_rejection(res):
             logger.warning("v2 intake parent task rejected for %s, retry with self task_id: %s",
                            finding_id, str(res.get("error") or "")[:300])
-            self.on_event("vuln_intake_fallback_self", finding_id=finding_id,
-                          function=rec.function_name,
-                          parent_error=str(res.get("error") or "")[:300])
+            self.on_event(
+                "vuln_intake_fallback_self",
+                finding_id=finding_id,
+                function=rec.function_name,
+                parent_error=str(res.get("error") or "")[:300],
+                level="warning",
+                message=(
+                    f"漏洞上报父任务被拒，回退当前任务重试: "
+                    f"finding={finding_id}, function={rec.function_name}"
+                ),
+            )
             res = self._do_intake(finding_id, rec, fdir, use_self=True)
             if str(res.get("status") or "") == "reported":
                 self._record_intake_result(finding_id, rec, res)
@@ -1159,15 +1167,36 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                 logger.debug("v2 update_finding_report_status failed for %s", finding_id, exc_info=True)
         if status == "reported":
             logger.info("v2 intake reported finding %s (case_id=%s)", finding_id, case_id)
-            self.on_event("vuln_intake_reported", finding_id=finding_id,
-                          function=rec.function_name, case_id=case_id,
-                          duplicate=bool(res.get("duplicate")))
+            self.on_event(
+                "vuln_intake_reported",
+                finding_id=finding_id,
+                function=rec.function_name,
+                case_id=case_id,
+                duplicate=bool(res.get("duplicate")),
+                report_url=str(res.get("url") or ""),
+                level="info",
+                message=(
+                    f"漏洞上报成功: finding={finding_id}, function={rec.function_name}, "
+                    f"case_id={case_id or '-'}"
+                ),
+            )
         else:
             err = str(res.get("error") or status or "")
             logger.warning("v2 intake report failed for %s: status=%s error=%s url=%s",
                            finding_id, status, err, res.get("url", ""))
-            self.on_event("vuln_intake_report_failed", finding_id=finding_id,
-                          function=rec.function_name, status=status, error=err)
+            self.on_event(
+                "vuln_intake_report_failed",
+                finding_id=finding_id,
+                function=rec.function_name,
+                status=status,
+                error=err,
+                report_url=str(res.get("url") or ""),
+                level="error",
+                message=(
+                    f"漏洞上报失败: finding={finding_id}, function={rec.function_name}, "
+                    f"status={status or '-'}, error={err or '-'}"
+                ),
+            )
 
     def _format_taint_context(self, func: FunctionRecord, tp: TaintParamInfo,
                               ctx: PathContext, taints: list[TaintRecord],

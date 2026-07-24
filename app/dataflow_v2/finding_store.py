@@ -279,10 +279,15 @@ def _record_intake_result(*, graph_store, run_id, task_id, finding_id, rec, res,
             logger.debug("finding_store update_finding_report_status failed for %s", finding_id, exc_info=True)
     try:
         if on_event:
+            duplicate = bool(res.get("duplicate"))
+            report_url = str(res.get("url") or "")
             message = (
-                f"漏洞已上报: {finding_id}"
+                f"漏洞上报成功: finding={finding_id}, function={rec.function_name}, case_id={case_id or '-'}"
                 if status == "reported"
-                else f"漏洞上报未成功: {finding_id}"
+                else (
+                    f"漏洞上报失败: finding={finding_id}, function={rec.function_name}, "
+                    f"status={status or '-'}, error={str(res.get('error') or '-')}"
+                )
             )
             on_event(
                 "vuln_intake_result",
@@ -290,12 +295,14 @@ def _record_intake_result(*, graph_store, run_id, task_id, finding_id, rec, res,
                 function=rec.function_name,
                 status=status,
                 case_id=case_id,
-                level="info" if status == "reported" else "warning",
+                duplicate=duplicate,
+                report_url=report_url,
+                level="info" if status == "reported" else "error",
                 message=message,
                 error=str(res.get("error") or ""),
             )
     except Exception:
-        pass
+        logger.warning("finding_store emit vuln_intake_result failed for %s", finding_id, exc_info=True)
 
 
 def _sync_vuln_count_mysql(
