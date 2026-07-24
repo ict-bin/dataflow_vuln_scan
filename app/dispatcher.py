@@ -101,7 +101,7 @@ class Dispatcher:
             try:
                 next(db_gen)
             except StopIteration:
-                pass
+                logger.debug("dispatcher: startup_reset db generator closed")
 
     # ── 泵: pending(celery_task_id IS NULL) → 发布到 Celery ──
     def _pump_loop(self) -> None:
@@ -146,7 +146,7 @@ class Dispatcher:
             try:
                 next(db_gen)
             except StopIteration:
-                pass
+                logger.debug("dispatcher: pump_once db generator closed")
         return published
 
     # ── stale 扫描: DB running 但无活 worker 在跑 → 重置 pending 重排 ──
@@ -189,7 +189,7 @@ class Dispatcher:
                     try:
                         celery_app.control.revoke(cid, terminate=True, signal="SIGKILL")
                     except Exception:
-                        pass
+                        logger.warning("dispatcher: revoke failed celery_id=%s", cid, exc_info=True)
                 # 清理该任务的所有关联数据 (NFS run/+output/, MySQL 任务表, MySQL graph store)
                 try:
                     cleanup_task_data(row, reason="stale_reset")
@@ -210,7 +210,7 @@ class Dispatcher:
             try:
                 next(db_gen)
             except StopIteration:
-                pass
+                logger.debug("dispatcher: stale_once db generator closed")
         return reset
 
     # ── debugger 调度: 扫终态失败任务 → 发给 debugger (scheduler 职责) ──
@@ -278,7 +278,7 @@ class Dispatcher:
             try:
                 next(db_gen)
             except StopIteration:
-                pass
+                logger.debug("dispatcher: debug_dispatch db generator closed")
         return dispatched
 
 

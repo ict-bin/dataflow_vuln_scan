@@ -51,7 +51,7 @@ class DagflowOrchestrator:
                 self.on_event("v2_dagflow_tracking_done", task_id=self.task_id,
                               stats=self._wq.stats, analyzed=len(self.store.list_analyzed()))
             except Exception:
-                pass
+                logger.warning("dagflow tracking done event emit failed task_id=%s", self.task_id, exc_info=True)
 
     def _seed(self, func, taint: str) -> None:
         self._wq.put(WorkItem(kind="callee", target_func=func.func_id,
@@ -90,7 +90,7 @@ class DagflowOrchestrator:
                 self.on_event("trace_start", function=func.name, source_file=getattr(func, "file", ""),
                               depth=depth, max_depth=0, task_id=self.task_id)
             except Exception:
-                pass
+                logger.warning("trace_start event emit failed func=%s task_id=%s", func.name, self.task_id, exc_info=True)
         try:
             logger.info("[dagflow-orch] analyze START func=%s taint=%s depth=%d", func.name, taint, depth)
             dag = self.analyze_fn(func, taint, depth)
@@ -107,7 +107,13 @@ class DagflowOrchestrator:
                               nodes=len(dag.nodes), self_contained=dag.self_contained,
                               task_id=self.task_id)
             except Exception:
-                pass
+                logger.warning(
+                    "dagflow dag stored event emit failed func=%s taint=%s task_id=%s",
+                    func.name,
+                    taint,
+                    self.task_id,
+                    exc_info=True,
+                )
         return dag, True, func.name
 
     def _emit_followups(self, dag: TaintDAG, caller_func_id: str = "", depth: int = 0,
@@ -133,7 +139,12 @@ class DagflowOrchestrator:
             try:
                 self.on_event("trace_callees", function=func_name or dag.func_id, callees=callees, depth=depth, task_id=self.task_id)
             except Exception:
-                pass
+                logger.warning(
+                    "trace_callees event emit failed func=%s task_id=%s",
+                    func_name or dag.func_id,
+                    self.task_id,
+                    exc_info=True,
+                )
 
     def _emit_callee(self, dag, node, e, depth: int = 0) -> None:
         """callee 边 -> 每个被污形参拆一项 (D-2)。taint_sig=callee 形参名归一 (D-1)。
@@ -218,7 +229,12 @@ class DagflowOrchestrator:
                     self.on_event("v2_dagflow_track_pending", kind=item.kind,
                                   origin=item.origin_func, edge=item.origin_edge, task_id=self.task_id)
                 except Exception:
-                    pass
+                    logger.warning(
+                        "track_pending event emit failed kind=%s task_id=%s",
+                        item.kind,
+                        self.task_id,
+                        exc_info=True,
+                    )
             return
         # origin_taint: 从 item 无直接给 (item 只有 origin_func/node/edge); 需查 origin DAG 的 taint_signature
         origin_taint = self._origin_taint(item.origin_func, item.origin_node)

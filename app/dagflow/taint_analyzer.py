@@ -152,7 +152,13 @@ class TaintAnalyzer:
                               nodes=len(dag.nodes), self_contained=dag.self_contained,
                               task_id=self.task_id)
             except Exception:
-                pass
+                logger.warning(
+                    "dagflow taint_done event emit failed func=%s taint=%s task_id=%s",
+                    func.name,
+                    taint_sig,
+                    self.task_id,
+                    exc_info=True,
+                )
         return dag, sp
 
 

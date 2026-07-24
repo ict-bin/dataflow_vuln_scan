@@ -238,7 +238,12 @@ class DataflowStore:
                 try:
                     self._exec(db, f"ALTER TABLE propagations ADD COLUMN {c} TEXT DEFAULT ''")
                 except sqlite3.OperationalError:
-                    pass  # 并发/已存在, 忽略
+                    logger.warning(
+                        "[V2-store] add column skipped db=%s column=%s",
+                        db,
+                        c,
+                        exc_info=True,
+                    )
 
     # ── 通用 ────────────────────────────────────────────────────────────────
     def close(self) -> None:
@@ -246,7 +251,7 @@ class DataflowStore:
             try:
                 c.close()
             except Exception:
-                pass
+                logger.warning("[V2-store] close connection failed", exc_info=True)
 
     def _exec(self, db: str, sql: str, params: tuple = ()) -> sqlite3.Cursor:
         with self._locks[db]:
@@ -273,10 +278,12 @@ class DataflowStore:
                 description=excluded.description
         """, r)
         if self._mysql:
-            try: self._mysql.upsert_function(func_id=rec.func_id, file=rec.file, name=rec.name,
-                signature=rec.signature, start_line=rec.start_line, end_line=rec.end_line,
-                func_hash=rec.func_hash or "", description=rec.description or "")
-            except Exception: pass
+            try:
+                self._mysql.upsert_function(func_id=rec.func_id, file=rec.file, name=rec.name,
+                    signature=rec.signature, start_line=rec.start_line, end_line=rec.end_line,
+                    func_hash=rec.func_hash or "", description=rec.description or "")
+            except Exception:
+                logger.warning("mysql upsert_function failed: func_id=%s", rec.func_id, exc_info=True)
 
     def get_function(self, func_id: str) -> FunctionRecord | None:
         if self._mysql:
@@ -385,8 +392,10 @@ class DataflowStore:
                    "INSERT OR IGNORE INTO include_index (header, file) VALUES (?, ?)",
                    (header, file))
         if self._mysql:
-            try: self._mysql.add_include(header, file)
-            except Exception: pass
+            try:
+                self._mysql.add_include(header, file)
+            except Exception:
+                logger.warning("mysql add_include failed: header=%s file=%s", header, file, exc_info=True)
 
     def get_files_including(self, header: str) -> list[str]:
         """查找所有传递性 include 了指定 header 的 .c/.cpp 文件。"""
@@ -403,8 +412,10 @@ class DataflowStore:
                    "INSERT OR REPLACE INTO class_hierarchy (class_name, bases, file) VALUES (?, ?, ?)",
                    (class_name, json.dumps(bases), file))
         if self._mysql:
-            try: self._mysql.add_class(class_name, json.dumps(bases), file)
-            except Exception: pass
+            try:
+                self._mysql.add_class(class_name, json.dumps(bases), file)
+            except Exception:
+                logger.warning("mysql add_class failed: class_name=%s", class_name, exc_info=True)
 
     def add_class_member(self, class_name: str, member_name: str,
                          member_type: str = "", file: str = "") -> None:
@@ -412,8 +423,15 @@ class DataflowStore:
                    "INSERT OR IGNORE INTO class_members (class_name, member_name, member_type, file) VALUES (?, ?, ?, ?)",
                    (class_name, member_name, member_type, file))
         if self._mysql:
-            try: self._mysql.add_class_member(class_name, member_name, member_type, file)
-            except Exception: pass
+            try:
+                self._mysql.add_class_member(class_name, member_name, member_type, file)
+            except Exception:
+                logger.warning(
+                    "mysql add_class_member failed: class_name=%s member_name=%s",
+                    class_name,
+                    member_name,
+                    exc_info=True,
+                )
 
     def get_bases(self, class_name: str) -> list[str]:
         import json

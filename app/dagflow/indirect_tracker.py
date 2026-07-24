@@ -57,7 +57,12 @@ def resolve(store: DagflowStore, *, origin_func: str, origin_taint: str,
                 on_event("v2_dagflow_indirect_resolved", origin=origin_func[:10],
                           node=origin_node, expr=e.sink_ref, resolved=resolved)
             except Exception:
-                pass
+                logger.warning(
+                    "indirect resolved event emit failed origin=%s node=%s",
+                    origin_func,
+                    origin_node,
+                    exc_info=True,
+                )
     if n_resolved:
         store.save_dag(dag)  # 回填 sink_ref
     return n_resolved

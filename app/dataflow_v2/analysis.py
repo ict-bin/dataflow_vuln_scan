@@ -931,8 +931,8 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
             f"# 阶段：单函数污点传播分析 Fork\n\n"
             f"**重要**: 本 session 继承了父函数的分析历史。你只分析 **当前函数体** "
             f"(行 {func.start_line}-{func.end_line}) 内的传播，不要重述父函数已报告的传播。\n\n"
-            f"目标函数: `{func.file}::{func.name}` (行 {func.start_line}-{func.end_line})\n"
-            f"源码绝对根目录: `{self.source_root}`。`{func.file}` 是相对该根目录的源码路径；如果需要使用 read/find 读取源码，请基于这个绝对根目录定位文件，不要基于当前工作目录拼接路径。\n"
+            f"目标函数: `{func.file}::{func.name}` (行 {func.start_line}-{func.end_line})\n\n"
+            f"源码绝对根目录: `{self.source_root}`。`{func.file}` 是相对该根目录的源码路径；如果需要使用 read/find 读取源码，请基于这个绝对根目录定位文件，不要基于当前工作目录拼接路径。\n\n"
             f"攻击面复核要求: 无论上游是否已传入污点参数，都要根据函数的功能，传递的参数值的含义，先判断当前函数里哪些输入/变量真实属于外部攻击者可控制的内容,以及攻击者可控的内容能够造成安全危害；"
             f"对攻击者不可控的常量、编译期固定值、静态配置、进程内部状态、纯内部派生值以及其他无法控制的内容，以及不太可能造成安全危害的污点,如简单的类型或者已经经过足够多校验的污点，一律不要作为污点继续跟踪，也不要输出到最终结果，可根据经验进行判断是否属于攻击者可控内容。\n\n"
             f"如果目标函数和传入的污点，不太可能造成安全问题，或者目标函数功能是没有危险的，也不需要跟踪，也不要输出到最终结果,只有值得接下来分析的污点和目标函数，才需要输出到最终结果中。\n\n"
@@ -1039,7 +1039,7 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
         from ..parsers import _extract_json_object as _ej
         parsed = _ej(output.output, "findings") or {"findings": []}
         node = f"{func.file}::{func.name}"
-        n = 0
+        persisted_count = 0
         for idx, item in enumerate(parsed.get("findings") or []):
             if not isinstance(item, dict):
                 continue
@@ -1054,16 +1054,26 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                 cfg_parent_task_type=self.cfg.parent_task_type,
                 cfg_task_origin_type=self.cfg.task_origin_type, on_event=self.on_event)
             if fid:
-                n += 1
+                persisted_count += 1
         # 实时同步任务快照计数: authoritative source = vuln-scan.sqlite
         if self._graph_store_ready():
             try:
                 refresh_task_vuln_snapshot_by_task_id(self.task_id, prefer_live=True)
             except Exception:
                 pass
+            authoritative_count = persisted_count
+            try:
+                with self.graph_store.connect() as conn:
+                    row = conn.execute(
+                        "SELECT COUNT(*) FROM vulnerability_findings WHERE node_id=?",
+                        (node,),
+                    ).fetchone()
+                authoritative_count = int(row[0] or 0) if row else 0
+            except Exception:
+                authoritative_count = persisted_count
             self.graph_store.update_task_graph_node(
                 node_id,
-                findings_count=n,
+                findings_count=authoritative_count,
                 primary_session_relpath=session_relpath,
             )
         session_status = "cancelled" if self._cancel_requested() else "done"
@@ -1074,7 +1084,7 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                 status=session_status,
                 ended_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"),
             )
-        return n
+        return persisted_count
 
     def _report_finding_to_intake(self, finding_id: str, rec: VulnFindingRecord,
                                   fdir: Path) -> None:

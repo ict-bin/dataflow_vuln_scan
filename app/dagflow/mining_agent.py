@@ -121,7 +121,13 @@ class MiningAgent:
                 self.on_event("v2_dagflow_mined", function=func.name, taint=taint_sig,
                               findings=len(findings), task_id=self.task_id)
             except Exception:
-                pass
+                logger.warning(
+                    "dagflow mined event emit failed func=%s taint=%s task_id=%s",
+                    func.name,
+                    taint_sig,
+                    self.task_id,
+                    exc_info=True,
+                )
         return findings
 
     def _build_prompt(self, func, taint_sig, chain, source) -> str:

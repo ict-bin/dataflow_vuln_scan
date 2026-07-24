@@ -140,7 +140,12 @@ class ReaderFinder:
                 self.on_event("v2_dagflow_readers_found", func=escape_info.get("func", "")[:40],
                               readers=out, taints=escape_info.get("taints", []), task_id=self.task_id)
             except Exception:
-                pass
+                logger.warning(
+                    "dagflow readers_found event emit failed func=%s task_id=%s",
+                    escape_info.get("func", "")[:40],
+                    self.task_id,
+                    exc_info=True,
+                )
         # 记录 track 会话
         if self.graph_recorder:
             self.graph_recorder.record_session(

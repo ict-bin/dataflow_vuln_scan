@@ -276,7 +276,11 @@ class WorkspaceManager:
                                     str(_path),
                                 )
             except Exception:
-                pass
+                logger.warning(
+                    "workspace_manager: failed to clean leftover local workspaces task_id=%s",
+                    self._task_id,
+                    exc_info=True,
+                )
 
     @staticmethod
     def cleanup_temp_for_task(task_id: str) -> None:
@@ -294,7 +298,11 @@ class WorkspaceManager:
                     try:
                         path.unlink()
                     except OSError:
-                        pass
+                        logger.warning(
+                            "workspace_manager: failed to unlink stale temp symlink path=%s",
+                            str(path),
+                            exc_info=True,
+                        )
 
     @staticmethod
     def resolve_broken_symlinks(base_path: str | Path) -> int:
@@ -316,7 +324,11 @@ class WorkspaceManager:
                     entry.unlink()
                     fixed += 1
                 except OSError:
-                    pass
+                    logger.warning(
+                        "workspace_manager: failed to remove broken symlink path=%s",
+                        str(entry),
+                        exc_info=True,
+                    )
             elif entry.is_symlink():
                 # Valid symlink pointing to local temp — clean it up
                 try:
@@ -329,7 +341,11 @@ class WorkspaceManager:
                         entry.unlink()
                         fixed += 1
                 except (OSError, RuntimeError):
-                    pass
+                    logger.warning(
+                        "workspace_manager: failed to inspect symlink path=%s",
+                        str(entry),
+                        exc_info=True,
+                    )
         return fixed
 
     # ── internal ─────────────────────────────────────────────────────────────
@@ -415,8 +431,9 @@ class WorkspaceManager:
                     nfs_db = nfs_run_parent / "vuln-scan.sqlite"
                     _safe_copyfile(str(local_db), str(nfs_db))
             except Exception as exc:
-                logger.debug(
+                logger.warning(
                     "workspace_manager: periodic sync failed: %s", exc,
+                    exc_info=True,
                 )
 
     def _sync_sessions_incremental(self, local_sessions: Path, nfs_sessions: Path) -> None:
@@ -459,7 +476,11 @@ def _move_contents(src: Path, dst: Path) -> None:
                 try:
                     item.unlink()
                 except OSError:
-                    pass
+                    logger.warning(
+                        "workspace_manager: failed to remove source after copy path=%s",
+                        str(item),
+                        exc_info=True,
+                    )
 
 
 def _copy_tree(src: str, dst: str) -> None:

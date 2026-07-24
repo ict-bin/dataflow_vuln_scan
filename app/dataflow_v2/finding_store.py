@@ -21,6 +21,34 @@ from ..service.task_vuln_stats import refresh_task_vuln_snapshot_by_task_id
 logger = logging.getLogger("dvs.dataflow_v2.finding_store")
 
 
+def _emit_finding_event(
+    on_event: Callable[..., None] | None,
+    event_type: str,
+    *,
+    level: str = "info",
+    message: str,
+    finding_id: str,
+    function_name: str,
+    task_id: str,
+    extra: dict[str, Any] | None = None,
+) -> None:
+    if on_event is None:
+        return
+    payload = {
+        "level": level,
+        "message": message,
+        "finding_id": finding_id,
+        "function": function_name,
+        "task_id": task_id,
+    }
+    if isinstance(extra, dict):
+        payload.update(extra)
+    try:
+        on_event(event_type, **payload)
+    except Exception:
+        logger.debug("emit finding event failed: %s", event_type, exc_info=True)
+
+
 def persist_finding(
     *,
     graph_store: VulnScanStore,
@@ -87,21 +115,28 @@ def persist_finding(
         code_explanation=str(item.get("code_explanation") or ""),
         fix_suggestion=str(item.get("fix_suggestion") or ""))
 
+    data = {
+        "finding_id": finding_id,
+        "run_id": run_id,
+        "node_id": node,
+        "source_file": fsrc,
+        "function_name": ffn,
+        "line": fline,
+        "vuln_type": str(item.get("vuln_type") or "unknown"),
+        "severity": str(item.get("severity") or "unknown"),
+        "title": str(item.get("title") or finding_id),
+        "summary": str(item.get("summary") or ""),
+        "evidence": str(item.get("evidence") or ""),
+        "exploitability": expl_str,
+        "confidence": float(item.get("confidence") or 0),
+        "output_dir": str(fdir),
+        "code_snippet": str(item.get("code_snippet") or ""),
+        "code_explanation": str(item.get("code_explanation") or ""),
+        "fix_suggestion": str(item.get("fix_suggestion") or ""),
+    }
+
     # FK 满足 + INSERT (同一 connection, 避免 FK 跨连接不可见)
     try:
-        data = {'finding_id': finding_id, 'run_id': run_id, 'task_id': task_id, 'node_id': node,
-                'source_file': fsrc, 'function_name': ffn, 'line': fline,
-                'vuln_type': str(item.get('vuln_type') or 'unknown'),
-                'severity': str(item.get('severity') or 'unknown'),
-                'title': str(item.get('title') or finding_id),
-                'summary': str(item.get('summary') or ''),
-                'evidence': str(item.get('evidence') or ''),
-                'exploitability': expl_str,
-                'confidence': float(item.get('confidence') or 0),
-                'output_dir': str(fdir),
-                'code_snippet': str(item.get('code_snippet') or ''),
-                'code_explanation': str(item.get('code_explanation') or ''),
-                'fix_suggestion': str(item.get('fix_suggestion') or '')}
         cols = list(data)
         with graph_store.connect() as conn:
             conn.execute("INSERT OR IGNORE INTO analysis_runs (run_id,task_id,root_file,root_function,source_root,status,started_at) VALUES (?,?,?,?,?,?,?)",
@@ -110,16 +145,53 @@ def persist_finding(
                          (node, fsrc, ffn, "vuln_site", fline, str(fline), "", func_description or "", "", 0, "", run_id))
             conn.execute(f"INSERT OR REPLACE INTO vulnerability_findings ({','.join(cols)}) VALUES ({','.join('?' for _ in cols)})",
                          [data[c] for c in cols])
-    except Exception as _fe:
-        logger.warning("persist_finding FK+insert failed: %s", _fe, exc_info=True)
+    except Exception as exc:
+        logger.warning("persist_finding authoritative sqlite insert failed: %s", exc, exc_info=True)
+        _emit_finding_event(
+            on_event,
+            "vuln_finding_persist_failed",
+            level="error",
+            message=f"漏洞持久化失败: {finding_id}",
+            finding_id=finding_id,
+            function_name=ffn,
+            task_id=task_id,
+            extra={
+                "error": str(exc),
+                "stage": "authoritative_sqlite",
+                "line": fline,
+                "source_file": fsrc,
+            },
+        )
+        return None
+
+    _emit_finding_event(
+        on_event,
+        "vuln_finding_persisted",
+        level="info",
+        message=f"漏洞已写入 authoritative sqlite: {finding_id}",
+        finding_id=finding_id,
+        function_name=ffn,
+        task_id=task_id,
+        extra={"line": fline, "source_file": fsrc},
+    )
 
     # MySQL 双写 finding 行: graph-view 优先读 MySQL dvs_vuln_findings, 缺此则前端漏洞图谱 0 findings
     _mysql = getattr(graph_store, "_mysql", None)
     if _mysql is not None:
         try:
             _mysql.insert_finding(**data)
-        except Exception as _me:
-            logger.debug("persist_finding mysql insert_finding failed: %s", _me, exc_info=True)
+        except Exception as exc:
+            logger.warning("persist_finding mysql insert_finding failed: %s", exc, exc_info=True)
+            _emit_finding_event(
+                on_event,
+                "vuln_finding_mirror_failed",
+                level="warning",
+                message=f"漏洞镜像写入 MySQL 失败: {finding_id}",
+                finding_id=finding_id,
+                function_name=ffn,
+                task_id=task_id,
+                extra={"error": str(exc), "stage": "mysql_mirror"},
+            )
 
     # intake 上报 (退避: 父任务 → 自身; 失败不影响)
     _intake_report(run_id, task_id, source_root, fdir, rec, finding_id,
@@ -128,7 +200,7 @@ def persist_finding(
                    graph_store=graph_store)
 
     # MySQL 漏洞计数同步
-    _sync_vuln_count_mysql(graph_store, run_id, task_id)
+    _sync_vuln_count_mysql(graph_store, run_id, task_id, finding_id=finding_id, function_name=ffn, on_event=on_event)
     return finding_id
 
 
@@ -148,9 +220,19 @@ def _intake_report(run_id, task_id, source_root, fdir, rec, finding_id,
             taint_path_report_path=str(fdir / "taint-path-report.md"),
             use_self_task_id=False)
         if str(res.get("status") or "") == "reported":
-            _record_intake_result(graph_store=graph_store, run_id=run_id, finding_id=finding_id, rec=rec, res=res, on_event=on_event)
+            _record_intake_result(graph_store=graph_store, run_id=run_id, task_id=task_id, finding_id=finding_id, rec=rec, res=res, on_event=on_event)
             return
         if _is_task_id_rejection(res):
+            _emit_finding_event(
+                on_event,
+                "vuln_intake_fallback_self",
+                level="warning",
+                message=f"漏洞上报主任务被拒，回退自任务重试: {finding_id}",
+                finding_id=finding_id,
+                function_name=rec.function_name,
+                task_id=task_id,
+                extra={"stage": "intake_fallback_self", "error": str(res.get('error') or '')},
+            )
             res2 = report_finding_to_intake(
                 project_id=cfg_project_id, task_id=task_id,
                 task_name=cfg_task_name, parent_task_name=cfg_parent_task_name,
@@ -159,11 +241,21 @@ def _intake_report(run_id, task_id, source_root, fdir, rec, finding_id,
                 report_path=str(fdir / "vulnerability-report.md"),
                 taint_path_report_path=str(fdir / "taint-path-report.md"),
                 use_self_task_id=True)
-            _record_intake_result(graph_store=graph_store, run_id=run_id, finding_id=finding_id, rec=rec, res=res2, on_event=on_event)
+            _record_intake_result(graph_store=graph_store, run_id=run_id, task_id=task_id, finding_id=finding_id, rec=rec, res=res2, on_event=on_event)
             return
-        _record_intake_result(graph_store=graph_store, run_id=run_id, finding_id=finding_id, rec=rec, res=res, on_event=on_event)
+        _record_intake_result(graph_store=graph_store, run_id=run_id, task_id=task_id, finding_id=finding_id, rec=rec, res=res, on_event=on_event)
     except Exception as exc:
         logger.warning("persist_finding intake failed for %s: %s", finding_id, exc, exc_info=True)
+        _emit_finding_event(
+            on_event,
+            "vuln_intake_report_failed",
+            level="warning",
+            message=f"漏洞上报失败: {finding_id}",
+            finding_id=finding_id,
+            function_name=rec.function_name,
+            task_id=task_id,
+            extra={"error": str(exc), "stage": "intake_exception"},
+        )
 
 
 def _is_task_id_rejection(res: dict) -> bool:
@@ -175,10 +267,9 @@ def _is_task_id_rejection(res: dict) -> bool:
         or ("not exist" in low) or ("not found" in low and "task" in low)
 
 
-def _record_intake_result(*, graph_store, run_id, finding_id, rec, res, on_event):
+def _record_intake_result(*, graph_store, run_id, task_id, finding_id, rec, res, on_event):
     status = str(res.get("status") or "")
     case_id = str(res.get("case_id") or res.get("report_id") or "")
-    task_id = str(run_id or "")
     # 回写 report_status 到 vuln-scan.sqlite (findings 表)
     if graph_store is not None:
         try:
@@ -188,14 +279,45 @@ def _record_intake_result(*, graph_store, run_id, finding_id, rec, res, on_event
             logger.debug("finding_store update_finding_report_status failed for %s", finding_id, exc_info=True)
     try:
         if on_event:
-            on_event("vuln_intake_result", finding_id=finding_id,
-                     function=rec.function_name, status=status, case_id=case_id)
+            message = (
+                f"漏洞已上报: {finding_id}"
+                if status == "reported"
+                else f"漏洞上报未成功: {finding_id}"
+            )
+            on_event(
+                "vuln_intake_result",
+                finding_id=finding_id,
+                function=rec.function_name,
+                status=status,
+                case_id=case_id,
+                level="info" if status == "reported" else "warning",
+                message=message,
+                error=str(res.get("error") or ""),
+            )
     except Exception:
         pass
 
 
-def _sync_vuln_count_mysql(graph_store: VulnScanStore, run_id: str, task_id: str):
+def _sync_vuln_count_mysql(
+    graph_store: VulnScanStore,
+    run_id: str,
+    task_id: str,
+    *,
+    finding_id: str,
+    function_name: str,
+    on_event: Callable[..., None] | None = None,
+):
     try:
         refresh_task_vuln_snapshot_by_task_id(task_id, prefer_live=True)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("refresh_task_vuln_snapshot_by_task_id failed: %s", exc, exc_info=True)
+        _emit_finding_event(
+            on_event,
+            "vuln_snapshot_sync_failed",
+            level="warning",
+            message=f"漏洞任务快照同步失败: {finding_id}",
+            finding_id=finding_id,
+            function_name=function_name,
+            task_id=task_id,
+            extra={"error": str(exc), "run_id": run_id, "stage": "task_snapshot_sync"},
+        )

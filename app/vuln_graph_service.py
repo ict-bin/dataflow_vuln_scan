@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
 from .vuln_store import VulnScanStore
+
+logger = logging.getLogger("dvs.vuln_graph_service")
 
 
 def load_vuln_scan_graph(run_root: str | Path) -> dict[str, Any]:
@@ -234,7 +237,11 @@ def build_trace_tree(graph: dict[str, Any]) -> dict[str, Any] | None:
         try:
             tainted_params = json.loads(fw.get("tainted_params_json", "[]"))
         except Exception:
-            pass
+            logger.warning(
+                "vuln_graph_service: failed to parse tainted_params_json followup_id=%s",
+                fid,
+                exc_info=True,
+            )
 
         matched_run = runs_by_id.get(fid) or runs_by_func.get((callee_file, callee_func))
 

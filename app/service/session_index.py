@@ -1,10 +1,13 @@
 from __future__ import annotations
+import logging
 from sqlalchemy import func
 
 import json
 import re
 import time as _time
 from pathlib import Path
+
+logger = logging.getLogger("dvs.session_index")
 
 
 # 设计②: 错误会话 (-error{N} 后缀) 仅供排障, 前端不展示
@@ -43,6 +46,11 @@ def _parse_iso_timestamp(value: object) -> float | None:
 
         return datetime.fromisoformat(raw).timestamp()
     except Exception:
+        logger.warning(
+            "session_index: failed to parse iso timestamp value=%r",
+            value,
+            exc_info=True,
+        )
         return None
 
 
@@ -227,6 +235,12 @@ def _parse_session_file(path: Path) -> tuple[dict, list[dict], list[str], int]:
         try:
             obj = json.loads(line)
         except Exception:
+            logger.warning(
+                "session_index: failed to parse jsonl line file=%s line=%s",
+                str(path),
+                index,
+                exc_info=True,
+            )
             warnings.append(f"第 {index} 行 JSON 解析失败")
             events.append({"type": "raw", "line": index, "event_index": index, "raw_line": line[:200], "summary": line[:200]})
             continue
@@ -342,6 +356,11 @@ def build_session_catalog(*, task_id: str, row_status: str, sessions_root: Path,
             nodes.append(node)
             node_map[relative_path] = node
         except Exception as exc:
+            logger.warning(
+                "session_index: failed to build session node file=%s",
+                str(session_file),
+                exc_info=True,
+            )
             warnings.append(f"{session_file.name} 解析失败: {exc}")
 
     edges: list[dict] = []

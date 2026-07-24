@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import logging
+
 from sqlalchemy.orm.attributes import flag_modified
 
 from app.db import get_db
 from app.db.models import AppDvsTask
 from .task_paths import _task_root, authoritative_task_vuln_stats
+
+logger = logging.getLogger("dvs.task_vuln_stats")
 
 
 def sync_task_vuln_snapshot_row(row: AppDvsTask, *, prefer_live: bool = True) -> bool:
@@ -28,7 +32,11 @@ def sync_task_vuln_snapshot_row(row: AppDvsTask, *, prefer_live: bool = True) ->
             flag_modified(row, "vuln_reported_count")
             flag_modified(row, "vuln_unreported_count")
         except Exception:
-            pass
+            logger.warning(
+                "sync_task_vuln_snapshot_row: flag_modified failed task_id=%s",
+                task_id or getattr(row, "id", None),
+                exc_info=True,
+            )
     return changed
 
 

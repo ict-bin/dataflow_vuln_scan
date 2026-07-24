@@ -314,7 +314,7 @@ def report_finding_to_intake(
             if hasattr(exc, 'response') and exc.response is not None:
                 detail += " | body: " + str(exc.response.text)[:500]
         except Exception:
-            pass
+            logger.warning("vuln_intake_reporter: failed to extract response body", exc_info=True)
         return {
             "status": "failed",
             "enabled": True,

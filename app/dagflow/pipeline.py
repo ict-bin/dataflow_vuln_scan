@@ -94,7 +94,7 @@ class FuncIndex:
                         logger.info("[ondemand] %s found in MySQL after extract", name)
                         return recs[0]
                 except Exception:
-                    pass
+                    logger.warning("[ondemand] mysql read_functions failed name=%s", name, exc_info=True)
             # SQLite 回退
             conn = sqlite3.connect(str(self.db))
             conn.row_factory = sqlite3.Row
@@ -106,7 +106,7 @@ class FuncIndex:
                     logger.info("[ondemand] %s found in SQLite after extract", name)
                     return self._row_to_rec(rows[0])
             except sqlite3.Error:
-                pass
+                logger.warning("[ondemand] sqlite lookup failed name=%s", name, exc_info=True)
             finally:
                 conn.close()
         logger.info("[ondemand] %s not found after extracting %d files", name, len(hits))
@@ -147,7 +147,7 @@ class DagflowPipeline:
         try:
             self.on_event(event_type, **kw)
         except Exception:
-            pass
+            logger.warning("dagflow pipeline emit failed event_type=%s task_id=%s", event_type, self.task_id, exc_info=True)
 
     def _create_mysql_graph_store(self):
         """创建 MysqlGraphStore (task_graph 双写, 失败返回 None)。"""
@@ -365,8 +365,10 @@ class DagflowPipeline:
         finally:
             store.close()
             if v2_store is not None:
-                try: v2_store.close()
-                except Exception: pass
+                try:
+                    v2_store.close()
+                except Exception:
+                    logger.warning("close v2_store failed in dagflow pipeline", exc_info=True)
 
 
 def _make_callee_item(func_id, taint):

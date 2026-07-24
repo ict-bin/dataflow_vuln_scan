@@ -189,7 +189,13 @@ def run_agent_with_design_retry(
                 if _err:
                     safe_copyfile(session_file, _err)
             except OSError:
-                pass
+                logger.warning(
+                    "llm_retry: failed to copy error session label=%s attempt=%s session=%s",
+                    label,
+                    attempt,
+                    session_file,
+                    exc_info=True,
+                )
 
         # ④ 本轮 compact 周期重试预算用尽 → compact 一次再开新一轮
         # (仅当出现过部分输出才 compact; 全空输出不是 context overflow, compact 无用)
@@ -226,7 +232,12 @@ def run_agent_with_design_retry(
                 if session_file:
                     Path(session_file).unlink(missing_ok=True)
             except OSError:
-                pass
+                logger.warning(
+                    "llm_retry: failed to remove empty-output session label=%s session=%s",
+                    label,
+                    session_file,
+                    exc_info=True,
+                )
             cur_prompt = _EMPTY_OUTPUT_PROMPT
             continue
 
@@ -240,7 +251,13 @@ def run_agent_with_design_retry(
             elif session_file:
                 Path(session_file).unlink(missing_ok=True)
         except OSError:
-            pass
+            logger.warning(
+                "llm_retry: rollback session restore failed label=%s rollback=%s session=%s",
+                label,
+                rollback_session,
+                session_file,
+                exc_info=True,
+            )
         cur_prompt = prompt
 
     return result, parsed, warn

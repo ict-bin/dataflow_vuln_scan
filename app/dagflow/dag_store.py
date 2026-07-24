@@ -87,8 +87,10 @@ class DagflowStore:
 
     def close(self) -> None:
         with self._lock:
-            try: self._conn.close()
-            except Exception: pass
+            try:
+                self._conn.close()
+            except Exception:
+                logger.warning("close dagflow sqlite connection failed: %s", self.db_path, exc_info=True)
 
     # ── 通用 ────────────────────────────────────────────────────────────
     def _exec(self, sql: str, params: tuple = ()) -> sqlite3.Cursor:
@@ -212,7 +214,12 @@ class DagflowStore:
                         {"sid": self._mysql.source_dir_id, "fid": func_id, "ts": taint_signature, "tid": self._mysql.task_id}).fetchone()
                     if row is not None: return True
             except Exception:
-                pass
+                logger.warning(
+                    "mysql find_processed_taint failed func_id=%s taint_signature=%s",
+                    func_id,
+                    taint_signature,
+                    exc_info=True,
+                )
         # SQLite 回退
         r = self._q("SELECT 1 FROM dag_processed_taints WHERE func_id=? AND taint_signature=?",
                     (func_id, taint_signature))
@@ -231,7 +238,12 @@ class DagflowStore:
                         self._conn.commit()
                 return reserved
             except Exception:
-                pass
+                logger.warning(
+                    "mysql dag_try_reserve failed func_id=%s taint_signature=%s",
+                    func_id,
+                    taint_signature,
+                    exc_info=True,
+                )
         with self._lock:
             cur = self._conn.execute(
                 "INSERT OR IGNORE INTO dag_processed_taints (func_id, taint_signature) VALUES (?,?)",
@@ -245,8 +257,15 @@ class DagflowStore:
             "DELETE FROM dag_processed_taints WHERE func_id=? AND taint_signature=?",
             (func_id, taint_signature))
         if self._mysql:
-            try: self._mysql.dag_delete_processed(func_id, taint_signature)
-            except Exception: pass
+            try:
+                self._mysql.dag_delete_processed(func_id, taint_signature)
+            except Exception:
+                logger.warning(
+                    "mysql dag_delete_processed failed: func_id=%s taint_signature=%s",
+                    func_id,
+                    taint_signature,
+                    exc_info=True,
+                )
 
     # ── 跨函数查询 (dag_tools 用) ────────────────────────────────────────
     def get_callers(self, func_id: str) -> list[tuple[str, str]]:
@@ -261,7 +280,7 @@ class DagflowStore:
                         {"sid": self._mysql.source_dir_id, "fid": func_id, "tid": self._mysql.task_id}).fetchall()
                     if mrows: return [(r[0], r[1]) for r in mrows]
             except Exception:
-                pass
+                logger.warning("mysql get_callers failed func_id=%s", func_id, exc_info=True)
         rows = self._q(
             "SELECT DISTINCT func_id, taint_signature FROM taint_dag_edges "
             "WHERE kind='callee' AND sink_ref=?", (func_id,))
@@ -278,7 +297,7 @@ class DagflowStore:
                         {"sid": self._mysql.source_dir_id, "tid": self._mysql.task_id}).fetchall()
                     if mrows: return [(r[0], r[1]) for r in mrows]
             except Exception:
-                pass
+                logger.warning("mysql list_analyzed failed task_id=%s", self._mysql.task_id, exc_info=True)
         rows = self._q("SELECT func_id, taint_signature FROM dag_processed_taints")
         return [(r["func_id"], r["taint_signature"]) for r in rows] if rows else []
 
@@ -294,7 +313,12 @@ class DagflowStore:
                         {"sid": self._mysql.source_dir_id, "fid": func_id, "ts": taint_signature, "tid": self._mysql.task_id}).fetchall()
                     if mrows: return [dict(r._mapping) for r in mrows]
             except Exception:
-                pass
+                logger.warning(
+                    "mysql list_dag_outgoing failed func_id=%s taint_signature=%s",
+                    func_id,
+                    taint_signature,
+                    exc_info=True,
+                )
         rows = self._q(
             "SELECT * FROM taint_dag_edges WHERE func_id=? AND taint_signature=? "
             "AND kind IN ('callee','return','extern','container')",

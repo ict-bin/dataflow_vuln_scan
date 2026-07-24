@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import logging
 import os
 import pathlib
 import shutil
@@ -9,6 +10,8 @@ import subprocess
 import time
 from dataclasses import dataclass
 from typing import Callable
+
+logger = logging.getLogger("dvs.agent_process")
 
 
 def find_pi_command() -> list[str]:
@@ -32,6 +35,7 @@ def process_group_id(pid: int) -> int | None:
     except ProcessLookupError:
         return None
     except Exception:
+        logger.warning("agent_process: getpgid failed pid=%s", pid, exc_info=True)
         return None
 
 
@@ -45,6 +49,7 @@ def process_group_exists(pgid: int | None) -> bool:
     except PermissionError:
         return True
     except Exception:
+        logger.warning("agent_process: process_group_exists failed pgid=%s", pgid, exc_info=True)
         return False
     return True
 
@@ -56,6 +61,12 @@ def _read_proc_name(pid: int, field: str) -> str:
             errors="replace",
         ).strip()
     except Exception:
+        logger.warning(
+            "agent_process: failed to read proc field pid=%s field=%s",
+            pid,
+            field,
+            exc_info=True,
+        )
         return ""
 
 
@@ -63,6 +74,7 @@ def _safe_readlink(path: pathlib.Path) -> str:
     try:
         return os.readlink(path)
     except Exception:
+        logger.warning("agent_process: readlink failed path=%s", path, exc_info=True)
         return ""
 
 
@@ -70,6 +82,7 @@ def _read_proc_environ(pid: int) -> dict[str, str]:
     try:
         raw = (pathlib.Path("/proc") / str(pid) / "environ").read_bytes()
     except Exception:
+        logger.warning("agent_process: failed to read environ pid=%s", pid, exc_info=True)
         return {}
     payload: dict[str, str] = {}
     for item in raw.split(b"\0"):
@@ -79,6 +92,7 @@ def _read_proc_environ(pid: int) -> dict[str, str]:
         try:
             payload[key.decode("utf-8", errors="replace")] = value.decode("utf-8", errors="replace")
         except Exception:
+            logger.warning("agent_process: failed to decode environ pid=%s", pid, exc_info=True)
             continue
     return payload
 
@@ -87,6 +101,7 @@ def _read_proc_cmdline(pid: int) -> str:
     try:
         raw = (pathlib.Path("/proc") / str(pid) / "cmdline").read_bytes()
     except Exception:
+        logger.warning("agent_process: failed to read cmdline pid=%s", pid, exc_info=True)
         return ""
     return raw.replace(b"\0", b" ").decode("utf-8", errors="replace").strip()
 
@@ -97,6 +112,7 @@ def _read_ppid(status_text: str) -> int | None:
             try:
                 return int(line.split(":", 1)[1].strip())
             except ValueError:
+                logger.warning("agent_process: invalid PPid line=%r", line, exc_info=True)
                 return None
     return None
 
@@ -110,6 +126,7 @@ def _read_pgid(pid: int) -> int | None:
             ).strip()
         )
     except Exception:
+        logger.warning("agent_process: failed to read pgid pid=%s", pid, exc_info=True)
         return None
 
 
@@ -125,6 +142,7 @@ def _normalize_path(path_value: str | None) -> str:
     try:
         return os.path.realpath(os.path.abspath(raw))
     except Exception:
+        logger.warning("agent_process: failed to normalize path=%r", path_value, exc_info=True)
         return raw
 
 
@@ -184,10 +202,12 @@ def _iter_runtime_processes() -> list[AgentProcessInfo]:
             comm = (proc_dir / "comm").read_text(encoding="utf-8", errors="replace").strip()
             exe = os.path.basename(_safe_readlink(proc_dir / "exe"))
         except Exception:
+            logger.warning("agent_process: failed to inspect proc entry=%s", proc_dir, exc_info=True)
             continue
         try:
             started_at = os.stat(proc_dir).st_ctime
         except Exception:
+            logger.warning("agent_process: failed to stat proc entry=%s", proc_dir, exc_info=True)
             started_at = None
         info = AgentProcessInfo(
             pid=pid,
@@ -271,6 +291,13 @@ def _kill_process_group(
             time.sleep(0.2)
         return True
     except Exception:
+        logger.warning(
+            "agent_process: failed to kill process group pid=%s pgid=%s label=%s",
+            info.pid,
+            info.pgid,
+            label,
+            exc_info=True,
+        )
         return False
 
 
@@ -336,6 +363,12 @@ def cleanup_orphan_pi_processes(
             except PermissionError:
                 continue  # 父进程存在但无权发信号 → 非孤儿，跳过
             except Exception:
+                globals()["logger"].warning(
+                    "agent_process: orphan probe failed pid=%s ppid=%s",
+                    info.pid,
+                    ppid,
+                    exc_info=True,
+                )
                 continue  # 其他异常保守处理，不杀
         # 宽限期：只清理启动超过 grace_seconds 的孤儿（避免误杀刚启动的进程）
         if info.started_at is not None and grace_seconds > 0 and (now - info.started_at) < grace_seconds:
@@ -447,7 +480,10 @@ class AgentProcessHandle:
         try:
             self.proc.wait(timeout=term_timeout)
         except subprocess.TimeoutExpired:
-            pass
+            self.logger(
+                f"terminate_tree wait timeout [{self.label}] reason={reason} "
+                f"pid={self.proc.pid} pgid={self.pgid}"
+            )
         except ProcessLookupError:
             return
         else:

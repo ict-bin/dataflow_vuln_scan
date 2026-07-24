@@ -524,14 +524,18 @@ class VulnScanStore:
                 ),
             )
         if self._mysql:
-            try: self._mysql.start_task_graph_run(rec)
-            except Exception: pass
+            try:
+                self._mysql.start_task_graph_run(rec)
+            except Exception:
+                logger.warning("mysql start_task_graph_run failed: task_id=%s", rec.task_id, exc_info=True)
 
     def upsert_task_graph_node(self, rec: TaskGraphNodeRecord) -> None:
         self._upsert_rows("task_graph_nodes", [asdict(rec)])
         if self._mysql:
-            try: self._mysql.upsert_task_graph_node(rec)
-            except Exception: pass
+            try:
+                self._mysql.upsert_task_graph_node(rec)
+            except Exception:
+                logger.warning("mysql upsert_task_graph_node failed: node_id=%s", rec.node_id, exc_info=True)
 
     def upsert_task_graph_edge(self, rec: TaskGraphEdgeRecord) -> None:
         data = asdict(rec)
@@ -541,14 +545,22 @@ class VulnScanStore:
             data["created_at"] = data["updated_at"]
         self._upsert_rows("task_graph_edges", [data])
         if self._mysql:
-            try: self._mysql.upsert_task_graph_edge(rec)
-            except Exception: pass
+            try:
+                self._mysql.upsert_task_graph_edge(rec)
+            except Exception:
+                logger.warning("mysql upsert_task_graph_edge failed: edge_id=%s", rec.edge_id, exc_info=True)
 
     def upsert_task_graph_session(self, rec: TaskGraphSessionRecord) -> None:
         self._upsert_rows("task_graph_sessions", [asdict(rec)])
         if self._mysql:
-            try: self._mysql.upsert_task_graph_session(rec)
-            except Exception: pass
+            try:
+                self._mysql.upsert_task_graph_session(rec)
+            except Exception:
+                logger.warning(
+                    "mysql upsert_task_graph_session failed: session_relpath=%s",
+                    rec.session_relpath,
+                    exc_info=True,
+                )
 
     def update_task_graph_node(
         self,
@@ -581,8 +593,10 @@ class VulnScanStore:
         with self.connect() as conn:
             conn.execute(f"UPDATE task_graph_nodes SET {', '.join(assigns)} WHERE node_id=?", params)
         if self._mysql:
-            try: self._mysql.update_task_graph_node(node_id, **{k: v for k, v in [("status", status), ("analysis_status", analysis_status), ("findings_count", findings_count), ("finished_at", finished_at), ("primary_session_relpath", primary_session_relpath)] if v is not None})
-            except Exception: pass
+            try:
+                self._mysql.update_task_graph_node(node_id, **{k: v for k, v in [("status", status), ("analysis_status", analysis_status), ("findings_count", findings_count), ("finished_at", finished_at), ("primary_session_relpath", primary_session_relpath)] if v is not None})
+            except Exception:
+                logger.warning("mysql update_task_graph_node failed: node_id=%s", node_id, exc_info=True)
 
     def update_task_graph_edge(
         self,
@@ -629,8 +643,10 @@ class VulnScanStore:
         with self.connect() as conn:
             conn.execute(f"UPDATE task_graph_edges SET {', '.join(assigns)} WHERE edge_id=?", params)
         if self._mysql:
-            try: self._mysql.update_task_graph_edge(edge_id, **{k: v for k, v in [("edge_kind", edge_kind), ("status", status), ("target_node_id", target_node_id), ("target_func_id", target_func_id), ("target_function_resolved", target_function_resolved), ("target_file", target_file), ("reason_code", reason_code), ("reason_message", reason_message), ("reason_source", reason_source), ("tracker_type", tracker_type), ("tracker_result_json", tracker_result_json), ("visible_in_tree", visible_in_tree), ("visible_in_all_propagations", visible_in_all_propagations)] if v is not None})
-            except Exception: pass
+            try:
+                self._mysql.update_task_graph_edge(edge_id, **{k: v for k, v in [("edge_kind", edge_kind), ("status", status), ("target_node_id", target_node_id), ("target_func_id", target_func_id), ("target_function_resolved", target_function_resolved), ("target_file", target_file), ("reason_code", reason_code), ("reason_message", reason_message), ("reason_source", reason_source), ("tracker_type", tracker_type), ("tracker_result_json", tracker_result_json), ("visible_in_tree", visible_in_tree), ("visible_in_all_propagations", visible_in_all_propagations)] if v is not None})
+            except Exception:
+                logger.warning("mysql update_task_graph_edge failed: edge_id=%s", edge_id, exc_info=True)
 
     def update_task_graph_session(
         self,
@@ -663,8 +679,14 @@ class VulnScanStore:
         with self.connect() as conn:
             conn.execute(f"UPDATE task_graph_sessions SET {', '.join(assigns)} WHERE session_relpath=?", params)
         if self._mysql:
-            try: self._mysql.update_task_graph_session(session_relpath, **{k: v for k, v in [("node_id", node_id), ("edge_id", edge_id), ("status", status), ("ended_at", ended_at), ("event_count", event_count)] if v is not None})
-            except Exception: pass
+            try:
+                self._mysql.update_task_graph_session(session_relpath, **{k: v for k, v in [("node_id", node_id), ("edge_id", edge_id), ("status", status), ("ended_at", ended_at), ("event_count", event_count)] if v is not None})
+            except Exception:
+                logger.warning(
+                    "mysql update_task_graph_session failed: session_relpath=%s",
+                    session_relpath,
+                    exc_info=True,
+                )
 
     def start_run(self, run_id: str, task_id: str, root_file: str, root_function: str, source_root: str, config: dict[str, Any] | None = None) -> None:
         with self.connect() as conn:
@@ -675,16 +697,20 @@ class VulnScanStore:
                 (run_id, task_id, root_file, root_function, source_root, time.time(), json.dumps(config or {}, ensure_ascii=False)),
             )
         if self._mysql:
-            try: self._mysql.start_run(run_id, task_id, root_file, root_function, source_root, config or {})
-            except Exception: pass
+            try:
+                self._mysql.start_run(run_id, task_id, root_file, root_function, source_root, config or {})
+            except Exception:
+                logger.warning("mysql start_run failed: run_id=%s task_id=%s", run_id, task_id, exc_info=True)
 
 
     def finish_run(self, run_id: str, status: str) -> None:
         with self.connect() as conn:
             conn.execute("UPDATE analysis_runs SET status=?, finished_at=? WHERE run_id=?", (status, time.time(), run_id))
         if self._mysql:
-            try: self._mysql.finish_run(run_id, status)
-            except Exception: pass
+            try:
+                self._mysql.finish_run(run_id, status)
+            except Exception:
+                logger.warning("mysql finish_run failed: run_id=%s status=%s", run_id, status, exc_info=True)
 
 
     def upsert_taint_node(self, rec: TaintSourceRecord) -> None:
@@ -734,8 +760,15 @@ class VulnScanStore:
                 (status, case_id, finding_id),
             )
         if self._mysql:
-            try: self._mysql.update_finding_report_status(finding_id, status, case_id, task_id=task_id)
-            except Exception: pass
+            try:
+                self._mysql.update_finding_report_status(finding_id, status, case_id, task_id=task_id)
+            except Exception:
+                logger.warning(
+                    "mysql update_finding_report_status failed: finding_id=%s task_id=%s",
+                    finding_id,
+                    task_id,
+                    exc_info=True,
+                )
 
     def add_finding(self, rec: VulnFindingRecord) -> None:
         data = asdict(rec)
@@ -746,8 +779,10 @@ class VulnScanStore:
                 [data[c] for c in cols],
             )
         if self._mysql:
-            try: self._mysql.insert_finding(**data)
-            except Exception: pass
+            try:
+                self._mysql.insert_finding(**data)
+            except Exception:
+                logger.warning("mysql insert_finding failed: finding_id=%s", rec.finding_id, exc_info=True)
 
     def list_task_findings(self, task_id: str) -> list[dict[str, Any]]:
         with self.connect() as conn:

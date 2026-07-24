@@ -50,7 +50,7 @@ class ThreadedProbeServer:
             try:
                 httpd.server_close()
             except Exception:
-                pass
+                logger.warning("probe server close failed host=%s port=%s", self._host, self._port, exc_info=True)
         thread = self._thread
         if thread and thread.is_alive():
             thread.join(timeout=1.0)
@@ -127,10 +127,10 @@ class ThreadedProbeServer:
         except Exception as exc:
             with self._lock:
                 self._last_error = str(exc)
-            logger.warning("probe server stopped with error: %s", exc)
+            logger.warning("probe server stopped with error: %s", exc, exc_info=True)
         finally:
             try:
                 httpd.server_close()
             except Exception:
-                pass
+                logger.warning("probe server final close failed host=%s port=%s", self._host, self._port, exc_info=True)
             logger.info("probe server stopped host=%s port=%s", self._host, self._port)

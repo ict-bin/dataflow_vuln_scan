@@ -1881,7 +1881,7 @@ class TaskService:
                                 mapped_event_type = "depth_limit_reached"
                             else:
                                 mapped_event_type = "trace_started"
-                        message = {
+                        default_message = {
                             "root_analysis_started": "开始执行根函数分析",
                             "trace_started": "开始追踪函数",
                             "callee_discovered": "发现新的调用函数",
@@ -1900,12 +1900,14 @@ class TaskService:
                             "task_context_overflow_retrying": "智能体上下文持续超限，已进入无限压缩重试",
                             "task_context_overflow_failed_after_compaction": "智能体上下文压缩后仍超出预算，请求已终止",
                         }.get(mapped_event_type, f"运行事件: {mapped_event_type}")
+                        message = str(event_data.get("message") or default_message)
+                        level = str(event_data.get("level") or ("error" if mapped_event_type == "task_runtime_error" else "info"))
                         _record_task_event(
                             event_db,
                             row=event_row,
                             event_type=mapped_event_type,
                             message=message,
-                            level="error" if mapped_event_type == "task_runtime_error" else "info",
+                            level=level,
                             status=event_row.status,
                             worker_id=WORKER_ID,
                             execution_owner_id=WORKER_ID,
