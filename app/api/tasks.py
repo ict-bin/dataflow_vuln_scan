@@ -1497,6 +1497,14 @@ def get_task_vuln_finding_report(task_id: str, finding_id: str, db: Session = De
         cand = run_resolved / "vulnerability-report.md"
         if cand.exists():
             report_path = cand
+    # 1c) 运行期镜像副本: <task_root>/run/vulnerabilities/<fid>/...
+    if (not report_path or not report_path.exists()) and output_dir and root:
+        try:
+            mirror_path = root / "run" / "vulnerabilities" / fid / "vulnerability-report.md"
+            if mirror_path.exists():
+                report_path = mirror_path
+        except Exception:
+            pass
     # 2) 归档副本: <task_root>/output/vulnerabilities/<fid>/vulnerability-report.md
     #    (任务完成后 _archive 复制到 output/; 重启清空 run/epochs 后归档仍在)
     if not report_path or not report_path.exists():

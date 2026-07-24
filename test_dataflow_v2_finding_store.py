@@ -24,7 +24,7 @@ def _sample_item() -> dict:
 
 def test_persist_finding_writes_authoritative_sqlite_and_emits_events(tmp_path: Path, monkeypatch):
     db_path = tmp_path / "run" / "vuln-scan.sqlite"
-    vuln_root = tmp_path / "run" / "vulnerabilities"
+    vuln_root = tmp_path / "run" / "epochs" / "0001" / "vulnerabilities"
     session_path = tmp_path / "session.jsonl"
     session_path.write_text('{"type":"session"}\n', encoding="utf-8")
     store = VulnScanStore(db_path)
@@ -61,8 +61,30 @@ def test_persist_finding_writes_authoritative_sqlite_and_emits_events(tmp_path: 
     assert len(rows) == 1
     assert rows[0]["finding_id"] == finding_id
     assert rows[0]["function_name"] == "demo_func"
-    assert any(etype == "vuln_finding_persisted" for etype, _ in events)
-    assert any(etype == "vuln_intake_result" for etype, _ in events)
+    persisted_payload = next(payload for etype, payload in events if etype == "vuln_finding_persisted")
+    intake_payload = next(payload for etype, payload in events if etype == "vuln_intake_result")
+    mirror_dir = tmp_path / "run" / "vulnerabilities" / finding_id
+    assert mirror_dir.exists()
+    assert (mirror_dir / "vulnerability-report.md").exists()
+    assert (mirror_dir / "taint-path-report.md").read_text(encoding="utf-8") == "context"
+    assert (mirror_dir / "context.jsonl").exists()
+    assert persisted_payload["title"] == "demo finding"
+    assert persisted_payload["summary"] == "summary"
+    assert persisted_payload["summary_preview"] == "summary"
+    assert persisted_payload["evidence_preview"] == "evidence"
+    assert persisted_payload["vuln_type"] == "dos"
+    assert persisted_payload["severity"] == "high"
+    assert persisted_payload["mirror_dir"] == str(mirror_dir)
+    assert "发现漏洞并已落库" in persisted_payload["message"]
+    assert "摘要=summary" in persisted_payload["message"]
+    assert intake_payload["title"] == "demo finding"
+    assert intake_payload["summary"] == "summary"
+    assert intake_payload["summary_preview"] == "summary"
+    assert intake_payload["evidence_preview"] == "evidence"
+    assert intake_payload["vuln_type"] == "dos"
+    assert intake_payload["severity"] == "high"
+    assert "漏洞上报成功" in intake_payload["message"]
+    assert "摘要=summary" in intake_payload["message"]
 
 
 class _BrokenGraphStore:

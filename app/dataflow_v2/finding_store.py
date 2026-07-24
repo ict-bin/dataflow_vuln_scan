@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import shutil
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -19,6 +20,13 @@ from ..vuln_store import VulnFindingRecord, VulnScanStore
 from ..service.task_vuln_stats import refresh_task_vuln_snapshot_by_task_id
 
 logger = logging.getLogger("dvs.dataflow_v2.finding_store")
+
+
+def _preview_text(value: object, *, limit: int = 160) -> str:
+    text = " ".join(str(value or "").strip().split())
+    if len(text) <= limit:
+        return text
+    return f"{text[: limit - 1]}…"
 
 
 def _emit_finding_event(
@@ -47,6 +55,30 @@ def _emit_finding_event(
         on_event(event_type, **payload)
     except Exception:
         logger.debug("emit finding event failed: %s", event_type, exc_info=True)
+
+
+def _mirror_finding_to_run_root(*, finding_dir: Path, vuln_root: Path) -> Path | None:
+    """Mirror a runtime finding directory to task-root run/vulnerabilities.
+
+    Runtime epoch directories may be symlinked to pod-local /tmp and are not
+    directly readable from API pods. Mirror each finding eagerly to the stable
+    task-root run/ path so the report endpoint can serve it during execution.
+    """
+    try:
+        parts = vuln_root.parts
+        if "run" not in parts or "epochs" not in parts:
+            return None
+        run_idx = parts.index("run")
+        task_root = Path(*parts[:run_idx])
+        mirror_dir = task_root / "run" / "vulnerabilities" / finding_dir.name
+        if mirror_dir.exists():
+            shutil.rmtree(mirror_dir, ignore_errors=True)
+        mirror_dir.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(finding_dir, mirror_dir)
+        return mirror_dir
+    except Exception:
+        logger.warning("mirror finding to run/vulnerabilities failed for %s", finding_dir, exc_info=True)
+        return None
 
 
 def persist_finding(
@@ -97,6 +129,7 @@ def persist_finding(
         safe_copyfile(context_session_path, str(fdir / "context.jsonl"))
     except Exception:
         (fdir / "context.jsonl").write_text("", encoding="utf-8")
+    mirror_dir = _mirror_finding_to_run_root(finding_dir=fdir, vuln_root=vuln_root)
 
     _exploit = item.get("exploitability")
     expl_str = json.dumps(_exploit, ensure_ascii=False) if isinstance(_exploit, (dict, list)) else str(_exploit or "")
@@ -168,11 +201,24 @@ def persist_finding(
         on_event,
         "vuln_finding_persisted",
         level="info",
-        message=f"漏洞已写入 authoritative sqlite: {finding_id}",
+        message=(
+            f"发现漏洞并已落库: {data['title']} | 类型={data['vuln_type']} | "
+            f"级别={data['severity']} | 位置={fsrc}:{fline} | 摘要={_preview_text(data['summary']) or '-'}"
+        ),
         finding_id=finding_id,
         function_name=ffn,
         task_id=task_id,
-        extra={"line": fline, "source_file": fsrc},
+        extra={
+            "line": fline,
+            "source_file": fsrc,
+            "title": data["title"],
+            "summary": data["summary"],
+            "summary_preview": _preview_text(data["summary"]),
+            "evidence_preview": _preview_text(data["evidence"]),
+            "vuln_type": data["vuln_type"],
+            "severity": data["severity"],
+            "mirror_dir": str(mirror_dir) if mirror_dir else "",
+        },
     )
 
     # MySQL 双写 finding 行: graph-view 优先读 MySQL dvs_vuln_findings, 缺此则前端漏洞图谱 0 findings
@@ -282,11 +328,14 @@ def _record_intake_result(*, graph_store, run_id, task_id, finding_id, rec, res,
             duplicate = bool(res.get("duplicate"))
             report_url = str(res.get("url") or "")
             message = (
-                f"漏洞上报成功: finding={finding_id}, function={rec.function_name}, case_id={case_id or '-'}"
+                f"漏洞上报成功: {rec.title or finding_id} | 类型={rec.vuln_type or 'unknown'} | "
+                f"级别={rec.severity or 'unknown'} | 位置={rec.source_file}:{rec.line} | "
+                f"case_id={case_id or '-'} | 摘要={_preview_text(rec.summary) or '-'}"
                 if status == "reported"
                 else (
-                    f"漏洞上报失败: finding={finding_id}, function={rec.function_name}, "
-                    f"status={status or '-'}, error={str(res.get('error') or '-')}"
+                    f"漏洞上报失败: {rec.title or finding_id} | 类型={rec.vuln_type or 'unknown'} | "
+                    f"级别={rec.severity or 'unknown'} | 位置={rec.source_file}:{rec.line} | "
+                    f"status={status or '-'} | error={str(res.get('error') or '-')}"
                 )
             )
             on_event(
@@ -300,6 +349,14 @@ def _record_intake_result(*, graph_store, run_id, task_id, finding_id, rec, res,
                 level="info" if status == "reported" else "error",
                 message=message,
                 error=str(res.get("error") or ""),
+                title=rec.title,
+                summary=rec.summary,
+                summary_preview=_preview_text(rec.summary),
+                evidence_preview=_preview_text(rec.evidence),
+                vuln_type=rec.vuln_type,
+                severity=rec.severity,
+                source_file=rec.source_file,
+                line=rec.line,
             )
     except Exception:
         logger.warning("finding_store emit vuln_intake_result failed for %s", finding_id, exc_info=True)
