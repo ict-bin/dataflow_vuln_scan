@@ -1448,7 +1448,7 @@ def get_task_vuln_graph(task_id: str, db: Session = Depends(get_db)):
     root = _task_root(row)
     latest_run_root = _latest_epoch_run_root(root) if str(root) else Path()
     run_root = latest_run_root if latest_run_root.exists() else root / "run"
-    view = _load_task_graph_view(run_root, task_id)
+    view = _load_task_graph_view(run_root, task_id, task_root=root)
     return {
         "task_id": task_id,
         "available": bool(view.get("available")),
@@ -1472,7 +1472,7 @@ def get_task_graph_view(task_id: str, db: Session = Depends(get_db)):
     root = _task_root(row)
     latest_run_root = _latest_epoch_run_root(root) if str(root) else Path()
     run_root = latest_run_root if latest_run_root.exists() else root / "run"
-    view = _load_task_graph_view(run_root, task_id)
+    view = _load_task_graph_view(run_root, task_id, task_root=root)
     return TaskGraphViewResponse(
         task_id=task_id,
         epoch=str(view.get("epoch") or ""),
@@ -1494,7 +1494,7 @@ def get_task_vuln_findings(task_id: str, db: Session = Depends(get_db)):
     root = _task_root(row)
     latest_run_root = _latest_epoch_run_root(root) if str(root) else Path()
     run_root = latest_run_root if latest_run_root.exists() else root / "run"
-    view = _load_task_graph_view(run_root, task_id)
+    view = _load_task_graph_view(run_root, task_id, task_root=root)
     findings = list(view.get("findings") or [])
     return {
         "task_id": task_id,
@@ -1511,7 +1511,7 @@ def get_task_vuln_finding_report(task_id: str, finding_id: str, db: Session = De
     root = _task_root(row)
     latest_run_root = _latest_epoch_run_root(root) if str(root) else Path()
     run_root = latest_run_root if latest_run_root.exists() else root / "run"
-    view = _load_task_graph_view(run_root, task_id)
+    view = _load_task_graph_view(run_root, task_id, task_root=root)
     findings = list(view.get("findings") or [])
     finding = next((f for f in findings if str(f.get("finding_id") or "") == finding_id), None)
     if not finding:
@@ -1547,7 +1547,7 @@ def get_task_propagations(task_id: str, db: Session = Depends(get_db)):
     root = _task_root(row)
     latest_run_root = _latest_epoch_run_root(root) if str(root) else Path()
     run_root = latest_run_root if latest_run_root.exists() else root / "run"
-    view = _load_task_graph_view(run_root, task_id)
+    view = _load_task_graph_view(run_root, task_id, task_root=root)
     items = _project_propagations_from_graph(view)
     return TaskPropagationsResponse(
         task_id=task_id,
@@ -1810,7 +1810,7 @@ def get_task_result(task_id: str, db: Session = Depends(get_db)):
     # Keep structured graph counts sourced from the authoritative task graph view.
     try:
         graph_run_root = latest_run_root if latest_run_root.exists() else run_root
-        view = _load_task_graph_view(graph_run_root, task_id)
+        view = _load_task_graph_view(graph_run_root, task_id, task_root=root)
         if view.get("available"):
             view_summary = view.get("summary") or {}
             if not summary.get("function_count"):
@@ -2065,32 +2065,19 @@ def _get_mysql_graph_store_for_task(task_id: str):
         )
         return None
 
-def _task_root_from_run_root(run_root: Path) -> Path:
-    if run_root.name == "run":
-        if run_root.parent.parent.name == "epochs":
-            return run_root.parent.parent.parent
-        return run_root.parent
-    if run_root.parent.name == "epochs":
-        if run_root.parent.parent.name == "run":
-            return run_root.parent.parent.parent
-        return run_root.parent.parent
-    if "epochs" in run_root.parts:
-        epochs_idx = run_root.parts.index("epochs")
-        if epochs_idx > 0:
-            return Path(*run_root.parts[:epochs_idx])
-    if "run" in run_root.parts:
-        run_idx = len(run_root.parts) - 1 - run_root.parts[::-1].index("run")
-        if run_idx > 0:
-            return Path(*run_root.parts[:run_idx])
-    return run_root.parent
-
-def _graph_store_for_run_root(run_root: Path, task_id: str = ""):
+def _graph_store_for_run_root(run_root: Path, task_id: str = "", *, task_root: Path | None = None):
     """优先返回 per-project MySQL 图谱存储; 回退 SQLite VulnScanStore。"""
     if task_id:
         mysql_store = _get_mysql_graph_store_for_task(task_id)
         if mysql_store is not None:
             return mysql_store
-    task_root = _task_root_from_run_root(run_root)
+    if task_root is None:
+        logger.warning(
+            "graph view task_root missing: task_id=%s run_root=%s",
+            task_id,
+            run_root,
+        )
+        return None
     db_path = task_root / "output" / "vuln-scan.sqlite"
     if not db_path.exists():
         logger.warning(
@@ -2104,8 +2091,8 @@ def _graph_store_for_run_root(run_root: Path, task_id: str = ""):
     return VulnScanStore(db_path)
 
 
-def _load_task_graph_view(run_root: Path, task_id: str) -> dict[str, Any]:
-    store = _graph_store_for_run_root(run_root, task_id=task_id)
+def _load_task_graph_view(run_root: Path, task_id: str, *, task_root: Path | None = None) -> dict[str, Any]:
+    store = _graph_store_for_run_root(run_root, task_id=task_id, task_root=task_root)
     if store is None:
         return {
             "task_id": task_id,
@@ -2126,8 +2113,10 @@ def _load_task_graph_view(run_root: Path, task_id: str) -> dict[str, Any]:
     return view
 
 
-def _load_task_vulnerability_findings(run_root: Path, task_id: str) -> list[dict[str, Any]]:
-    store = _graph_store_for_run_root(run_root, task_id=task_id)
+def _load_task_vulnerability_findings(
+    run_root: Path, task_id: str, *, task_root: Path | None = None
+) -> list[dict[str, Any]]:
+    store = _graph_store_for_run_root(run_root, task_id=task_id, task_root=task_root)
     if store is not None:
         return list(store.list_task_findings(task_id))
     return []

@@ -52,8 +52,20 @@ def _write_session_file(path: Path, *, session_id: str | None = None, extra_head
     path.write_text("\n".join(json.dumps(item, ensure_ascii=False) for item in lines) + "\n", encoding="utf-8")
 
 
+def _task_root_for_test(run_root: Path) -> Path:
+    if run_root.name == "run":
+        if run_root.parent.parent.name == "epochs":
+            return run_root.parent.parent.parent
+        return run_root.parent
+    if run_root.parent.name == "epochs":
+        if run_root.parent.parent.name == "run":
+            return run_root.parent.parent.parent
+        return run_root.parent.parent
+    return run_root.parent
+
+
 def _graph_sqlite_path(run_root: Path) -> Path:
-    return tasks_module._task_root_from_run_root(run_root) / "output" / "vuln-scan.sqlite"
+    return _task_root_for_test(run_root) / "output" / "vuln-scan.sqlite"
 
 
 def test_load_task_propagations_includes_followed_and_unfollowed(tmp_path: Path):
@@ -1207,7 +1219,7 @@ def test_load_task_vulnerability_findings_reads_vuln_scan_sqlite(tmp_path: Path)
         ),
     )
 
-    findings = _load_task_vulnerability_findings(run_root, "task-1")
+    findings = _load_task_vulnerability_findings(run_root, "task-1", task_root=_task_root_for_test(run_root))
     assert len(findings) == 1
     assert findings[0]["finding_id"] == "finding-1"
     assert findings[0]["function_name"] == "Root"
@@ -1258,7 +1270,7 @@ def test_load_task_vulnerability_findings_does_not_fallback_to_other_tasks(tmp_p
         ),
     )
 
-    findings = _load_task_vulnerability_findings(run_root, "task-missing")
+    findings = _load_task_vulnerability_findings(run_root, "task-missing", task_root=_task_root_for_test(run_root))
 
     assert findings == []
 
@@ -1285,7 +1297,7 @@ def test_load_task_vulnerability_findings_returns_empty_without_authoritative_gr
         ("root-func", "src/root.cpp", "Root"),
     )
 
-    findings = _load_task_vulnerability_findings(run_root, "task-without-graph")
+    findings = _load_task_vulnerability_findings(run_root, "task-without-graph", task_root=_task_root_for_test(run_root))
 
     assert findings == []
 
@@ -1340,8 +1352,8 @@ def test_task_graph_view_findings_match_compat_findings_loader(tmp_path: Path):
         ),
     )
 
-    compat_findings = _load_task_vulnerability_findings(run_root, "task-graph")
-    view = _load_task_graph_view(run_root, "task-graph")
+    compat_findings = _load_task_vulnerability_findings(run_root, "task-graph", task_root=_task_root_for_test(run_root))
+    view = _load_task_graph_view(run_root, "task-graph", task_root=_task_root_for_test(run_root))
 
     assert [item["finding_id"] for item in compat_findings] == [item["finding_id"] for item in view["findings"]]
     assert view["summary"]["findings_total"] == len(compat_findings) == 1
@@ -1410,8 +1422,8 @@ def test_legacy_vuln_graph_projection_stays_consistent_with_graph_view_facts(tmp
         output_dir="/tmp/out/finding-projection-1",
     ))
 
-    view = _load_task_graph_view(run_root, "task-projection")
-    compat_findings = _load_task_vulnerability_findings(run_root, "task-projection")
+    view = _load_task_graph_view(run_root, "task-projection", task_root=_task_root_for_test(run_root))
+    compat_findings = _load_task_vulnerability_findings(run_root, "task-projection", task_root=_task_root_for_test(run_root))
     projected_tree = _project_vuln_trace_tree_from_graph_view(view["tree"])
     projected_summary = _project_vuln_graph_summary_from_graph_view(view)
 
@@ -1429,7 +1441,7 @@ def test_load_task_graph_view_without_authoritative_store_stays_empty(tmp_path: 
     run_root = tmp_path / "run"
     run_root.mkdir(parents=True, exist_ok=True)
 
-    view = _load_task_graph_view(run_root, "task-empty-authoritative")
+    view = _load_task_graph_view(run_root, "task-empty-authoritative", task_root=_task_root_for_test(run_root))
     session_index = _project_session_index_from_graph(
         task_id="task-empty-authoritative",
         task_status="running",
@@ -1482,7 +1494,7 @@ def test_graph_store_for_run_root_uses_task_output_sqlite_fallback(tmp_path: Pat
     ))
     monkeypatch.setattr(tasks_module, "_get_mysql_graph_store_for_task", lambda task_id: None)
 
-    resolved_store = _graph_store_for_run_root(run_root, task_id="task-fallback")
+    resolved_store = _graph_store_for_run_root(run_root, task_id="task-fallback", task_root=task_root)
     view = resolved_store.export_task_graph_view("task-fallback")
 
     assert isinstance(resolved_store, VulnScanStore)
@@ -1519,7 +1531,7 @@ def test_graph_store_for_run_root_uses_task_output_sqlite_fallback_for_live_epoc
     ))
     monkeypatch.setattr(tasks_module, "_get_mysql_graph_store_for_task", lambda task_id: None)
 
-    resolved_store = _graph_store_for_run_root(run_root, task_id="task-fallback-live-layout")
+    resolved_store = _graph_store_for_run_root(run_root, task_id="task-fallback-live-layout", task_root=task_root)
     view = resolved_store.export_task_graph_view("task-fallback-live-layout")
 
     assert isinstance(resolved_store, VulnScanStore)
@@ -1559,8 +1571,8 @@ def test_load_task_graph_view_rebuilds_mysql_store_each_call(tmp_path: Path, mon
 
     monkeypatch.setattr(tasks_module, "_get_mysql_graph_store_for_task", _fake_get_mysql_graph_store_for_task)
 
-    first = _load_task_graph_view(run_root, "task-mysql-refresh")
-    second = _load_task_graph_view(run_root, "task-mysql-refresh")
+    first = _load_task_graph_view(run_root, "task-mysql-refresh", task_root=_task_root_for_test(run_root))
+    second = _load_task_graph_view(run_root, "task-mysql-refresh", task_root=_task_root_for_test(run_root))
 
     assert calls == ["task-mysql-refresh", "task-mysql-refresh"]
     assert first["store_label"] == "first"
