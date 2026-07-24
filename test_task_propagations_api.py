@@ -1491,6 +1491,43 @@ def test_graph_store_for_run_root_uses_task_output_sqlite_fallback(tmp_path: Pat
     assert view["summary"]["nodes_total"] == 1
 
 
+def test_graph_store_for_run_root_uses_task_output_sqlite_fallback_for_live_epoch_layout(
+    tmp_path: Path, monkeypatch
+):
+    task_root = tmp_path / "task-root"
+    run_root = task_root / "run" / "epochs" / "0001"
+    run_root.mkdir(parents=True, exist_ok=True)
+    output_db = task_root / "output" / "vuln-scan.sqlite"
+    store = VulnScanStore(output_db)
+    store.start_task_graph_run(TaskGraphRunRecord(
+        task_id="task-fallback-live-layout",
+        epoch="1",
+        run_root=str(run_root),
+        root_function="Root",
+    ))
+    store.upsert_task_graph_node(TaskGraphNodeRecord(
+        node_id="node-root",
+        task_id="task-fallback-live-layout",
+        epoch="1",
+        func_id="root-func",
+        function_name_resolved="Root",
+        function_name_raw="Root",
+        source_file="src/root.cpp",
+        depth=0,
+        status="done",
+        analysis_status="done",
+    ))
+    monkeypatch.setattr(tasks_module, "_get_mysql_graph_store_for_task", lambda task_id: None)
+
+    resolved_store = _graph_store_for_run_root(run_root, task_id="task-fallback-live-layout")
+    view = resolved_store.export_task_graph_view("task-fallback-live-layout")
+
+    assert isinstance(resolved_store, VulnScanStore)
+    assert resolved_store.db_path == output_db
+    assert view["available"] is True
+    assert view["summary"]["nodes_total"] == 1
+
+
 def test_load_task_graph_view_rebuilds_mysql_store_each_call(tmp_path: Path, monkeypatch):
     run_root = tmp_path / "task-root" / "epochs" / "epoch-1" / "run"
     run_root.mkdir(parents=True, exist_ok=True)

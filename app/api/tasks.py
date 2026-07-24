@@ -2070,6 +2070,10 @@ def _task_root_from_run_root(run_root: Path) -> Path:
     if "epochs" in parts:
         epochs_idx = parts.index("epochs")
         if epochs_idx > 0:
+            if parts[epochs_idx - 1] == "run":
+                if epochs_idx - 1 > 0:
+                    return Path(*parts[:epochs_idx - 1])
+                return Path(parts[0])
             return Path(*parts[:epochs_idx])
     if "run" in parts:
         run_idx = len(parts) - 1 - parts[::-1].index("run")
