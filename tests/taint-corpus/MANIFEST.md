@@ -61,3 +61,14 @@
 
 > golden = 人工校验过的首次产出（同 taint 库方法）。
 > 20/21 是顺序依赖核心对（清洗 vs 不清洗），验证正向建链按序拼 callee 效应重建污点状态。
+
+### escape 规则边界（28-30）
+
+| # | 用例 | escape 覆盖 | 期望 |
+|---|---|---|---|
+| 28 | 跨入参 escape | data 污点 -> 另一个入参 buf | extern ✅（真 escape, 跨入参）|
+| 29 | 局部别名不是 escape | header=msg 别名, 写 header->field | inside ✅（不是 escape, 不触发 tracker）|
+| 30 | carrier 去重 | 同一全局 3 行写入 | 3 条 extern 边但只 1 条 escape_track ✅ |
+
+> 28/29 是 escape 判定核心对（跨入参 vs 同入参别名），验证 escape 规则边界。
+> 30 验证 orchestrator 按 carrier 去重 escape_track 工作项。

@@ -1,0 +1,30 @@
+{
+  "taint_signature": "t",
+  "nodes": [
+    { "id": 0, "line": 0, "taint": "t", "parents": [], "checks": [], "prune": null },
+    { "id": 1, "line": 1, "taint": "t", "parents": [0], "checks": [], "prune": null },
+    { "id": 2, "line": 2, "taint": "t", "parents": [0], "checks": [], "prune": null },
+    { "id": 3, "line": 3, "taint": "t", "parents": [0], "checks": [], "prune": null },
+    { "id": 4, "line": 4, "taint": "t", "parents": [0], "checks": [], "prune": null }
+  ],
+  "edges": [
+    { "from": 0, "to": 1, "line": 1, "taint": "t", "kind": "extern",
+      "condition": [], "sink_ref": "g_global", "carrier": "g_global", "escape_via": null, "escape_subkind": "global" },
+    { "from": 0, "to": 2, "line": 2, "taint": "t", "kind": "extern",
+      "condition": [], "sink_ref": "g_global", "carrier": "g_global", "escape_via": null, "escape_subkind": "global" },
+    { "from": 0, "to": 3, "line": 3, "taint": "t", "kind": "extern",
+      "condition": [], "sink_ref": "g_global", "carrier": "g_global", "escape_via": null, "escape_subkind": "global" },
+    { "from": 0, "to": 4, "line": 4, "taint": "t", "kind": "callee",
+      "condition": [], "sink_ref": "reader" }
+  ],
+  "followups": [
+    { "kind": "escape_track", "target_func": null, "target_taint": null, "origin_edge": "0->1",
+      "note": "carrier=g_global 的第一条 extern 边 -> escape tracker 找 g_global 的读者" },
+    { "kind": "escape_track_dedup", "target_func": null, "target_taint": null, "origin_edge": "0->2",
+      "note": "carrier=g_global 重复, 跳过 (已在 0->1 发过 escape_track)" },
+    { "kind": "escape_track_dedup", "target_func": null, "target_taint": null, "origin_edge": "0->3",
+      "note": "carrier=g_global 重复, 跳过 (已在 0->1 发过 escape_track)" },
+    { "kind": "callee", "target_func": "reader", "target_taint": "norm(reader形参名)", "origin_edge": "0->4" }
+  ],
+  "design_note": "DAG 里 3 条 extern 边都是合法 escape (写全局变量), 但 carrier 相同 (g_global)。orchestrator 按 carrier 去重: 只发一条 escape_track。避免同一 carrier 的重复 reader_finder 会话。"
+}

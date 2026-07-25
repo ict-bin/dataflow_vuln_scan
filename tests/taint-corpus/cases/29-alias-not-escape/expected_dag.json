@@ -1,0 +1,21 @@
+{
+  "taint_signature": "msg",
+  "nodes": [
+    { "id": 0, "line": 0, "taint": "msg", "parents": [], "checks": [], "prune": null },
+    { "id": 1, "line": 1, "taint": "header", "parents": [0], "checks": [], "prune": null },
+    { "id": 2, "line": 2, "taint": "header->field", "parents": [1], "checks": [], "prune": null },
+    { "id": 3, "line": 4, "taint": "header->field", "parents": [2], "checks": [], "prune": null }
+  ],
+  "edges": [
+    { "from": 0, "to": 1, "line": 1, "taint": "msg", "kind": "inside",
+      "condition": [], "sink_ref": null, "carrier": null, "escape_via": null, "escape_subkind": null },
+    { "from": 1, "to": 2, "line": 2, "taint": "msg", "kind": "inside",
+      "condition": [], "sink_ref": null, "carrier": null, "escape_via": null, "escape_subkind": null },
+    { "from": 2, "to": 3, "line": 4, "taint": "header->field", "kind": "callee",
+      "condition": [], "sink_ref": "process" }
+  ],
+  "followups": [
+    { "kind": "callee", "target_func": "process", "target_taint": "norm(process形参名)", "origin_edge": "2->3" }
+  ],
+  "design_note": "不是 escape: header 是局部变量 (从 msg 获取), 是 msg 的别名。写 header->field = msg 是 inside 传播, 不是 extern。污点仍在 msg 的嵌套结构内, 未跨越到其他作用域。不应触发 escape_track。"
+}

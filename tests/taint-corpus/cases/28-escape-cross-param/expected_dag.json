@@ -1,0 +1,20 @@
+{
+  "taint_signature": "data",
+  "nodes": [
+    { "id": 0, "line": 0, "taint": "data", "parents": [], "checks": [], "prune": null },
+    { "id": 1, "line": 1, "taint": "data", "parents": [0], "checks": [], "prune": null },
+    { "id": 2, "line": 2, "taint": "data", "parents": [0], "checks": [], "prune": null }
+  ],
+  "edges": [
+    { "from": 0, "to": 1, "line": 1, "taint": "data", "kind": "extern",
+      "condition": [], "sink_ref": "buf", "carrier": "buf", "escape_via": null, "escape_subkind": "field_alias" },
+    { "from": 0, "to": 2, "line": 2, "taint": "data", "kind": "callee",
+      "condition": [], "sink_ref": "C" }
+  ],
+  "followups": [
+    { "kind": "escape_track", "target_func": null, "target_taint": null, "origin_edge": "0->1",
+      "note": "data 污点跨越到另一个入参 buf -> escape tracker 找读 buf 的函数" },
+    { "kind": "callee", "target_func": "C", "target_taint": "norm(C形参名)", "origin_edge": "0->2" }
+  ],
+  "design_note": "真 escape: 污点从入参 data 跨越到另一个入参 buf。buf 是函数签名声明的入参, 写 buf 的字段 = extern。"
+}
