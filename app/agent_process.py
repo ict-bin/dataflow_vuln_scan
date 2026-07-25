@@ -479,11 +479,13 @@ class AgentProcessHandle:
 
         try:
             self.proc.wait(timeout=term_timeout)
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as e:
             self.logger(
                 f"terminate_tree wait timeout [{self.label}] reason={reason} "
                 f"pid={self.proc.pid} pgid={self.pgid}"
             )
+            logger.warning("terminate_tree wait timeout [%s] pid=%s pgid=%s: %s",
+                           self.label, self.proc.pid, self.pgid, e, exc_info=True)
         except ProcessLookupError:
             return
         else:

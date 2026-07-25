@@ -102,6 +102,7 @@ class ThreadedProbeServer:
                     self.wfile.write(body)
                     server._record_response()
                 except Exception as exc:
+                    logger.warning("probe payload provider failed: %s", exc, exc_info=True)
                     server._record_error(exc)
                     body = json.dumps({"status": "error", "detail": str(exc)}, ensure_ascii=False).encode("utf-8")
                     self.send_response(int(HTTPStatus.SERVICE_UNAVAILABLE))

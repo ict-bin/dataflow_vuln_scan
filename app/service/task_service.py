@@ -541,6 +541,7 @@ def _revoke_celery_task(row: AppDvsTask) -> None:
     except Exception as exc:
         log_event(logger, logging.WARNING, "celery revoke failed (stale scan will recover)",
                   event="task_celery_revoke_failed", task_id=row.task_id, celery_task_id=cid, error=str(exc))
+        logger.debug("celery revoke failed traceback", exc_info=True)
 
 
 def _get_runtime_invalidation(task_id: str) -> str | None:

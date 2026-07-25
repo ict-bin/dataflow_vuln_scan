@@ -107,6 +107,7 @@ def _run_pi_compact(
         )
     except OSError as e:
         _log_warn(f"compact: failed to start pi process: {e}")
+        logger.debug("compact start pi process OSError traceback", exc_info=True)
         return False
 
     try:
@@ -177,6 +178,7 @@ def _run_pi_compact(
         return compact_success
     except Exception as e:
         _log_warn(f"compact: exception: {e}")
+        logger.debug("compact exception traceback", exc_info=True)
         return False
     finally:
         _terminate_pi_process_tree(proc, reason="compact_done")
@@ -358,6 +360,7 @@ def run_agent(
         pi_cmd = _find_pi_command()
     except FileNotFoundError as e:
         _log_error(f"pi executable not found: {e}")
+        logger.debug("pi executable not found traceback", exc_info=True)
         r = AgentResult()
         r.error = str(e)
         r.exit_code = -1
@@ -851,6 +854,7 @@ def _run_with_api_retry(
                     ps_thread.join(timeout=180.0)
                 except Exception as _se:
                     _log_warn(f"post_skill RPC second turn error (ignored): {_se}")
+                    logger.debug("post_skill RPC second turn error traceback", exc_info=True)
 
             # Drain remaining stdout
             if agent_ended:
@@ -899,13 +903,15 @@ def _run_with_api_retry(
                     process_label,
                     result.exit_code,
                 )
-            except subprocess.TimeoutExpired:
-                _log_warn("pi process did not exit within 15s, force terminating")
+            except subprocess.TimeoutExpired as e:
+                _log_warn(f"pi process did not exit within 15s, force terminating: {e}")
+                logger.debug("pi process term timeout traceback", exc_info=True)
                 _terminate_pi_process_tree(proc, reason="exit_timeout")
                 result.exit_code = -1
 
         except Exception as e:
             _log_warn(f"pi process read exception: {e}")
+            logger.debug("pi process read exception traceback", exc_info=True)
             result.error = f"pi process read error: {e}"
             result.exit_code = -1
             _terminate_pi_process_tree(proc, reason=f"read_exception:{type(e).__name__}")

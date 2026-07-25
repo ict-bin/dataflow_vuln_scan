@@ -354,6 +354,7 @@ def _resolve_pi_model(model: str) -> str:
             return resolved
     except Exception as exc:
         _log_warn(f"resolve pi model failed for {raw!r}: {exc}")
+        logger.debug("resolve pi model failed traceback", exc_info=True)
     return raw
 
 
