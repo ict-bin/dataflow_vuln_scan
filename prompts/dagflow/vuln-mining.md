@@ -38,3 +38,9 @@
 ```
 
 无漏洞时 `findings: []`。不靠函数名预筛 (check_*/handle_* 名字不可信, 须按链效应/源码判)。
+
+## 约束（防止会话爆炸）
+
+- **查宏/typedef/struct 定义**: 走 `python3 /opt/dataflow_vuln_scan/tools/v2_db.py symbol <name>`（一次搜全源码）。搜不到 = 定义不在项目源码中（可能在外部库头文件）。
+- **定义搜不到时不要继续找**: 不重复 grep/find/read 搜同一符号。搜一次 `v2_db symbol` 找不到就往下执行分析。
+- **报告时说明**: 若 finding 依赖一个找不到定义的符号（如宏 `XXX`），在 `evidence` 中注明「`XXX` 定义不在项目源码中，漏洞成立条件：`XXX` 满足某条件（如 `XXX > 缓冲区大小`）」。不要假设最坏情况直接报漏洞——须在 `dimensions.D3.reason` 中说明该符号未找到、漏洞仅在特定条件下成立。
