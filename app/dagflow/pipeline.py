@@ -5,6 +5,7 @@ feature_flags.dagflow_mode 开启时由 task_service 分流到此类。
 """
 from __future__ import annotations
 import logging, sqlite3, threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -305,7 +306,7 @@ class DagflowPipeline:
             orch = DagflowOrchestrator(
                 store=store, analyze_fn=analyze_fn,
                 func_lookup=func_index.get_by_name, on_event=self.on_event,
-                n_workers=1,  # dagflow 串行 (大函数 LLM DAG 输出大, 并发 OOM 8Gi; mining 本就串行)
+                n_workers=max(1, int(getattr(self.config, "callee_concurrency", 4) or 4)),  # DAG 会话比 V2 轻, 并发度 >= V2
                 task_id=task_id, cancel_event=self.cancel_event,
                 tracker_dispatcher=dispatcher, graph_recorder=graph_rec)
             orch._func_lookup_by_id = func_index.get_by_id
@@ -332,17 +333,29 @@ class DagflowPipeline:
             miner.cancel_event = self.cancel_event
             total_findings = 0
             # 多轮: 跟踪产新 DAG 后传出点就绪状态变化; 简化为单轮 (跟踪完成后挖一轮)
+            # 挖掘会话互相独立 (每个 (func,taint) 独立 agent), 可并行 (设计 §10)
+            _mine_workers = max(1, int(getattr(self.config, "callee_concurrency", 4) or 4))
+            _mine_lock = threading.Lock()
+            _candidates = []
             for fid, ts in list(store.list_analyzed()):
                 func = func_index.get_by_id(fid)
                 if func is None:
                     logger.warning("[dagflow-mine] SKIP (func not indexed): fid=%s taint=%s", fid[:12], ts)
                     continue
                 if trigger.is_ready(store, fid, ts, func_index.get_by_name):
-                    try:
-                        fs = miner.mine(func, ts)
-                        total_findings += len(fs)
-                    except Exception as e:
-                        logger.exception("mine %s/%s failed: %s", func.name, ts, e)
+                    _candidates.append((func, ts))
+            def _mine_one(args):
+                func, ts = args
+                try:
+                    fs = miner.mine(func, ts)
+                    with _mine_lock:
+                        nonlocal_ref[0] += len(fs)
+                except Exception as e:
+                    logger.exception("mine %s/%s failed: %s", func.name, ts, e)
+            nonlocal_ref = [0]
+            with ThreadPoolExecutor(max_workers=_mine_workers) as pool:
+                list(pool.map(_mine_one, _candidates))
+            total_findings = nonlocal_ref[0]
             logger.info("[dagflow] PHASE 2 DONE: findings=%d", total_findings)
             self._emit("v2_dagflow_phase", phase="mining_done", findings=total_findings, task_id=task_id)
             self._emit("task_end", task_id=task_id)
