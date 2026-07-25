@@ -121,6 +121,7 @@ class DagflowOrchestrator:
         """从 DAG 边发跟入项入队 (callee/return/escape/indirect)。 callee depth+1。
         return 边回传给 caller (caller_func_id, 非 dag 自己)。"""
         callees: list[str] = []
+        seen_carriers: set[str] = set()  # escape_track 按 carrier 去重
         for node in dag.nodes:
             for e in node.children:
                 if e.kind == "callee":
@@ -130,6 +131,11 @@ class DagflowOrchestrator:
                 elif e.kind == "return":
                     self._emit_return(dag, node, e, caller_func_id, depth)
                 elif e.kind in ("extern", "container"):
+                    carrier = e.carrier or e.sink_ref or ""
+                    if carrier and carrier in seen_carriers:
+                        continue  # 同一 carrier 已发过 escape_track, 跳过
+                    if carrier:
+                        seen_carriers.add(carrier)
                     self._wq.put(WorkItem(kind="escape_track", origin_func=dag.func_id,
                                           origin_node=node.id, depth=depth,
                                           origin_edge=f"{node.id}->{e.to_node}"))
