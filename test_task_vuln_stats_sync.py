@@ -6,6 +6,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.db.models import AppDvsTask
+from app.service.task_paths import open_authoritative_vuln_scan_store
 from app.service.task_service import TaskService, _sync_task_vuln_stats
 from app.vuln_store import VulnScanStore
 
@@ -176,3 +177,21 @@ def test_get_task_refreshes_vuln_snapshot_from_authoritative_sqlite(tmp_path: Pa
     finally:
         db_session.close()
         engine.dispose()
+
+
+def test_open_authoritative_vuln_scan_store_can_read_live_sqlite_without_wal(tmp_path: Path):
+    task_root = tmp_path / "output-root" / "dvs_task_1"
+    run_db = task_root / "run" / "vuln-scan.sqlite"
+    _insert_run_and_findings(run_db, task_id="dvs_task_1", run_id="run-1", reported=1, unreported=0)
+
+    store = open_authoritative_vuln_scan_store(
+        task_root,
+        prefer_live=True,
+        readonly=True,
+        enable_wal=False,
+    )
+
+    assert store is not None
+    assert store.readonly is True
+    assert store.enable_wal is False
+    assert [item["finding_id"] for item in store.list_task_findings("dvs_task_1")] == ["finding-r-0"]

@@ -73,13 +73,23 @@ def resolve_authoritative_vuln_scan_sqlite(task_root: Path | None, *, prefer_liv
     return resolve_archived_vuln_scan_sqlite(task_root) if prefer_live else resolve_live_vuln_scan_sqlite(task_root)
 
 
-def open_authoritative_vuln_scan_store(task_root: Path | None, *, prefer_live: bool = True):
+def open_authoritative_vuln_scan_store(
+    task_root: Path | None,
+    *,
+    prefer_live: bool = True,
+    readonly: bool = False,
+    enable_wal: bool = True,
+):
     db_path = resolve_authoritative_vuln_scan_sqlite(task_root, prefer_live=prefer_live)
     if db_path is None:
         return None
     from app.vuln_store import VulnScanStore
 
-    return VulnScanStore(db_path)
+    return VulnScanStore(
+        db_path,
+        readonly=readonly,
+        enable_wal=enable_wal,
+    )
 
 
 def authoritative_task_vuln_stats(task_root: Path | None, task_id: str, *, prefer_live: bool = True) -> tuple[int, int, int] | None:

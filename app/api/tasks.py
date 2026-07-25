@@ -2005,7 +2005,12 @@ def generate_prompt(body: GeneratePromptRequest):
     return {"prompt": generate_prompt_from_path(body.input_path)}
 def _graph_store_for_run_root(run_root: Path, task_id: str = "", *, task_root: Path | None = None):
     """图谱详情固定从 task_root 下的 authoritative SQLite 读取。"""
-    store = open_authoritative_vuln_scan_store(task_root, prefer_live=True)
+    store = open_authoritative_vuln_scan_store(
+        task_root,
+        prefer_live=True,
+        readonly=True,
+        enable_wal=False,
+    )
     if store is not None:
         return store
     if task_root is None:

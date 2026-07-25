@@ -192,21 +192,39 @@ class VulnFindingRecord:
 
 
 class VulnScanStore:
-    def __init__(self, db_path: str | Path, mysql_store=None):
+    def __init__(
+        self,
+        db_path: str | Path,
+        mysql_store=None,
+        *,
+        readonly: bool = False,
+        enable_wal: bool = True,
+    ):
         self.db_path = Path(db_path)
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.readonly = bool(readonly)
+        self.enable_wal = bool(enable_wal)
+        if not self.readonly:
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._mysql = mysql_store
-        self.init_schema()
+        if not self.readonly:
+            self.init_schema()
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
-        conn = sqlite3.connect(str(self.db_path), timeout=30)
+        if self.readonly:
+            conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True, timeout=30)
+        else:
+            conn = sqlite3.connect(str(self.db_path), timeout=30)
         conn.row_factory = sqlite3.Row
         try:
-            conn.execute("PRAGMA journal_mode=WAL")
+            if self.enable_wal:
+                conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA foreign_keys=ON")
+            if self.readonly:
+                conn.execute("PRAGMA query_only=ON")
             yield conn
-            conn.commit()
+            if not self.readonly:
+                conn.commit()
         finally:
             conn.close()
 
