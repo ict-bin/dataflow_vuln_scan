@@ -137,7 +137,8 @@ class ConfigService:
     def get_failure_debug_config(self, db: Session) -> dict:
         try:
             row = db.query(AppDvsDebugConfig).filter_by(config_key=self._FAILURE_DEBUG_KEY).first()
-        except Exception:
+        except Exception as e:
+            logger.warning("query debug config failed: %s", e, exc_info=True)
             return {"model": None, "updated_at": None}
         if row and row.config_json:
             data = dict(row.config_json)

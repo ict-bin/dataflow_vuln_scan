@@ -379,8 +379,8 @@ def submit_analyse(body: AnalyseRequest):
         for q in entry.queues:
             try:
                 q.put_nowait(d)
-            except QueueFull:
-                pass
+            except QueueFull as e:
+                logger.debug("SSE queue full, drop event: %s", e)
 
     orch = Orchestrator(config=cfg, on_event=on_event, task_id=task_id)
     entry = TaskEntry(orch, task_id, body.prompt)
@@ -391,6 +391,7 @@ def submit_analyse(body: AnalyseRequest):
         try:
             entry.result = orch.execute_recursive(task_id)
         except Exception as e:
+            logger.warning("orchestrate task failed (task=%s): %s", task_id, e, exc_info=True)
             entry.result = TaskResult(
                 task_id=task_id, status=TaskStatus.ERROR,
                 task=body.prompt, error=str(e))
@@ -402,8 +403,8 @@ def submit_analyse(body: AnalyseRequest):
             for q in entry.queues:
                 try:
                     q.put_nowait(done_data)
-                except QueueFull:
-                    pass
+                except QueueFull as e:
+                    logger.debug("SSE done queue full, drop: %s", e)
             entry.done.set()
             if entry.callback_url and entry.result:
                 _notify(entry)
@@ -432,8 +433,8 @@ def _notify(entry: TaskEntry):
                 "duration_ms": entry.result.total_duration_ms,
                 "cost": entry.result.total_tokens.cost,
             })
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("server callback failed: %s", e, exc_info=True)
 
 
 @app.get("/task/{task_id}")
@@ -471,7 +472,8 @@ def stream_task(task_id: str):
                     yield {"data": json.dumps(evt, ensure_ascii=False)}
                     if evt.get("type") == "done":
                         return
-                except queue.Empty:
+                except queue.Empty as e:
+                    logger.debug("queue empty, yield keepalive: %s", e)
                     yield {"comment": "keepalive"}
         finally:
             if queue in entry.queues:

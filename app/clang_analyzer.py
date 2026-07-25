@@ -153,7 +153,8 @@ def _get_tu(source_root: str, source_file: str) -> Any | None:
 def _line(cursor: Any) -> int:
     try:
         return int(cursor.extent.start.line)
-    except Exception:
+    except Exception as e:
+        logger.debug("clang cursor.extent.start.line unavailable: %s", e)
         return 0
 
 
@@ -163,7 +164,8 @@ def _node_group_id(cursor: Any) -> str:
         ext = cursor.extent
         start, end = ext.start, ext.end
         raw = f"{start.file.name if start.file else ''}:{start.line}:{start.column}:{end.line}:{end.column}"
-    except Exception:
+    except Exception as e:
+        logger.debug("clang cursor extent unavailable, fallback id: %s", e)
         raw = str(id(cursor))
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
 
@@ -175,7 +177,8 @@ def _cursor_text(cursor: Any, source_lines: list[str]) -> str:
         if s < 1 or e < s or e > len(source_lines):
             return ""
         return "\n".join(source_lines[s - 1:e]).strip()
-    except Exception:
+    except Exception as e:
+        logger.debug("clang cursor text decode failed: %s", e)
         return ""
 
 
@@ -191,7 +194,8 @@ def _collect_matching_call_expr_names(cursor: Any, callee_names: set[str]) -> se
     def walk(node: Any) -> None:
         try:
             kind = node.kind
-        except Exception:
+        except Exception as e:
+            logger.debug("clang node.kind unavailable: %s", e)
             return
         if kind == _cindex.CursorKind.CALL_EXPR:
             ref = node.referenced
@@ -365,7 +369,8 @@ def _read_cache(cache_dir: Path, source_file: str, func_name: str,
         if float(data.get("source_mtime") or 0) != source_mtime:
             return None
         return data
-    except Exception:
+    except Exception as e:
+        logger.debug("read clang cache json failed (rebuild): %s", e)
         return None
 
 
@@ -407,7 +412,8 @@ def analyze_function_callsites(
         return {}
     try:
         source_mtime = path.stat().st_mtime
-    except OSError:
+    except OSError as e:
+        logger.debug("stat source mtime failed (path=%s): %s", path, e)
         source_mtime = 0.0
 
     if cache_dir is not None:
@@ -426,7 +432,8 @@ def analyze_function_callsites(
 
     try:
         source_lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    except OSError:
+    except OSError as e:
+        logger.warning("read source for clang facts failed (path=%s): %s", path, e)
         source_lines = []
 
     callee_set = {n.rsplit("::", 1)[-1] for n in callee_names} | set(callee_names)
@@ -515,7 +522,8 @@ def get_function_callees(source_root: str, caller_file: str, caller_func: str,
         return None
     try:
         source_lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    except OSError:
+    except OSError as e:
+        logger.warning("read source for calls failed (path=%s): %s", path, e)
         source_lines = []
     return _collect_all_calls(fc, source_lines)
 
@@ -534,7 +542,8 @@ def get_function_line_range(source_root: str, caller_file: str,
         return None
     try:
         return (fc.extent.start.line, fc.extent.end.line)
-    except Exception:
+    except Exception as e:
+        logger.debug("clang fc.extent range unavailable: %s", e)
         return None
 
 
@@ -547,7 +556,8 @@ def callee_body_text(source_root: str, callee_file: str,
     path = Path(source_root) / callee_file
     try:
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    except OSError:
+    except OSError as e:
+        logger.warning("read source lines for clang failed (path=%s): %s", path, e)
         return None
     s, e = rng
     return "\n".join(lines[max(0, s - 1):e])

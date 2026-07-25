@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -17,6 +18,8 @@ from typing import Any
 import httpx
 
 from .config import get_service_yaml
+
+logger = logging.getLogger("dvs.vuln_intake_reporter")
 from .vuln_store import VulnFindingRecord
 
 SERVICE_NAME = "secflow-app-dataflow-vuln-scan"
@@ -57,7 +60,8 @@ def _normalize_severity(value: Any) -> str:
 def _confidence_percent(value: Any) -> int:
     try:
         number = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError) as e:
+        logger.debug("parse confidence value failed (raw=%r): %s", value, e)
         return 60
     if number <= 1:
         number *= 100
@@ -67,7 +71,8 @@ def _confidence_percent(value: Any) -> int:
 def _read_text(path: str | Path, *, limit: int = 200_000) -> str:
     try:
         text = Path(path).read_text(encoding="utf-8", errors="replace")
-    except Exception:
+    except Exception as e:
+        logger.warning("read intake report content failed (path=%s): %s", path, e)
         return ""
     if len(text) > limit:
         return text[:limit] + "\n\n...[truncated by DVS reporter]"

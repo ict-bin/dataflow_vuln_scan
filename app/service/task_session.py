@@ -29,8 +29,8 @@ def _write_json_atomic(path: Path, payload: dict) -> None:
     except Exception:
         try:
             os.unlink(tmp_name)
-        except FileNotFoundError:
-            pass
+        except FileNotFoundError as e:
+            logger.debug("unlink tmp already gone: %s", e)
         raise
 
 
@@ -55,7 +55,8 @@ def _safe_session_file(root: Path, relative_path: str) -> Path:
 def _path_accessible(path: Path) -> bool:
     try:
         return path.exists()
-    except OSError:
+    except OSError as e:
+        logger.debug("session path.exists check failed: %s", e)
         return False
 
 
@@ -73,7 +74,8 @@ def _parse_session_file(path: Path) -> dict[str, object]:
             continue
         try:
             obj = json.loads(line)
-        except Exception:
+        except Exception as e:
+            logger.debug("parse session line json failed (line %d): %s", index, e)
             warnings.append(f"第 {index} 行 JSON 解析失败")
             events.append({"type": "raw", "event_index": index, "line": index, "raw_line": line[:500], "summary": line[:200]})
             continue

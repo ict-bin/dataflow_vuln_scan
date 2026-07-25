@@ -10,11 +10,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import sqlite3
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+
+logger = logging.getLogger("dvs.global_cache")
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -314,14 +317,15 @@ def compute_func_hash(source_root: str, source_file: str, func_name: str) -> str
                 if p.exists():
                     file_path = Path(source_root) / p
                     break
-        except (FileNotFoundError, subprocess.TimeoutExpired, subprocess.SubprocessError):
-            pass
+        except (FileNotFoundError, subprocess.TimeoutExpired, subprocess.SubprocessError) as e:
+            logger.debug("git subprocess cache failed: %s", e)
     if not file_path.exists():
         return ""
     try:
         data = file_path.read_bytes()
         return hashlib.sha1(data).hexdigest()[:20]
-    except OSError:
+    except OSError as e:
+        logger.debug("read cache file failed (path=%s): %s", file_path, e)
         return ""
 
 

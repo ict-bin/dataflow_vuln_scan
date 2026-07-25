@@ -5,10 +5,13 @@ Fallback: tree-sitter enriches with validation conditions (if/while guards).
 """
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger("dvs.callsite_analysis")
 
 _CPP_EXTS = {".cc", ".cpp", ".cxx", ".hpp", ".hh", ".hxx"}
 
@@ -23,7 +26,8 @@ class CallsiteInfo:
 def _line_num(line_hint: str) -> int:
     try:
         return int(str(line_hint or "").lstrip("Ll"))
-    except ValueError:
+    except ValueError as e:
+        logger.debug("parse line_hint failed (raw=%r): %s", line_hint, e)
         return 0
 
 
@@ -33,7 +37,8 @@ def _read_lines(source_root: str, source_file: str) -> list[str] | None:
         return None
     try:
         return path.read_text(encoding="utf-8", errors="replace").splitlines()
-    except OSError:
+    except OSError as e:
+        logger.warning("read source for callsite failed (path=%s): %s", path, e)
         return None
 
 
@@ -99,14 +104,16 @@ def _tree_sitter_validations(
         from tree_sitter import Language, Parser
         import tree_sitter_c
         import tree_sitter_cpp
-    except ImportError:
+    except ImportError as e:
+        logger.debug("optional tree_sitter import failed: %s", e)
         return []
     path = Path(source_root) / source_file
     if not path.is_file():
         return []
     try:
         data = path.read_bytes()
-    except OSError:
+    except OSError as e:
+        logger.warning("read source bytes for callsite failed (path=%s): %s", path, e)
         return []
     try:
         lang = (
@@ -117,7 +124,8 @@ def _tree_sitter_validations(
         parser = Parser()
         parser.language = lang
         tree = parser.parse(data)
-    except Exception:
+    except Exception as e:
+        logger.warning("tree-sitter parse callsite failed (path=%s): %s", path, e)
         return []
     short = callee_function.rsplit("::", 1)[-1]
     target_line = _line_num(line_hint)

@@ -7,7 +7,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
+
+logger = logging.getLogger("dvs.vuln_report_utils")
 from pathlib import Path
 from typing import Any
 
@@ -16,7 +19,8 @@ def read_prompt(path: str) -> str:
     """读取仓库内提示词文件 (相对 app/ 目录)。"""
     try:
         return (Path(__file__).resolve().parents[1] / path).read_text(encoding="utf-8")
-    except OSError:
+    except OSError as e:
+        logger.debug("read report template failed (path=%s): %s", path, e)
         return ""
 
 

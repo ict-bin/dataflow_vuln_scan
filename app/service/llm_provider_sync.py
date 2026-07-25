@@ -44,7 +44,8 @@ def _as_positive_int(value: Any, default: int) -> int:
     try:
         parsed = int(value)
         return parsed if parsed > 0 else default
-    except (TypeError, ValueError):
+    except (TypeError, ValueError) as e:
+        logger.debug("parse int value failed (raw=%r): %s", value, e)
         return default
 
 
@@ -64,7 +65,8 @@ def _floor_max_tokens(mt: Any) -> int:
     try:
         v = int(mt)
         return max(v, _MIN_MAX_TOKENS) if v > 0 else _MIN_MAX_TOKENS
-    except (TypeError, ValueError):
+    except (TypeError, ValueError) as e:
+        logger.debug("parse max_tokens failed (raw=%r): %s", mt, e)
         return _MIN_MAX_TOKENS
 
 

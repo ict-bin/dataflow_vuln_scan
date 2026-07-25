@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import logging
 import math
 import re
 from collections import defaultdict
+
+logger = logging.getLogger("dvs.metrics_summary")
 from dataclasses import dataclass
 from typing import Any
 
@@ -32,7 +35,8 @@ def parse_prometheus_metrics(text: str | bytes) -> list[MetricRow]:
         name, labels_raw, value_raw = match.groups()
         try:
             value = float(value_raw)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError) as e:
+            logger.debug("parse metric value failed (raw=%r): %s", value_raw, e)
             continue
         labels = {key: _unescape(value) for key, value in _LABEL_RE.findall(labels_raw or "")}
         family_name = _family_name(name)

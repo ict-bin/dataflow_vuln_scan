@@ -33,11 +33,12 @@ def run_dvs_task(self, task_id: str) -> dict:
     # 新进程组: pi/node 子进程都进本组, revoke 时 killpg 一锅端
     try:
         os.setsid()
-    except OSError:
-        pass
+    except OSError as e:
+        logger.debug("os.setsid failed (already session leader?): %s", e)
     try:
         pgid = os.getpgid(0)
-    except OSError:
+    except OSError as e:
+        logger.debug("os.getpgid(0) failed, fallback self pid: %s", e)
         pgid = os.getpid()
     with _PGID_LOCK:
         _PGID[celery_id] = pgid
@@ -55,8 +56,8 @@ def run_dvs_task(self, task_id: str) -> dict:
     finally:
         try:
             next(db_gen)
-        except StopIteration:
-            pass
+        except StopIteration as e:
+            logger.debug("db_gen exhausted: %s", e)
 
     if claimed is None:
         # 已被别的活 worker 认领 (running+新鲜) 或已终态 → 本消息作废 (ack 掉, 不执行)
@@ -131,8 +132,8 @@ def _clean_task_artifacts(task_id: str) -> None:
         finally:
             try:
                 next(db_gen)
-            except StopIteration:
-                pass
+            except StopIteration as e:
+                logger.debug("db_gen exhausted: %s", e)
     except Exception:
         logger.warning("_clean_task_artifacts failed task=%s", task_id, exc_info=True)
 
@@ -151,9 +152,11 @@ def _on_revoked(sender, request, **kwargs):
     for sig in (signal.SIGTERM, signal.SIGKILL):
         try:
             os.killpg(pgid, sig)
-        except ProcessLookupError:
+        except ProcessLookupError as e:
+            logger.debug("killpg process gone: %s", e)
             return
-        except OSError:
+        except OSError as e:
+            logger.debug("killpg OSError: %s", e)
             return
         if sig == signal.SIGTERM:
             import time

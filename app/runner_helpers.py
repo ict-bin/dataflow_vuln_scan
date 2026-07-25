@@ -159,7 +159,8 @@ def _sleep_with_cancel(delay: float, cancel_event: threading.Event | None) -> bo
     try:
         cancelled = waiter(timeout=delay)
         return bool(cancelled)
-    except TypeError:
+    except TypeError as e:
+        logger.debug("waiter(timeout) not callable, busy-wait fallback: %s", e)
         deadline = time.monotonic() + max(0.0, float(delay))
         while time.monotonic() < deadline:
             if getattr(cancel_event, "is_set", lambda: False)():
@@ -259,7 +260,8 @@ def _parse_context_overflow_details(error_text: str | None) -> dict[str, int]:
             continue
         try:
             details[key] = int(match.group(1).replace(",", ""))
-        except ValueError:
+        except ValueError as e:
+            logger.debug("parse detail int failed (key=%s): %s", key, e)
             continue
     if details["provider_reported_context_length"] and not details["context_length"]:
         details["context_length"] = details["provider_reported_context_length"]
@@ -363,7 +365,8 @@ def _resolve_pi_model(model: str) -> str:
 def _proc_group_id(proc: subprocess.Popen) -> int | None:
     try:
         return process_group_id(proc.pid)
-    except Exception:
+    except Exception as e:
+        logger.warning("process_group_id failed (pid=%s): %s", proc.pid, e, exc_info=True)
         return None
 
 
@@ -398,14 +401,14 @@ def _terminate_pi_process_tree(
                     os.killpg(pgid, signal.SIGKILL)
                 else:
                     proc.kill()
-            except ProcessLookupError:
-                pass
+            except ProcessLookupError as e:
+                logger.debug("kill proc gone: %s", e)
             try:
                 proc.wait(timeout=5.0)
             except subprocess.TimeoutExpired:
                 logger.error("pi process tree could not be killed: pid=%s", pid)
-    except ProcessLookupError:
-        pass
+    except ProcessLookupError as e:
+        logger.debug("killpg process gone: %s", e)
     except Exception as exc:
         logger.warning("error terminating pi process tree pid=%s: %s", pid, exc)
     finally:
@@ -417,8 +420,8 @@ def _terminate_pi_process_tree(
             if pipe is not None:
                 try:
                     pipe.close()
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("close pipe failed: %s", e)
 
 
 # ─── Argument building ────────────────────────────────────────────────────────

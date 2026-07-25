@@ -37,7 +37,8 @@ def _read_json(path: Path) -> dict[str, Any] | None:
         return None
     try:
         return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
+    except Exception as e:
+        logger.warning("read pi runtime config failed (path=%s): %s", path, e, exc_info=True)
         return None
 
 

@@ -45,7 +45,8 @@ def _timeout_env(name: str) -> float | None:
     try:
         v = float(raw)
         return v if v > 0 else None
-    except ValueError:
+    except ValueError as e:
+        logger.debug("parse float raw failed: %s", e)
         return None
 
 
@@ -92,8 +93,8 @@ class FailureDebugService:
         self._stop_event.set()
         try:
             self._queue.put_nowait("")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("put_nowait keepalive failed (queue full?): %s", e)
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=5.0)
         self._thread = None
@@ -150,7 +151,8 @@ class FailureDebugService:
         while not self._stop_event.is_set():
             try:
                 task_id = self._queue.get(timeout=5.0)
-            except queue.Empty:
+            except queue.Empty as e:
+                logger.debug("failure_debug queue empty: %s", e)
                 continue
             if not task_id:
                 continue
@@ -160,8 +162,8 @@ class FailureDebugService:
                 logger.exception("debug failed for task %s", task_id)
             try:
                 self._queue.task_done()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("task_done failed (queue closed?): %s", e)
 
     def _debug_one_by_id(self, task_id: str) -> None:
         """从 DB 加载任务并调试。"""
@@ -297,8 +299,8 @@ class FailureDebugService:
                         loaded = json.loads(r.payload_json)
                         if isinstance(loaded, dict):
                             payload = loaded
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.warning("parse failure_debug payload json failed: %s", e, exc_info=True)
                 out.append({
                     "ts": r.created_at.isoformat() if r.created_at else "",
                     "event_type": r.event_type,

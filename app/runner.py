@@ -151,7 +151,8 @@ def _run_pi_compact(
                 continue
             try:
                 evt = json.loads(decoded)
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as e:
+                logger.debug("parse pi event json failed, skip: %s", e)
                 continue
             evt_type = evt.get("type", "")
             if evt_type == "compaction_end":
@@ -172,8 +173,8 @@ def _run_pi_compact(
         if proc.stdin and not proc.stdin.closed:
             try:
                 proc.stdin.close()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("close pi stdin failed: %s", e)
         proc.wait(timeout=10)
         return compact_success
     except Exception as e:
@@ -377,8 +378,8 @@ def run_agent(
         try:
             Path(_sp_path).write_text(system_prompt, encoding="utf-8")
             args.extend(["--system-prompt", _sp_path])
-        except OSError:
-            pass
+        except OSError as e:
+            logger.warning("write system_prompt file failed (_sp_path=%s): %s", _sp_path, e)
 
     timeout_seconds = _normalize_timeout_seconds(run_timeout_seconds)
     timeout_failures = 0
@@ -533,6 +534,7 @@ def _run_with_pi_retry(
             return result
 
         except (OSError, FileNotFoundError, PermissionError, _PiProcessError) as exc:
+            logger.warning("pi run attempt %d failed: %s", pi_attempt + 1, exc, exc_info=True)
             pi_attempt += 1
             label = f"{pi_attempt}/{_fmt_max(pi_max_retries)}"
 
@@ -697,8 +699,8 @@ def _run_with_api_retry(
                         process_label,
                     )
                     proc.stdin.close()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("close pi stdin (post-run) failed: %s", e)
 
         def _drain_stdout_lines(final_flush: bool = False):
             nonlocal agent_ended, stdout_buffer
@@ -757,13 +759,14 @@ def _run_with_api_retry(
                         try:
                             chunk = os.read(fd, 4096)
                         except BlockingIOError:
+                            logger.debug("os.read non-blocking no data")
                             continue
                         if not chunk:
                             if poller is not None:
                                 try:
                                     poller.unregister(fd)
-                                except Exception:
-                                    pass
+                                except Exception as e:
+                                    logger.debug("poller.unregister failed: %s", e)
                             open_fds.pop(fd, None)
                             continue
                         _mark_activity()
@@ -775,9 +778,11 @@ def _run_with_api_retry(
                         else:
                             stderr_buffer += chunk
                 _drain_stdout_lines(final_flush=True)
-            except TimeoutError:
+            except TimeoutError as e:
+                logger.debug("agent idle timeout: %s", e)
                 read_error = TimeoutError("agent idle timeout")
             except Exception as e:
+                logger.warning("read pi stdout failed: %s", e, exc_info=True)
                 read_error = e
 
         stdout_thread = threading.Thread(target=_read_pipes, daemon=True, name="dvs-stdout")
@@ -931,8 +936,8 @@ def _run_with_api_retry(
                 if _pipe is not None:
                     try:
                         _pipe.close()
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("close _pipe failed: %s", e)
 
         # idle-timeout (read_error=TimeoutError) 必须传播到 run_agent 的 except TimeoutError -> 重试。
         # 之前被转成 result.error 返回 -> 重试循环拿不到 -> 不重试 (bug: 可重试错误不重试)。
@@ -1060,7 +1065,8 @@ def _process_line(
         on_activity()
     try:
         event = json.loads(line)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as e:
+        logger.debug("parse event line json failed: %s", e)
         return False
 
     etype = event.get("type")

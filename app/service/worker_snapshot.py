@@ -5,11 +5,14 @@ v1 的 worker_slot DB 表已废弃; 改用 Celery inspect (ping/active/stats) �
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Any
 
 from app.runtime_context import LEASE_TTL_SECONDS
 from app.time_utils import now_local
+
+logger = logging.getLogger("dvs.worker_snapshot")
 
 
 @dataclass(frozen=True)
@@ -84,7 +87,8 @@ def build_worker_cluster_snapshot(db, *, project_id: str | None = None):
         ping = inspect.ping() or {}
         active = inspect.active() or {}
         stats = inspect.stats() or {}
-    except Exception:
+    except Exception as e:
+        logger.warning("celery inspect failed, worker state all empty: %s", e, exc_info=True)
         ping, active, stats = {}, {}, {}
 
     # celery_task_id → task 行映射 (running 任务的 active_jobs 详情)
@@ -113,7 +117,8 @@ def build_worker_cluster_snapshot(db, *, project_id: str | None = None):
         cap = 1
         try:
             cap = int((stats.get(worker_name) or {}).get("pool", {}).get("max-concurrency", 1))
-        except Exception:
+        except Exception as e:
+            logger.debug("parse pool max-concurrency failed, cap=1: %s", e)
             cap = 1
         total_cap += cap
         pod_tasks = active.get(worker_name) or []

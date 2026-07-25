@@ -70,7 +70,8 @@ class RegistryService:
                 self.register()
                 return False
             return resp.status_code == 200
-        except Exception:
+        except Exception as e:
+            logger.warning("nacos registry check failed: %s", e, exc_info=True)
             return False
 
     def _loop(self) -> None:

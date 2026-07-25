@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import signal
+
+logger = logging.getLogger("dvs.probe_runtime")
 import threading
 import time
 from http import HTTPStatus
@@ -25,7 +28,8 @@ class ProbeRuntime:
     def _read_text(self, path: str) -> str | None:
         try:
             return open(path, "r", encoding="utf-8").read().strip()
-        except OSError:
+        except OSError as e:
+            logger.debug("read probe file failed (path=%s): %s", path, e)
             return None
 
     def _read_pid(self) -> int | None:
@@ -34,7 +38,8 @@ class ProbeRuntime:
             return None
         try:
             pid = int(raw)
-        except ValueError:
+        except ValueError as e:
+            logger.debug("parse probe pid failed (raw=%r): %s", raw, e)
             return None
         return pid if pid > 0 else None
 
@@ -47,7 +52,8 @@ class ProbeRuntime:
             return None
         try:
             return float(raw)
-        except ValueError:
+        except ValueError as e:
+            logger.debug("parse probe float failed (raw=%r): %s", raw, e)
             return None
 
     def _startup_age_seconds(self, started_at: float | None) -> float | None:

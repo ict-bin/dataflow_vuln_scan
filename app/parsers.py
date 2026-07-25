@@ -5,9 +5,12 @@ from __future__ import annotations
 from sqlalchemy import func
 
 import json
+import logging
 import os
 import re
 from pathlib import Path
+
+logger = logging.getLogger("dvs.parsers")
 
 from .models import CalleeRef, WorkerResult
 
@@ -66,16 +69,16 @@ def _find_dataflow_file(worker_cwd: str, function_name: str = "") -> str:
                     head = c.read_text(encoding='utf-8', errors='replace')[:500]
                     if short in head.lower() or func_lower in head.lower():
                         return str(c)
-            except OSError:
-                pass
+            except OSError as e:
+                logger.debug("stat candidate failed (c=%s): %s", c, e)
         # 备选:文件名包含函数名
         for c in candidates:
             if short in c.name.lower() or func_lower in c.name.lower():
                 try:
                     if c.stat().st_size > 200:
                         return str(c)
-                except OSError:
-                    pass
+                except OSError as e:
+                    logger.debug("stat candidate size failed (c=%s): %s", c, e)
 
     # 取最新且 > 200 bytes 的文件
     candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
@@ -83,8 +86,8 @@ def _find_dataflow_file(worker_cwd: str, function_name: str = "") -> str:
         try:
             if c.stat().st_size > 200:
                 return str(c)
-        except OSError:
-            pass
+        except OSError as e:
+            logger.debug("stat candidate size failed (c=%s): %s", c, e)
     return str(candidates[0]) if candidates else ""
 
 
@@ -118,7 +121,8 @@ def _read_tainted_list(worker_cwd: str) -> list[CalleeRef]:
     tainted_file = unique[0]
     try:
         content = tainted_file.read_text(encoding="utf-8", errors="replace")
-    except OSError:
+    except OSError as e:
+        logger.warning("read tainted_file failed (path=%s): %s", tainted_file, e)
         return []
     for raw_line in content.splitlines():
         line = raw_line.strip()
@@ -152,8 +156,8 @@ def _get_best_output(worker: WorkerResult) -> str:
             content = Path(worker.dataflow_file).read_text(encoding="utf-8")
             if content.strip():
                 return content
-        except OSError:
-            pass
+        except OSError as e:
+            logger.warning("read dataflow_file failed: %s", e)
     return worker.output
 
 
@@ -365,8 +369,8 @@ def _extract_json_object(text: str, required_key: str) -> dict | None:
             obj = json.loads(code_match.group(1))
             if isinstance(obj, dict) and required_key in obj:
                 return obj
-        except json.JSONDecodeError:
-            pass
+        except json.JSONDecodeError as e:
+            logger.debug("parse json code block failed, skip: %s", e)
 
     # 找所有 '{' 的位置,尝试从每个位置开始解析完整 JSON
     for i, ch in enumerate(text):
@@ -404,8 +408,8 @@ def _extract_json_object(text: str, required_key: str) -> dict | None:
                         obj = json.loads(candidate)
                         if isinstance(obj, dict) and required_key in obj:
                             return obj
-                    except json.JSONDecodeError:
-                        pass
+                    except json.JSONDecodeError as e:
+                        logger.debug("parse json candidate failed, skip: %s", e)
                     break
     return None
 

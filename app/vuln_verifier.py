@@ -24,9 +24,12 @@ finding 做确定性结构化核验, 杀掉 LLM 常见的几类假象 (引用不
 from __future__ import annotations
 
 import json
+import logging
 import re
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger("dvs.vuln_verifier")
 
 from .clang_analyzer import (
     callee_body_contains_token,
@@ -57,7 +60,8 @@ def _file_line_count(source_root: str, rel_file: str) -> int | None:
     p = Path(source_root) / rel_file
     try:
         return len(p.read_text(encoding="utf-8", errors="replace").splitlines())
-    except OSError:
+    except OSError as e:
+        logger.warning("read source for verify failed (path=%s): %s", p, e)
         return None
 
 
@@ -125,7 +129,8 @@ def _audit_session_reads(fork_session_path: str) -> set[str]:
                 continue
             try:
                 ev = json.loads(line)
-            except (json.JSONDecodeError, ValueError):
+            except (json.JSONDecodeError, ValueError) as e:
+                logger.debug("verify session line json parse failed, skip: %s", e)
                 continue
             # 通用约定: tool_use 事件名可能是 tool_use / function_call / tool_call
             role = ev.get("role") or ev.get("type") or ""
@@ -140,7 +145,8 @@ def _audit_session_reads(fork_session_path: str) -> set[str]:
             # extract_func 常以参数形式传函数名 (无括号): 抓 "function":"xxx" / "name":"xxx"
             for m in re.finditer(r'["\'](?:function|func|name|symbol|target)["\']\s*[:=]\s*["\']([A-Za-z_][A-Za-z0-9_]*)["\']', blob):
                 read_names.add(m.group(1))
-    except OSError:
+    except OSError as e:
+        logger.warning("read verify trace failed: %s", e)
         pass
     return read_names
 

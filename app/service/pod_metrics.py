@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import ssl
 import urllib.error
 import urllib.request
 from functools import lru_cache
 from typing import Any
+
+logger = logging.getLogger("dvs.pod_metrics")
 
 
 K8S_NAMESPACE = str(os.environ.get("POD_NAMESPACE") or os.environ.get("K8S_NAMESPACE") or "secflow-ns").strip() or "secflow-ns"
@@ -65,7 +68,8 @@ def _load_auth() -> tuple[str, ssl.SSLContext] | tuple[None, None]:
     try:
         with open(K8S_TOKEN_PATH, "r", encoding="utf-8") as fh:
             token = fh.read().strip()
-    except Exception:
+    except Exception as e:
+        logger.debug("read K8S token failed (non-k8s env?): %s", e)
         return None, None
     if not token:
         return None, None
@@ -82,7 +86,8 @@ def _request_json(path: str) -> dict[str, Any] | None:
     try:
         with urllib.request.urlopen(request, context=context, timeout=5) as response:
             return json.loads(response.read().decode("utf-8", errors="replace"))
-    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as e:
+        logger.debug("k8s metrics api request failed: %s", e)
         return None
 
 

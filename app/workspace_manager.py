@@ -44,7 +44,8 @@ def _local_root() -> Path:
 def _sync_interval() -> float:
     try:
         return max(5.0, float(os.environ.get("DVS_LOCAL_WORKSPACE_SYNC_INTERVAL", "60")))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError) as e:
+        logger.debug("parse DVS_LOCAL_WORKSPACE_SYNC_INTERVAL failed, default 60: %s", e)
         return 60.0
 
 
@@ -124,7 +125,8 @@ class WorkspaceManager:
             # Remove the NFS directory so we can create the symlink
             try:
                 self._nfs_run_root.rmdir()
-            except OSError:
+            except OSError as e:
+                logger.debug("rmdir non-empty, fallback rmtree: %s", e)
                 shutil.rmtree(str(self._nfs_run_root), ignore_errors=True)
 
         # Create the symlink: NFS path → local path
@@ -463,7 +465,8 @@ def _move_contents(src: Path, dst: Path) -> None:
             else:
                 try:
                     item.rename(target)
-                except OSError:
+                except OSError as e:
+                    logger.debug("rename cross-device, fallback copytree: %s", e)
                     shutil.copytree(str(item), str(target))
                     shutil.rmtree(str(item), ignore_errors=True)
         else:
@@ -556,5 +559,6 @@ def _needs_copy(src: Path, dst: Path) -> bool:
         dst_stat = dst.stat()
         return (src_stat.st_mtime != dst_stat.st_mtime
                 or src_stat.st_size != dst_stat.st_size)
-    except OSError:
+    except OSError as e:
+        logger.debug("dst.exists stat broken, treat as synced: %s", e)
         return True

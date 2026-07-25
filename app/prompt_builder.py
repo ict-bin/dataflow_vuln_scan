@@ -4,9 +4,12 @@ prompt_builder.py — Worker/Judge Prompt 构造 + 结果格式化
 from __future__ import annotations
 from sqlalchemy import func
 
+import logging
 import os
 import re
 from pathlib import Path
+
+logger = logging.getLogger("dvs.prompt_builder")
 
 from .models import TaskConfig, TaskResult, TaskStatus, WorkerResult, WorkerEvaluation
 
@@ -324,7 +327,8 @@ def _build_combined_report(
             # 去除重复的 H1 标题行（格式：# 数据流漏洞追踪: FuncName）
             content = re.sub(r"^#\s+数据流漏洞追踪[：:][^\n]*\n", "", content, count=1)
             lines.append(content)
-        except OSError:
+        except OSError as e:
+            logger.debug("read prompt include failed (path=%s): %s", path, e)
             lines.append(f"> ⚠️ 文件读取失败: `{path}`")
         lines += ["", "---", ""]
 

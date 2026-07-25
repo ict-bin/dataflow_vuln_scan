@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import logging
 import os
 import threading
 import time
 from dataclasses import dataclass
+
+logger = logging.getLogger("dvs.resource_usage")
 from datetime import datetime
 
 from app.time_utils import isoformat_local, now_local
@@ -29,7 +32,8 @@ def _read_proc_stat(pid: int) -> tuple[int, int] | None:
     try:
         with open(f"/proc/{pid}/stat", "r", encoding="utf-8") as fh:
             payload = fh.read().strip()
-    except OSError:
+    except OSError as e:
+        logger.debug("read /proc stat failed (proc dead?): %s", e)
         return None
     end = payload.rfind(")")
     if end < 0:
@@ -41,7 +45,8 @@ def _read_proc_stat(pid: int) -> tuple[int, int] | None:
         utime = int(parts[11])
         stime = int(parts[12])
         rss_pages = int(parts[21])
-    except (TypeError, ValueError):
+    except (TypeError, ValueError) as e:
+        logger.debug("parse /proc stat fields failed: %s", e)
         return None
     return utime + stime, rss_pages * _PAGE_SIZE
 
@@ -53,7 +58,8 @@ def _read_mem_total_bytes() -> int | None:
                 if line.startswith("MemTotal:"):
                     parts = line.split()
                     return int(parts[1]) * 1024
-    except (OSError, ValueError, IndexError):
+    except (OSError, ValueError, IndexError) as e:
+        logger.debug("read /proc/meminfo failed (container limit?): %s", e)
         return None
     return None
 

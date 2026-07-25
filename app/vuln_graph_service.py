@@ -53,7 +53,8 @@ def load_vuln_scan_graph(run_root: str | Path) -> dict[str, Any]:
     for candidate in candidates:
         try:
             resolved = candidate.resolve()
-        except (OSError, RuntimeError):
+        except (OSError, RuntimeError) as e:
+            logger.debug("candidate resolve broken symlink, skip: %s", e)
             # Broken symlink (Worker pod replaced path with symlink to local /tmp)
             continue
         if resolved in seen:

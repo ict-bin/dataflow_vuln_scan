@@ -6,11 +6,17 @@ context can append deterministic taint/vulnerability facts without polluting the
 platform database.
 """
 from __future__ import annotations
+
+import logging
+
+logger = logging.getLogger("dvs.vuln_store")
+
 from sqlalchemy import func
 
 try:
     import fcntl  # type: ignore
-except Exception:  # pragma: no cover - Windows local tests
+except Exception as e:  # pragma: no cover - Windows local tests
+    logger.debug("fcntl import failed (non-unix): %s", e)
     fcntl = None
 import json
 import sqlite3
@@ -514,8 +520,8 @@ class VulnScanStore:
             ]:
                 try:
                     conn.execute(ddl)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning("execute ddl failed: %s", e, exc_info=True)
 
     def _upsert_rows(self, table: str, rows: list[dict[str, Any]]) -> None:
         if not rows:
@@ -886,14 +892,15 @@ class VulnScanStore:
             if fcntl is not None:
                 try:
                     fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
-                except OSError:
-                    pass
+                except OSError as e:
+                    logger.debug("flock LOCK_EX failed: %s", e)
             fh.seek(0)
             try:
                 data = json.loads(fh.read() or "[]")
                 if not isinstance(data, list):
                     data = []
-            except Exception:
+            except Exception as e:
+                logger.warning("parse validation facts cache failed: %s", e)
                 data = []
             data.append(entry)
             fh.seek(0)
@@ -903,8 +910,8 @@ class VulnScanStore:
             if fcntl is not None:
                 try:
                     fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
-                except OSError:
-                    pass
+                except OSError as e:
+                    logger.debug("flock LOCK_UN failed: %s", e)
 
     def record_container_taints(self, *, run_id: str, source_file: str, function_name: str, entries: list[dict[str, Any]], depth: int) -> None:
         """存储每函数分析后上报的容器驻留污点信息。
@@ -976,7 +983,8 @@ class VulnScanStore:
                 existing_facts = json.loads(row.get("validation_facts_json") or "[]")
                 if validation_covers(existing_facts, validation_facts or []):
                     return dict(row)
-            except Exception:
+            except Exception as e:
+                logger.warning("parse existing validation facts failed, skip: %s", e)
                 continue
         return None
 
@@ -1012,7 +1020,8 @@ class VulnScanStore:
         for row in rows:
             try:
                 existing_facts = json.loads(str(row.get("validation_facts_json") or "[]"))
-            except Exception:
+            except Exception as e:
+                logger.warning("parse validation_facts_json failed: %s", e)
                 existing_facts = []
             if validation_covers(str(row.get("validation_signature") or "none"), int(row.get("validation_risk_rank") or 100), validation_signature, validation_risk_rank, existing_facts, validation_facts or []):
                 return dict(row)
@@ -1121,7 +1130,8 @@ class VulnScanStore:
                 if not int(session.get("event_count") or 0):
                     with session_path.open("r", encoding="utf-8", errors="ignore") as handle:
                         session["event_count"] = sum(1 for _ in handle)
-            except Exception:
+            except Exception as e:
+                logger.debug("stat session event_count failed: %s", e)
                 continue
         node_by_id = {str(n["node_id"]): n for n in nodes}
         edges_by_source: dict[str, list[dict[str, Any]]] = {}

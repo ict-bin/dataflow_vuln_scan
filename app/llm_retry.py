@@ -171,6 +171,7 @@ def run_agent_with_design_retry(
             try:
                 parsed, warn = parse_check(result, all_texts)
             except Exception as exc:
+                logger.debug("parse_check raised: %s", exc, exc_info=True)
                 parsed, warn = None, f"parse_check raised: {exc}"
         else:
             parsed, warn = None, ""

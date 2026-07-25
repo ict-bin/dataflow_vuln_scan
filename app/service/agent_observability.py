@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 from datetime import datetime
+import logging
 import os
 import pathlib
 import shlex
@@ -9,6 +10,8 @@ import signal
 import time
 from dataclasses import dataclass
 from typing import Any
+
+logger = logging.getLogger("dvs.agent_observability")
 
 from sqlalchemy.orm import Session
 
@@ -70,7 +73,8 @@ class AgentProcessSnapshot:
 def _read_text(path: pathlib.Path) -> str:
     try:
         return path.read_text(encoding="utf-8", errors="replace").strip()
-    except Exception:
+    except Exception as e:
+        logger.warning("read proc file failed (path=%s): %s", path, e, exc_info=True)
         return ""
 
 
@@ -80,7 +84,8 @@ def _normalize_path(raw: str | None) -> str | None:
         return None
     try:
         return str(pathlib.Path(value).resolve(strict=False))
-    except Exception:
+    except Exception as e:
+        logger.debug("resolve path failed, return original: %s", e)
         return value
 
 
@@ -149,7 +154,8 @@ def _iter_agent_processes() -> list[dict[str, Any]]:
         pid = int(proc_dir.name)
         try:
             command = (proc_dir / "cmdline").read_bytes().replace(b"\x00", b" ").decode("utf-8", errors="replace").strip()
-        except Exception:
+        except Exception as e:
+            logger.warning("read proc cmdline failed (pid=%s): %s", proc_dir.name, e, exc_info=True)
             continue
         exe = None
         with contextlib.suppress(Exception):
@@ -226,7 +232,8 @@ def _path_belongs_to_root(path_value: str | None, root: str | None) -> bool:
     try:
         pathlib.Path(path_value).relative_to(pathlib.Path(root))
         return True
-    except Exception:
+    except Exception as e:
+        logger.debug("path not under root (path=%s root=%s): %s", path_value, root, e)
         return False
 
 
@@ -425,9 +432,11 @@ class AgentObservabilityService:
                 else:
                     os.kill(pid, signal.SIGKILL)
             return {"pid": pid, "pgid": pgid, "status": "killed"}
-        except ProcessLookupError:
+        except ProcessLookupError as e:
+            logger.debug("kill pid gone: %s", e)
             return {"pid": pid, "pgid": pgid, "status": "gone"}
         except Exception as exc:
+            logger.debug("kill pid query failed: %s", exc, exc_info=True)
             return {"pid": pid, "pgid": pgid, "status": "failed", "reason": str(exc)}
 
 

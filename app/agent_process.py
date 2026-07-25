@@ -32,7 +32,8 @@ def find_pi_command() -> list[str]:
 def process_group_id(pid: int) -> int | None:
     try:
         return os.getpgid(pid)
-    except ProcessLookupError:
+    except ProcessLookupError as e:
+        logger.debug("getpgid process gone (pid=%s): %s", pid, e)
         return None
     except Exception:
         logger.warning("agent_process: getpgid failed pid=%s", pid, exc_info=True)
@@ -44,9 +45,11 @@ def process_group_exists(pgid: int | None) -> bool:
         return False
     try:
         os.killpg(pgid, 0)
-    except ProcessLookupError:
+    except ProcessLookupError as e:
+        logger.debug("killpg(0) group gone: %s", e)
         return False
-    except PermissionError:
+    except PermissionError as e:
+        logger.debug("killpg(0) PermissionError -> alive: %s", e)
         return True
     except Exception:
         logger.warning("agent_process: process_group_exists failed pgid=%s", pgid, exc_info=True)
@@ -339,7 +342,8 @@ def cleanup_orphan_pi_processes(
     seen_pgids: set[tuple[str, int]] = set()
     try:
         grace_seconds = max(0, int(os.environ.get("DVS_ORPHAN_PI_GRACE_SECONDS", "900")))
-    except ValueError:
+    except ValueError as e:
+        logger.debug("parse DVS_ORPHAN_PI_GRACE_SECONDS failed, default 900: %s", e)
         grace_seconds = 900
     now = time.time()
     for info in _iter_agent_processes():
@@ -358,9 +362,11 @@ def cleanup_orphan_pi_processes(
             try:
                 os.kill(ppid, 0)
                 continue  # 父进程存活 → 非孤儿，跳过
-            except ProcessLookupError:
+            except ProcessLookupError as e:
+                logger.debug("parent process gone (orphan): %s", e)
                 pass  # 父进程已消失 → 真正的孤儿，继续判断
-            except PermissionError:
+            except PermissionError as e:
+                logger.debug("parent exists but no permission -> not orphan: %s", e)
                 continue  # 父进程存在但无权发信号 → 非孤儿，跳过
             except Exception:
                 globals()["logger"].warning(
@@ -486,7 +492,8 @@ class AgentProcessHandle:
             )
             logger.warning("terminate_tree wait timeout [%s] pid=%s pgid=%s: %s",
                            self.label, self.proc.pid, self.pgid, e, exc_info=True)
-        except ProcessLookupError:
+        except ProcessLookupError as e:
+            logger.debug("proc.wait process gone: %s", e)
             return
         else:
             if not force_if_group_still_exists or not process_group_exists(self.pgid):

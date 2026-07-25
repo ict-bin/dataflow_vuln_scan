@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from collections import defaultdict
+
+logger = logging.getLogger("dvs.metrics")
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -42,7 +45,8 @@ def normalize_http_route(path: str | None) -> str:
 def http_status_class(status_code: int | str | None) -> str:
     try:
         code = int(status_code or 500)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError) as e:
+        logger.debug("parse status_code failed (raw=%r): %s", status_code, e)
         code = 500
     if code < 0:
         return "cancelled"
@@ -88,7 +92,8 @@ def render_local_metrics() -> str:
         lines.extend(_render_request_metrics())
         lines.extend(_render_local_runtime_metrics())
         lines.extend(_render_agent_observability_metrics())
-    except Exception:
+    except Exception as e:
+        logger.warning("render dvs_up metrics failed: %s", e, exc_info=True)
         lines.append("secflow_dvs_up 0")
     return "\n".join(lines) + "\n"
 
@@ -98,7 +103,8 @@ def render_summary_metrics() -> str:
     try:
         lines.append("secflow_dvs_up 1")
         lines.extend(_render_request_metrics())
-    except Exception:
+    except Exception as e:
+        logger.warning("render request metrics failed: %s", e, exc_info=True)
         lines.append("secflow_dvs_up 0")
     return "\n".join(lines) + "\n"
 
@@ -136,7 +142,8 @@ def render_aggregate_metrics() -> str:
             "# TYPE secflow_dvs_metrics_aggregate_duration_seconds gauge",
             f"secflow_dvs_metrics_aggregate_duration_seconds {_fmt(time.perf_counter() - started)}",
         ])
-    except Exception:
+    except Exception as e:
+        logger.warning("aggregate metrics failed: %s", e, exc_info=True)
         lines.append("secflow_dvs_metrics_aggregate_up 0")
     return "\n".join(lines) + "\n"
 
@@ -253,9 +260,10 @@ def _render_cluster_task_metrics() -> list[str]:
         finally:
             try:
                 next(db_gen)
-            except StopIteration:
-                pass
-    except Exception:
+            except StopIteration as e:
+                logger.debug("db_gen exhausted: %s", e)
+    except Exception as e:
+        logger.warning("render metrics db query failed: %s", e, exc_info=True)
         rows = []
 
     status_counts: dict[str, int] = defaultdict(int)
@@ -641,7 +649,8 @@ def _trace_stats(row: AppDvsTask, run_root: Path | None) -> tuple[int, int]:
         for path in run_root.rglob("tainted.list"):
             try:
                 callee_total += len([line for line in path.read_text(encoding="utf-8").splitlines() if line.strip() and not line.strip().startswith("#")])
-            except Exception:
+            except Exception as e:
+                logger.warning("count callee lines failed (path=%s): %s", path, e)
                 continue
     return max_depth, callee_total
 
@@ -712,9 +721,10 @@ def _render_agent_observability_metrics() -> list[str]:
         finally:
             try:
                 next(db_gen)
-            except StopIteration:
-                pass
-    except Exception:
+            except StopIteration as e:
+                logger.debug("db_gen exhausted: %s", e)
+    except Exception as e:
+        logger.warning("render metrics db query failed: %s", e, exc_info=True)
         return []
 
     processes = list(snapshot.get("processes") or [])

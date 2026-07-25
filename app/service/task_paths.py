@@ -162,7 +162,8 @@ def _path_readable(path: Path) -> bool:
     """
     try:
         return path.exists()
-    except OSError:
+    except OSError as e:
+        logger.debug("path.exists check failed (broken symlink?): %s", e)
         return False
 
 
@@ -233,8 +234,8 @@ def cleanup_task_data(row: AppDvsTask, *, reason: str = "cleanup") -> None:
         try:
             from app.service.workspace_manager import WorkspaceManager
             WorkspaceManager.cleanup_temp_for_task(task_id)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("workspace cleanup_temp_for_task failed (task=%s): %s", task_id, e, exc_info=True)
         for child_name in ("run", "output"):
             child = task_root / child_name
             if child.exists():

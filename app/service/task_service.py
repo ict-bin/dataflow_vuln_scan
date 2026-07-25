@@ -224,7 +224,8 @@ def _inject_api_key(models_path: Path, secret: str) -> None:
     """将 models.json 中所有 provider 的 apiKey 替换为任务级密钥。"""
     try:
         data = json.loads(models_path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
+    except (json.JSONDecodeError, OSError) as e:
+        logger.warning("read models config failed (path=%s): %s", models_path, e, exc_info=True)
         return
     providers = data.get("providers") if isinstance(data, dict) else None
     if not isinstance(providers, dict):
@@ -252,7 +253,8 @@ def _read_json_file(path: Path | None) -> dict[str, Any] | None:
         if not path.is_file():
             return None
         payload = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
+    except Exception as e:
+        logger.warning("read task file failed (path=%s): %s", path, e, exc_info=True)
         return None
     return payload if isinstance(payload, dict) else None
 
@@ -409,8 +411,8 @@ def _run_db_write_with_retries(label: str, operation, *, attempts: int | None = 
         finally:
             try:
                 next(gen)
-            except StopIteration:
-                pass
+            except StopIteration as e:
+                logger.debug("gen exhausted: %s", e)
     if last_exc is not None:
         raise last_exc
     return None
@@ -638,14 +640,15 @@ def _start_task_lease_heartbeat(
                         _hb_db.commit()
                         last_timeline_renew_at = current_ts
             except Exception as exc:
+                logger.warning("lease renew failed (task=%s): %s", task_id, exc, exc_info=True)
                 observe_local_event("lease_renew", "thread_error")
                 if ctx is not None:
                     ctx.last_lease_error = str(exc)
             finally:
                 try:
                     next(_hb_gen)
-                except StopIteration:
-                    pass
+                except StopIteration as e:
+                    logger.debug("_hb_gen exhausted: %s", e)
 
     thread = threading.Thread(target=_worker, name=f"dvs_lease_{task_id}", daemon=True)
     thread.start()
@@ -914,8 +917,8 @@ class TaskService:
             finally:
                 try:
                     next(db_gen)
-                except StopIteration:
-                    pass
+                except StopIteration as e:
+                    logger.debug("db_gen exhausted: %s", e)
         except Exception:
             logger.debug("failed to inspect agent observability for task %s", task_id, exc_info=True)
         return False
@@ -943,8 +946,8 @@ class TaskService:
             if db_gen is not None:
                 try:
                     next(db_gen)
-                except StopIteration:
-                    pass
+                except StopIteration as e:
+                    logger.debug("db_gen exhausted: %s", e)
         with _RUNNING_TASK_LOCK:
             rows = []
             now_ts = _time.time()
@@ -1017,7 +1020,8 @@ class TaskService:
         if db is not None:
             try:
                 row = db.query(AppDvsTask).filter_by(task_id=task_id).first()
-            except Exception:
+            except Exception as e:
+                logger.warning("query task row failed (task=%s): %s", task_id, e, exc_info=True)
                 row = None
         self._invalidate_local_running_context(task_id, reason=reason, unregister=True)
         if row is not None:
@@ -1177,6 +1181,7 @@ class TaskService:
                 else:
                     warnings.append("evaluation_summary.json 格式不是对象")
             except Exception as exc:
+                logger.debug("read evaluation_summary.json failed: %s", exc, exc_info=True)
                 warnings.append(f"evaluation_summary.json 读取失败: {exc}")
 
         rounds: list[dict] = []
@@ -1189,6 +1194,7 @@ class TaskService:
                 try:
                     payload = json.loads(path.read_text(encoding="utf-8"))
                 except Exception as exc:
+                    logger.debug("read task payload failed (path=%s): %s", path, exc, exc_info=True)
                     warnings.append(f"{path.relative_to(run_root)} 读取失败: {exc}")
                     continue
                 if not isinstance(payload, dict):
@@ -1921,8 +1927,8 @@ class TaskService:
                 finally:
                     try:
                         next(event_db_gen)
-                    except StopIteration:
-                        pass
+                    except StopIteration as e:
+                        logger.debug("event_db_gen exhausted: %s", e)
             except Exception:
                 logger.debug("failed to persist DVS task runtime event", exc_info=True)
             n = len(event_buffer)
@@ -1961,8 +1967,8 @@ class TaskService:
                     finally:
                         try:
                             next(_guard_gen)
-                        except StopIteration:
-                            pass
+                        except StopIteration as e:
+                            logger.debug("_guard_gen exhausted: %s", e)
                 except Exception as exc:
                     logger.warning("control guard check failed for %s: %s", task_id, exc, exc_info=True)
 
@@ -2243,8 +2249,8 @@ class TaskService:
             if tcfg.get("max_trace_depth"):
                 try:
                     cfg.max_trace_depth = int(tcfg.get("max_trace_depth") or cfg.max_trace_depth)
-                except (TypeError, ValueError):
-                    pass
+                except (TypeError, ValueError) as e:
+                    logger.debug("parse max_trace_depth failed: %s", e)
             if isinstance(tcfg.get("taint_params"), list):
                 cfg.taint_params = [str(value).strip() for value in tcfg["taint_params"] if str(value).strip()]
             if tcfg.get("function_description"):
@@ -2704,7 +2710,8 @@ class TaskService:
             # ── Sync local workspace back to NFS (after pi cleanup) ──────────
             try:
                 _result = result
-            except NameError:
+            except NameError as e:
+                logger.warning("_result undefined (NameError, code defect): %s", e, exc_info=True)
                 _result = None
             if ws_manager.enabled:
                 terminal_status = (_result.status.value if _result else "error")
@@ -2770,7 +2777,8 @@ class TaskService:
                     from app.metrics import observe_local_event
 
                     observe_local_event("lease_release", "noop")
-            except Exception:
+            except Exception as e:
+                logger.warning("load execution snapshot failed (task=%s): %s", task_id, e, exc_info=True)
                 from app.metrics import observe_local_event
 
                 observe_local_event("lease_release", "failed")
@@ -2778,8 +2786,8 @@ class TaskService:
             _unregister_running_task_context(task_id)
             try:
                 next(db_gen)
-            except StopIteration:
-                pass
+            except StopIteration as e:
+                logger.debug("db_gen exhausted: %s", e)
 
     def _get_or_404(self, db: Session, task_id: str, *, include_deleted: bool = False) -> AppDvsTask:
         query = db.query(AppDvsTask).filter(AppDvsTask.task_id == task_id)
@@ -2843,8 +2851,8 @@ class TaskService:
             if _total is not None:
                 try:
                     execution_duration_ms = float(_total)
-                except (TypeError, ValueError):
-                    pass
+                except (TypeError, ValueError) as e:
+                    logger.debug("parse execution_duration_ms failed: %s", e)
         if execution_duration_ms is None and row.started_at and row.finished_at:
             try:
                 execution_duration_ms = (row.finished_at - row.started_at).total_seconds() * 1000

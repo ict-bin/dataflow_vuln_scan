@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger("dvs.vuln_graph_validator")
 
 VALID_SANITIZER_EFFECTS = {"none", "partial", "complete", "unknown"}
 VALID_OPERATIONS = {
@@ -75,6 +78,7 @@ def load_taint_graph(path: str | Path) -> tuple[dict[str, Any] | None, list[str]
     try:
         obj = json.loads(p.read_text(encoding="utf-8"))
     except Exception as exc:
+        logger.debug("taint graph JSON parse failed: %s", exc, exc_info=True)
         return None, [f"taint graph JSON parse failed: {exc}"]
     if not isinstance(obj, dict):
         return None, ["taint graph root must be object"]

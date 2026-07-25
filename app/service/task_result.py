@@ -162,7 +162,8 @@ def _path_metadata(path_value: str | None) -> dict:
             "size_bytes": stat.st_size if path.is_file() else None,
             "mtime": datetime.fromtimestamp(stat.st_mtime).isoformat(),
         }
-    except OSError:
+    except OSError as e:
+        logger.debug("stat result file failed (path=%s): %s", path, e)
         return {
             "path": str(path),
             "real_path": os.path.realpath(os.path.abspath(str(path))),
@@ -350,8 +351,8 @@ def _build_evaluation_payload(task_id: str, task_status: str, result_payload: di
             try:
                 if score is not None:
                     scores.append(float(score))
-            except (TypeError, ValueError):
-                pass
+            except (TypeError, ValueError) as e:
+                logger.debug("parse judge score failed: %s", e)
             usage = _token_usage_dict(judge.get("token_usage"))
             judge_usages.append(usage)
             normalized_judges.append({
@@ -485,8 +486,8 @@ def _write_task_evaluation_files(row, result_payload: dict) -> None:
                     continue
                 try:
                     path.unlink()
-                except OSError:
-                    pass
+                except OSError as e:
+                    logger.debug("unlink result file failed (path=%s): %s", path, e)
     for record in rounds:
         round_no = int(record.get("round") or 0)
         round_dir = run_root / f"round_{round_no:03d}"
