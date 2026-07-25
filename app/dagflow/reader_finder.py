@@ -121,7 +121,7 @@ class ReaderFinder:
             rollback_session=None,
             error_session_fn=lambda n: str(Path(sp).with_name(Path(sp).stem + f"-error{n}.jsonl")),
             on_event=getattr(self, "on_event", None),
-            label=f"dagflow-reader/{func.name}", retry_max=3,
+            label=f"dagflow-reader/{func_name}", retry_max=3,
         )
         if parsed is None:
             parsed = {}
