@@ -1878,6 +1878,14 @@ class TaskService:
                             "task_context_budget_exceeded_preflight": "task_context_budget_exceeded_preflight",
                             "task_context_overflow_retrying": "task_context_overflow_retrying",
                             "task_context_overflow_failed_after_compaction": "task_context_overflow_failed_after_compaction",
+                            "workspace_localized": "workspace_localized",
+                            "workspace_periodic_sync_started": "workspace_periodic_sync_started",
+                            "workspace_periodic_sync_completed": "workspace_periodic_sync_completed",
+                            "workspace_periodic_sync_failed": "workspace_periodic_sync_failed",
+                            "workspace_periodic_sync_stopped": "workspace_periodic_sync_stopped",
+                            "workspace_final_sync_started": "workspace_final_sync_started",
+                            "workspace_synced": "workspace_synced",
+                            "workspace_final_sync_failed": "workspace_final_sync_failed",
                         }.get(event_type, event_type)
                         if event_type == "trace_start":
                             depth = int(event_data.get("depth") or 0)
@@ -1904,6 +1912,14 @@ class TaskService:
                             "task_context_budget_exceeded_preflight": "智能体请求在发送前已判定超出上下文预算",
                             "task_context_overflow_retrying": "智能体上下文持续超限，已进入无限压缩重试",
                             "task_context_overflow_failed_after_compaction": "智能体上下文压缩后仍超出预算，请求已终止",
+                            "workspace_localized": "任务工作目录已切换到本地临时空间",
+                            "workspace_periodic_sync_started": "任务运行期增量同步已启动",
+                            "workspace_periodic_sync_completed": "任务运行期增量同步完成",
+                            "workspace_periodic_sync_failed": str(event_data.get("error") or "任务运行期增量同步失败"),
+                            "workspace_periodic_sync_stopped": "任务运行期增量同步已停止",
+                            "workspace_final_sync_started": "任务结束，开始回写工作目录",
+                            "workspace_synced": "任务工作目录已完成最终回写",
+                            "workspace_final_sync_failed": str(event_data.get("error") or "任务最终回写失败"),
                         }.get(mapped_event_type, f"运行事件: {mapped_event_type}")
                         message = str(event_data.get("message") or default_message)
                         level = str(event_data.get("level") or ("error" if mapped_event_type == "task_runtime_error" else "info"))

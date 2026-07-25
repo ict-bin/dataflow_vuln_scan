@@ -27,7 +27,7 @@ import shutil
 import threading
 import time
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 logger = logging.getLogger("dvs.workspace_manager")
 
@@ -147,10 +147,11 @@ class WorkspaceManager:
             self._nfs_run_root.mkdir(parents=True, exist_ok=True)
             return self._nfs_run_root
 
-        if self._on_event:
-            self._on_event("workspace_localized", task_id=task_id,
-                           nfs_path=str(self._nfs_run_root),
-                           local_path=str(self._local_run_root))
+        self._emit_event(
+            "workspace_localized",
+            nfs_path=str(self._nfs_run_root),
+            local_path=str(self._local_run_root),
+        )
 
         return self._local_run_root
 
@@ -173,11 +174,23 @@ class WorkspaceManager:
             daemon=True,
         )
         self._sync_thread.start()
+        self._emit_event(
+            "workspace_periodic_sync_started",
+            nfs_path=str(self._nfs_run_root),
+            local_path=str(self._local_run_root),
+            sync_interval_seconds=_normalize_interval_value(_sync_interval()),
+        )
 
     def stop_periodic_sync(self) -> None:
         self._stop_event.set()
         if self._sync_thread and self._sync_thread.is_alive():
             self._sync_thread.join(timeout=10.0)
+        if self._enabled and self._local_run_root is not None and self._nfs_run_root is not None:
+            self._emit_event(
+                "workspace_periodic_sync_stopped",
+                nfs_path=str(self._nfs_run_root),
+                local_path=str(self._local_run_root),
+            )
 
     def sync_back_and_cleanup(
         self,
@@ -218,6 +231,12 @@ class WorkspaceManager:
                 return
 
             # Do a final sync (rsync-style copy)
+            self._emit_event(
+                "workspace_final_sync_started",
+                nfs_path=str(self._nfs_run_root),
+                local_path=str(self._local_run_root),
+                status=status,
+            )
             self._sync_to_nfs(self._local_run_root, self._nfs_run_root)
 
             # Clean up .run_nfs staging directory (periodic sync leftover)
@@ -225,6 +244,24 @@ class WorkspaceManager:
             if _mirror.exists():
                 shutil.rmtree(str(_mirror), ignore_errors=True)
                 logger.info("workspace_manager: cleaned staging dir %s", str(_mirror))
+
+            # Refresh the flattened run/vuln-scan.sqlite compatibility snapshot
+            # with the final terminal version from the completed epoch workspace.
+            _final_local_db = self._local_run_root / "vuln-scan.sqlite"
+            _final_nfs_run_root = self._nfs_run_root.parent.parent
+            _final_nfs_db = _final_nfs_run_root / "vuln-scan.sqlite"
+            if _final_local_db.exists():
+                _cleanup_sqlite_sidecars(_final_nfs_db)
+                if _safe_copyfile(str(_final_local_db), str(_final_nfs_db)):
+                    logger.info(
+                        "workspace_manager: refreshed final flattened vuln sqlite %s",
+                        str(_final_nfs_db),
+                    )
+                else:
+                    logger.warning(
+                        "workspace_manager: failed to refresh final flattened vuln sqlite %s",
+                        str(_final_nfs_db),
+                    )
             # Clean up the NFS run/sessions/ temp copies (periodic sync wrote here)
             _nfs_sessions = self._nfs_run_root.parent.parent / "sessions"
             if _nfs_sessions.exists() and _nfs_sessions.is_dir():
@@ -248,17 +285,23 @@ class WorkspaceManager:
                 str(self._nfs_run_root), status,
             )
 
-            if self._on_event:
-                self._on_event(
-                    "workspace_synced",
-                    task_id=self._task_id,
-                    nfs_path=str(self._nfs_run_root),
-                    local_path=str(self._local_run_root),
-                    status=status,
-                )
+            self._emit_event(
+                "workspace_synced",
+                nfs_path=str(self._nfs_run_root),
+                local_path=str(self._local_run_root),
+                status=status,
+            )
         except Exception as exc:
             logger.error(
                 "workspace_manager: sync_back failed: %s", exc, exc_info=True,
+            )
+            self._emit_event(
+                "workspace_final_sync_failed",
+                nfs_path=str(self._nfs_run_root) if self._nfs_run_root else "",
+                local_path=str(self._local_run_root) if self._local_run_root else "",
+                status=status,
+                error=str(exc),
+                level="error",
             )
         finally:
             # Clean up the local temp directory (with retries)
@@ -352,6 +395,15 @@ class WorkspaceManager:
 
     # ── internal ─────────────────────────────────────────────────────────────
 
+    def _emit_event(self, event_type: str, **payload: Any) -> None:
+        if not self._on_event:
+            return
+        self._on_event(
+            event_type,
+            task_id=self._task_id,
+            **payload,
+        )
+
     def _sync_to_nfs(self, local_dir: Path, nfs_dir: Path) -> None:
         """Copy all files from local to NFS using a safe replace strategy:
         1. Copy to a temp directory on NFS {nfs_dir}.tmp/
@@ -416,6 +468,7 @@ class WorkspaceManager:
             task_root = self._nfs_run_root.parent.parent.parent
             nfs_run_parent = task_root / "run"
             try:
+                synced_targets: list[str] = []
                 nfs_run_parent.mkdir(parents=True, exist_ok=True)
 
                 # Sync sessions/ to output/sessions/ on NFS (authoritative read path)
@@ -426,16 +479,34 @@ class WorkspaceManager:
                     nfs_sessions = nfs_output / "sessions"
                     nfs_sessions.mkdir(parents=True, exist_ok=True)
                     self._sync_sessions_incremental(local_sessions, nfs_sessions)
+                    synced_targets.append(str(nfs_sessions))
 
                 # Sync vuln-scan.sqlite
                 local_db = self._local_run_root / "vuln-scan.sqlite"
                 if local_db.exists():
                     nfs_db = nfs_run_parent / "vuln-scan.sqlite"
-                    _safe_copyfile(str(local_db), str(nfs_db))
+                    if _safe_copyfile(str(local_db), str(nfs_db)):
+                        synced_targets.append(str(nfs_db))
+
+                self._emit_event(
+                    "workspace_periodic_sync_completed",
+                    nfs_path=str(self._nfs_run_root),
+                    local_path=str(self._local_run_root),
+                    sync_interval_seconds=_normalize_interval_value(interval),
+                    synced_targets=synced_targets,
+                )
             except Exception as exc:
                 logger.warning(
                     "workspace_manager: periodic sync failed: %s", exc,
                     exc_info=True,
+                )
+                self._emit_event(
+                    "workspace_periodic_sync_failed",
+                    nfs_path=str(self._nfs_run_root),
+                    local_path=str(self._local_run_root),
+                    sync_interval_seconds=_normalize_interval_value(interval),
+                    error=str(exc),
+                    level="error",
                 )
 
     def _sync_sessions_incremental(self, local_sessions: Path, nfs_sessions: Path) -> None:
@@ -516,6 +587,21 @@ def _safe_copyfile(src: str, dst: str) -> bool:
     except OSError as exc:
         logger.debug("_safe_copyfile: %s → %s failed: %s", src, dst, exc)
         return False
+
+
+def _normalize_interval_value(value: float) -> int | float:
+    if float(value).is_integer():
+        return int(value)
+    return value
+
+
+def _cleanup_sqlite_sidecars(db_path: Path) -> None:
+    for suffix in ("-wal", "-shm"):
+        sidecar = Path(str(db_path) + suffix)
+        try:
+            sidecar.unlink(missing_ok=True)
+        except OSError:
+            logger.debug("workspace_manager: failed to remove sqlite sidecar %s", str(sidecar), exc_info=True)
 
 
 def _cleanup_local_temp(local_path: Path) -> None:
