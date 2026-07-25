@@ -16,6 +16,7 @@ def resolve(store: DagflowStore, *, origin_func: str, origin_taint: str,
             origin_node: int, origin_edge: str,
             function_resolver: Callable[[str, str], list[str]] | None,
             func_lookup: Callable[[str], Any],
+            func_lookup_by_id: Callable[[str], Any] | None = None,
             on_enqueue: Callable[[str, str], None], on_event: Any = None) -> int:
     """处理 indirect_track 项: 解析指针表达式 -> 真实函数 -> 回填 sink_ref + 入队。
 

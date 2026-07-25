@@ -301,6 +301,7 @@ class DagflowPipeline:
                                    graph_recorder=graph_rec)
             dispatcher = TrackerDispatcher(
                 store=store, func_lookup=func_index.get_by_name,
+                func_lookup_by_id=func_index.get_by_id,
                 on_enqueue=lambda fid, t: orch._wq.put(_make_callee_item(fid, t)),
                 on_event=self.on_event,
                 reader_finder=rf.find, function_resolver=fr_.resolve)
