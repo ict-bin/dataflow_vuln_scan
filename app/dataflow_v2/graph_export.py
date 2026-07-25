@@ -13,9 +13,12 @@ output/dataflow-v2/ 四库 + vuln-scan.sqlite findings 构建前端可消费的�
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger("dvs.dataflow_v2.graph_export")
 
 
 def _find_v2_dir(run_root: str | Path) -> Path | None:
@@ -39,7 +42,8 @@ def _find_v2_dir(run_root: str | Path) -> Path | None:
     for c in candidates:
         try:
             r = c.resolve()
-        except (OSError, RuntimeError):
+        except (OSError, RuntimeError) as e:
+            logger.debug("candidate resolve failed, skip (c=%s): %s", c, e)
             continue
         if r.is_dir() and (r / "functions.db").exists():
             return r
@@ -62,7 +66,8 @@ def _find_vuln_sqlite(run_root: str | Path) -> Path | None:
     for c in candidates:
         try:
             r = c.resolve()
-        except (OSError, RuntimeError):
+        except (OSError, RuntimeError) as e:
+            logger.debug("candidate resolve failed, skip (c=%s): %s", c, e)
             continue
         if r.exists():
             return r
@@ -142,7 +147,8 @@ def _load_findings_by_func(vuln_sqlite: Path | None) -> dict[str, int]:
                           "GROUP BY function_name").fetchall()
         vc.close()
         return {r["function_name"]: r["cnt"] for r in rows}
-    except Exception:
+    except Exception as e:
+        logger.warning("load v2 vuln counts failed (sqlite=%s): %s", vuln_sqlite, e)
         return {}
 
 
@@ -157,8 +163,8 @@ def load_dataflow_v2_graph(run_root: str | Path) -> dict[str, Any]:
             try:
                 from ..vuln_store import VulnScanStore
                 findings = VulnScanStore(vuln_sqlite).list_all_findings()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("list all findings failed (sqlite=%s): %s", vuln_sqlite, e)
         return {"analysis_runs": [], "taint_nodes": [], "taint_edges": [], "followups": [],
                 "vulnerability_findings": findings, "v2_paths": [], "v2_available": False}
 
@@ -277,7 +283,8 @@ def load_dataflow_v2_graph(run_root: str | Path) -> dict[str, Any]:
         try:
             from ..vuln_store import VulnScanStore
             findings = VulnScanStore(vuln_sqlite).list_all_findings()
-        except Exception:
+        except Exception as e:
+            logger.warning("list findings for export failed (sqlite=%s): %s", vuln_sqlite, e)
             findings = []
 
     return {

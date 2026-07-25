@@ -29,7 +29,8 @@ class WorkQueue:
         """取项 (原子增 inflight)。空且超时返回 None。"""
         try:
             item = self._q.get(timeout=timeout)
-        except queue.Empty:
+        except queue.Empty as e:
+            logger.debug("work_queue get timeout (no item within %.1fs): %s", timeout, e)
             return None
         with self._lock:
             self._inflight += 1

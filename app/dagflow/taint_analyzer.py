@@ -170,7 +170,8 @@ def _greedy_json_object(text: str) -> dict | None:
         try:
             import json
             return json.loads(blk.strip())
-        except Exception:
+        except Exception as e:
+            logger.debug("taint greedy json block parse failed, skip: %s", e)
             continue
     s = text.find("{")
     e = text.rfind("}")
@@ -178,6 +179,7 @@ def _greedy_json_object(text: str) -> dict | None:
         try:
             import json
             return json.loads(text[s:e + 1])
-        except Exception:
+        except Exception as e:
+            logger.debug("taint greedy json slice parse failed, return None: %s", e)
             return None
     return None

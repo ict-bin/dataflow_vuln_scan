@@ -202,12 +202,14 @@ class DataflowV2Runner:
                 try:
                     _edge_count = store._q("orchestration", "SELECT count(*) FROM orchestration")
                     _edge_count = int(_edge_count[0][0]) if _edge_count else 0
-                except Exception:
+                except Exception as e:
+                    logger.warning("count orchestration edges failed: %s", e)
                     _edge_count = 0
                 try:
                     _prop_count = store._q("propagations", "SELECT count(*) FROM propagations")
                     _prop_count = int(_prop_count[0][0]) if _prop_count else 0
-                except Exception:
+                except Exception as e:
+                    logger.warning("count propagations failed: %s", e)
                     _prop_count = 0
                 if _edge_count == 0 and _prop_count == 0:
                     # 0 传播边 + 0 传播记录: 区分"解析失败" vs "解析成功但无传播"
@@ -216,7 +218,8 @@ class DataflowV2Runner:
                     try:
                         _taint_count = store._q("taints", "SELECT count(*) FROM taints")
                         _taint_count = int(_taint_count[0][0]) if _taint_count else 0
-                    except Exception:
+                    except Exception as e:
+                        logger.warning("count taints failed: %s", e)
                         _taint_count = 0
                     if _taint_count > 0:
                         # 解析成功, 有污点但无传播 = LLM 判定无传播路径 (可能漏报)
@@ -263,8 +266,8 @@ class DataflowV2Runner:
                     tid,
                     "cancelled" if (self._cancel_event is not None and self._cancel_event.is_set()) else "error",
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("finish_run (record run status) failed: %s", e)
             return TaskResult(task_id=tid, status=TaskStatus.ERROR, task=cfg.task, error=str(exc))
 
     # ── 归档 (镜像 v1 output/ 件 + v2 四库归档, 不写 flag) ────────────────────
@@ -274,13 +277,13 @@ class DataflowV2Runner:
         try:
             (root_out_dir / "report.md").write_text(result.final_output or "", encoding="utf-8")
             (root_out_dir / "result.json").write_text(result.model_dump_json(indent=2), encoding="utf-8")
-        except OSError:
-            pass
+        except OSError as e:
+            logger.warning("write report.md/result.json failed (dir=%s): %s", root_out_dir, e)
         # output/final_report.md
         try:
             (root_output_path / "final_report.md").write_text(result.final_output or "", encoding="utf-8")
-        except OSError:
-            pass
+        except OSError as e:
+            logger.warning("write output/final_report.md failed (dir=%s): %s", root_output_path, e)
         # output/vuln-scan.sqlite (findings 图谱)
         if graph_db_path.exists():
             try:
@@ -325,8 +328,8 @@ class DataflowV2Runner:
         try:
             (root_output_path / "artifact-manifest.json").write_text(
                 json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-        except OSError:
-            pass
+        except OSError as e:
+            logger.warning("write artifact-manifest.json failed (dir=%s): %s", root_output_path, e)
         # 不写 flag 文件 (已废弃)
 
     def _sync_session_tree(self, sessions_src: Path, sessions_dst: Path) -> None:
@@ -362,7 +365,8 @@ class DataflowV2Runner:
         if graph_db_path.exists():
             try:
                 findings = VulnScanStore(graph_db_path).list_all_findings()
-            except Exception:
+            except Exception as e:
+                logger.warning("list all findings for report failed (db=%s): %s", graph_db_path, e)
                 findings = []
         lines = [
             f"# 数据流漏洞挖掘简报 (v2): {cfg.function_name}",
@@ -403,5 +407,6 @@ class DataflowV2Runner:
             return 0
         try:
             return len(VulnScanStore(graph_db_path).list_all_findings())
-        except Exception:
+        except Exception as e:
+            logger.warning("count findings failed (db=%s): %s", graph_db_path, e)
             return 0

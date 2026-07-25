@@ -22,8 +22,9 @@ _TS_AVAILABLE = False
 try:
     import tree_sitter as _ts
     _TS_AVAILABLE = True
-except ImportError:
+except ImportError as e:
     _TS_AVAILABLE = False
+    logger.debug("tree_sitter not available, fallback to regex extraction: %s", e)
 
 _LANG_CACHE: dict[str, Any] = {}
 _PARSER_CACHE: dict[str, Any] = {}
@@ -47,7 +48,8 @@ def _parser_for(path: Path, source: bytes | None = None):
         if not src and path.is_file():
             try:
                 src = path.read_bytes()
-            except OSError:
+            except OSError as e:
+                logger.warning("read source bytes failed, skip file (path=%s): %s", path, e)
                 src = b""
         is_cpp = any(h in src for h in _CPP_HINTS)
         return _parser_cached("cpp" if is_cpp else "c")
@@ -63,7 +65,8 @@ def _parser_cached(kind: str):
             else:
                 import tree_sitter_c as _c
                 lang = _ts.Language(_c.language())
-        except ImportError:
+        except ImportError as e:
+            logger.debug("optional cpp parser import failed: %s", e)
             return None
         _PARSER_CACHE[kind] = _ts.Parser(lang)
     return _PARSER_CACHE[kind]
@@ -110,6 +113,7 @@ def read_function_body(source_root: str, func: FunctionRecord, max_lines: int = 
             body_lines = body_lines[:max_lines]
         return "\n".join(f"{func.start_line+i:4d} | {line}" for i, line in enumerate(body_lines))
     except OSError as e:
+        logger.debug("read function body source failed (path=%s): %s", src_path, e)
         return f"// 读取失败: {e}\n// 行 {func.start_line}-{func.end_line}"
 
 
@@ -126,7 +130,8 @@ def extract_file_functions(source_root: str, rel_file: str, store: DataflowStore
         if parser is None:
             return []
         tree = parser.parse(source)
-    except Exception:
+    except Exception as e:
+        logger.warning("tree-sitter parse failed, skip file (src=%s): %s", src_path, e)
         return []
 
     records: list[FunctionRecord] = []
@@ -159,7 +164,8 @@ def extract_file_functions(source_root: str, rel_file: str, store: DataflowStore
                 try:
                     store.upsert_function(rec)
                     break
-                except Exception:
+                except Exception as e:
+                    logger.debug("upsert_function attempt %d failed (func=%s): %s", _attempt + 1, rec.function_name, e)
                     if _attempt < 2:
                         import time as _time
                         _time.sleep(0.1)
@@ -282,7 +288,8 @@ def _extract_includes(source_root: str, rel_file: str) -> list[str]:
         return []
     try:
         text = src_path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
+    except OSError as e:
+        logger.warning("read includes source failed (src=%s): %s", src_path, e)
         return []
     return _INCLUDE_RE.findall(text)
 
@@ -319,7 +326,8 @@ def _build_include_index(source_root: str, store: DataflowStore) -> int:
             continue
         try:
             rel = str(path.relative_to(src)).replace("\\", "/")
-        except ValueError:
+        except ValueError as e:
+            logger.debug("path not under source, skip (path=%s): %s", path, e)
             continue
         incs = _extract_includes(source_root, rel)
         if incs:
@@ -426,7 +434,8 @@ def _extract_class_info_for_file(source_root: str, rel_file: str, store: Dataflo
         if parser is None:
             return
         tree = parser.parse(source)
-    except Exception:
+    except Exception as e:
+        logger.warning("parse+extract class info failed (rel=%s): %s", rel_file, e)
         return
     classes = _extract_class_info(source, tree, rel_file)
     for cls in classes:
@@ -447,7 +456,8 @@ def _build_class_hierarchy(source_root: str, store: DataflowStore) -> int:
             continue
         try:
             rel = str(path.relative_to(src)).replace("\\", "/")
-        except ValueError:
+        except ValueError as e:
+            logger.debug("path not under source, skip (path=%s): %s", path, e)
             continue
         source = path.read_bytes()
         try:
@@ -455,7 +465,8 @@ def _build_class_hierarchy(source_root: str, store: DataflowStore) -> int:
             if parser is None:
                 continue
             tree = parser.parse(source)
-        except Exception:
+        except Exception as e:
+            logger.warning("parse source for classes failed (rel=%s): %s", rel, e)
             continue
         classes = _extract_class_info(source, tree, rel)
         for cls in classes:
@@ -484,7 +495,8 @@ def index_source_tree(source_root: str, store: DataflowStore) -> int:
             continue
         try:
             rel = str(path.relative_to(src)).replace("\\", "/")
-        except ValueError:
+        except ValueError as e:
+            logger.debug("path not under source, skip (path=%s): %s", path, e)
             continue
         extract_file_functions(source_root, rel, store)
         count += 1
@@ -521,7 +533,8 @@ def find_func_in_source(name: str, src_root) -> list[tuple[str, str]]:
                     continue
                 try:
                     rel = str(Path(line).relative_to(src_root)).replace("\\", "/")
-                except ValueError:
+                except ValueError as e:
+                    logger.debug("grep line not under source, skip (line=%s): %s", line, e)
                     continue
                 key = (rel, candidate)
                 if key in seen:
@@ -529,6 +542,7 @@ def find_func_in_source(name: str, src_root) -> list[tuple[str, str]]:
                 seen.add(key)
                 results.append((rel, candidate))
         return results
-    except Exception:
+    except Exception as e:
+        logger.warning("grep_function_names overall failed: %s", e)
         pass
     return []

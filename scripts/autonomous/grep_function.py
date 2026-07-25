@@ -10,10 +10,13 @@ LLM 想看内容必须再调 read_function (记 path) -> 闭环, 无法绕过日
 用法: grep_function "memcpy" -n 20
 """
 import json
+import logging
 import os
 import re
 import subprocess
 import sys
+
+logger = logging.getLogger("dvs.autonomous.grep_function")
 from pathlib import Path
 
 RUN_DIR = os.environ.get("DVS_RUN_DIR", "")
@@ -54,13 +57,13 @@ def _grep(pattern, limit):
                 # 相对化
                 try:
                     f = str(Path(f).relative_to(src))
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("relativize grep hit path failed (f=%s): %s", f, e)
                 hits.append((f, ln, txt))
                 if len(hits) >= limit:
                     break
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("grep_function scan failed: %s", e)
     return hits
 
 
@@ -73,6 +76,8 @@ def _find_func_for_line(by_file, file, line):
 
 
 def main():
+    logging.basicConfig(level=os.environ.get("DVS_LOG_LEVEL", "INFO"), stream=sys.stderr,
+                        format="%(levelname)s %(name)s: %(message)s")
     if len(sys.argv) < 2:
         print("用法: grep_function <pattern> [-n N]", file=sys.stderr)
         sys.exit(2)
@@ -82,7 +87,7 @@ def main():
         i = sys.argv.index("-n")
         if i + 1 < len(sys.argv):
             try: limit = int(sys.argv[i + 1])
-            except: pass
+            except Exception as e: logger.debug("parse -n limit failed, keep default: %s", e)
     sys.path.insert(0, "/opt/dataflow_vuln_scan")
     # 增量索引保证 functions.db 有数据
     try:
@@ -115,8 +120,8 @@ def main():
         try:
             with open(PATH_LOG, "a", encoding="utf-8") as fp:
                 fp.write(json.dumps(step, ensure_ascii=False) + "\n")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("append path.log failed: %s", e)
 
     # 输出给 LLM: 函数名清单 + 命中行 (不给函数体)
     if not matched:

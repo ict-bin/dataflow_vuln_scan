@@ -48,8 +48,8 @@ def resolve_external(
     try:
         if base_session and Path(base_session).exists():
             safe_copyfile(base_session, str(fork_session))
-    except OSError:
-        pass
+    except OSError as e:
+        logger.debug("tracker session copy failed (base=%s): %s", base_session, e)
     v2_system = build_v2_system_prompt(custom="tracker")
     system_prompt = (v2_system + "\n\n" if v2_system else "") + (
         "你是数据流污点分析中的外部逃逸下游读者追踪器。\n"
@@ -190,8 +190,8 @@ def resolve_indirect(
     try:
         if base_session and Path(base_session).exists():
             safe_copyfile(base_session, str(fork_session))
-    except OSError:
-        pass
+    except OSError as e:
+        logger.debug("fptracker session copy failed (base=%s): %s", base_session, e)
     v2_system = build_v2_system_prompt(custom="tracker")
     system_prompt = (v2_system + "\n\n" if v2_system else "") + (
         "你是数据流污点分析中的函数指针/回调目标追踪器。\n"

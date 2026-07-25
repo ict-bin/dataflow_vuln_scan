@@ -10,8 +10,11 @@ LLM 输出简化格式:
   从行号读源码 → tree-sitter 解析 → 填 condition/checks/param_taints/sink_ref/escape_subkind/parents
 """
 from __future__ import annotations
+import logging
 from dataclasses import dataclass, field
 from typing import Any
+
+logger = logging.getLogger("dvs.dagflow.models")
 
 
 # ── 行号/行号范围归一 ──────────────────────────────────────────────────
@@ -37,11 +40,13 @@ def _norm_line(v) -> tuple[int, int]:
             parts = s.split("-", 1)
             try:
                 return (int(parts[0]), int(parts[1]))
-            except ValueError:
+            except ValueError as e:
+                logger.debug("parse 'a-b' range failed (s=%r): %s", s, e)
                 pass
         try:
             return (int(s), 0)
-        except ValueError:
+        except ValueError as e:
+            logger.debug("parse single int range failed (s=%r): %s", s, e)
             return (0, 0)
     return (0, 0)
 
@@ -229,7 +234,8 @@ class TaintDAG:
             for k, v in prunes.items():
                 try:
                     idx = int(k)
-                except (ValueError, TypeError):
+                except (ValueError, TypeError) as e:
+                    logger.debug("parse prune index failed (k=%r): %s", k, e)
                     continue
                 if 0 <= idx < len(nodes):
                     nodes[idx].prune = PruneSignal.from_dict(v) if not isinstance(v, str) else PruneSignal(reason=v)

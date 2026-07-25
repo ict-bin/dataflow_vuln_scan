@@ -127,7 +127,8 @@ def persist_finding(
     try:
         from ..copy_utils import safe_copyfile
         safe_copyfile(context_session_path, str(fdir / "context.jsonl"))
-    except Exception:
+    except Exception as e:
+        logger.warning("copy context session failed, write empty (src=%s): %s", context_session_path, e)
         (fdir / "context.jsonl").write_text("", encoding="utf-8")
     mirror_dir = _mirror_finding_to_run_root(finding_dir=fdir, vuln_root=vuln_root)
 

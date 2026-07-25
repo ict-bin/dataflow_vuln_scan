@@ -56,7 +56,8 @@ def _node_text(node: Any, source: bytes) -> str:
     """获取 AST 节点的源码文本。"""
     try:
         return node.text.decode("utf-8", "replace").strip()
-    except Exception:
+    except Exception as e:
+        logger.debug("tree-sitter node text decode failed: %s", e)
         return ""
 
 

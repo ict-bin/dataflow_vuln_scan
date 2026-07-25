@@ -93,7 +93,8 @@ def _get_tu(source_root: str, source_file: str) -> Any | None:
 def _line(cursor: Any) -> int:
     try:
         return int(cursor.extent.start.line)
-    except Exception:
+    except Exception as e:
+        logger.debug("clang cursor.extent.start.line unavailable: %s", e)
         return 0
 
 
@@ -104,7 +105,8 @@ def _text(cursor: Any, source_lines: list[str]) -> str:
         if s < 1 or e < s or e > len(source_lines):
             return ""
         return "\n".join(source_lines[s - 1:e]).strip()
-    except Exception:
+    except Exception as e:
+        logger.debug("clang cursor text decode failed: %s", e)
         return ""
 
 
@@ -112,7 +114,8 @@ def _group_id(cursor: Any) -> str:
     try:
         ext = cursor.extent
         raw = f"{ext.start.line}:{ext.start.column}:{ext.end.line}:{ext.end.column}"
-    except Exception:
+    except Exception as e:
+        logger.debug("clang cursor extent for group_id unavailable, fallback to id: %s", e)
         raw = str(id(cursor))
     return hashlib.sha1(raw.encode()).hexdigest()[:12]
 
@@ -270,7 +273,8 @@ def extract_facts(source_root: str, source_file: str, func_name: str) -> dict | 
     path = Path(source_root) / source_file
     try:
         source_lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    except Exception:
+    except Exception as e:
+        logger.warning("read source for clang facts failed (path=%s): %s", path, e)
         return None
 
     callsites: list[dict] = []

@@ -51,7 +51,8 @@ class FunctionResolver:
             return ""
         try:
             lines = src_path.read_text(encoding="utf-8", errors="replace").splitlines()
-        except Exception:
+        except Exception as e:
+            logger.warning("read function source failed (src=%s): %s", src_path, e)
             return ""
         s = max(0, start - 1)
         e = min(len(lines), end) if end else min(len(lines), s + 200)
@@ -140,8 +141,8 @@ class FunctionResolver:
             try:
                 self.on_event("v2_dagflow_indirect_resolved_llm", origin=origin_func[:40],
                               expr=pointer_expr, resolved=out, task_id=self.task_id)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.info("emit v2_dagflow_indirect_resolved_llm failed (func=%s): %s", origin_func[:40], exc)
         # 记录 track 会话
         if self.graph_recorder:
             self.graph_recorder.record_session(

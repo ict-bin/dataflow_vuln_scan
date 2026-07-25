@@ -77,8 +77,8 @@ def _try_extract_truncated_json(text: str) -> dict | None:
     # 尝试直接解析
     try:
         return json.loads(fragment)
-    except json.JSONDecodeError:
-        pass
+    except json.JSONDecodeError as e:
+        logger.debug("json fragment direct parse failed: %s", e)
     # 尝试补全: 找最后一个完整的 key-value 对, 截断后面的
     last_comma = fragment.rfind(',')
     last_brace = fragment.rfind('}')
@@ -103,7 +103,8 @@ def _try_extract_truncated_json(text: str) -> dict | None:
                 if not isinstance(result.get('propagations'), list):
                     result['propagations'] = []
                 return result
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as e:
+            logger.debug("candidate json parse failed, skip: %s", e)
             continue
     return None
 
@@ -226,10 +227,12 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
         session = Path(session_path)
         try:
             return str(session.resolve().relative_to(self.run_dir.parent.resolve())).replace("\\", "/")
-        except Exception:
+        except Exception as e:
+            logger.debug("graph_session_relpath resolve failed, try relative: %s", e)
             try:
                 return str(session.relative_to(self.run_dir.parent)).replace("\\", "/")
-            except Exception:
+            except Exception as e2:
+                logger.debug("graph_session_relpath relative_to failed, fallback to str: %s", e2)
                 return str(session).replace("\\", "/")
 
     def record_graph_node(self, func: FunctionRecord, *, depth: int, status: str, analysis_status: str) -> str:
@@ -296,8 +299,8 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
         try:
             if base_session and Path(base_session).exists():
                 safe_copyfile(base_session, str(fork_session))
-        except OSError:
-            pass
+        except OSError as e:
+            logger.debug("fork session copy failed (base=%s): %s", base_session, e)
         node_id = self.record_graph_node(
             func,
             depth=getattr(ctx, "depth", 0),
@@ -634,7 +637,8 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
             p = file if os.path.isabs(file) else os.path.join(self.source_root, file)
             rp = os.path.realpath(p)
             return rp == root or rp.startswith(root + os.sep)
-        except Exception:
+        except Exception as e:
+            logger.warning("source_root validity check failed (file=%s root=%s): %s", file, root, e)
             return False
 
     def _search_callee_files(self, callee_name: str) -> list[str]:
@@ -674,7 +678,8 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                 continue
             try:
                 rel = str(Path(f).relative_to(self.source_root).as_posix())
-            except ValueError:
+            except ValueError as e:
+                logger.debug("file not under source_root, skip (f=%s): %s", f, e)
                 continue  # 不在 source_root 内 (grep wrapper 已限制, 正常不会到这)
             if rel not in out:
                 out.append(rel)
@@ -860,8 +865,8 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
         try:
             if base_session and Path(base_session).exists():
                 safe_copyfile(base_session, str(fork_session))
-        except OSError:
-            pass
+        except OSError as e:
+            logger.debug("infer-ext session copy failed (base=%s): %s", base_session, e)
         logger.info(
             "[V2-infer-ext] CALLING run_agent (session=%s timeout=%ss)",
             str(fork_session)[-80:],
@@ -897,7 +902,8 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
             return {}
         try:
             arr = _json.loads(m.group())
-        except Exception:
+        except Exception as e:
+            logger.debug("parse inference JSON match failed: %s", e)
             return {}
         inferred = {}
         for item in arr:
@@ -983,8 +989,8 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
         try:
             if base_session and Path(base_session).exists():
                 safe_copyfile(base_session, str(fork_session))
-        except OSError:
-            pass
+        except OSError as e:
+            logger.debug("vuln session copy failed (base=%s): %s", base_session, e)
         node_id = self.graph_node_id(func)
         session_relpath = self.record_graph_session(
             session_path=fork_session,
@@ -1059,8 +1065,8 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
         if self._graph_store_ready():
             try:
                 refresh_task_vuln_snapshot_by_task_id(self.task_id, prefer_live=True)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("refresh_task_vuln_snapshot failed (task=%s): %s", self.task_id, e)
             authoritative_count = persisted_count
             try:
                 with self.graph_store.connect() as conn:
@@ -1069,7 +1075,8 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                         (node,),
                     ).fetchone()
                 authoritative_count = int(row[0] or 0) if row else 0
-            except Exception:
+            except Exception as e:
+                logger.warning("count node findings failed (node=%s), fallback to persisted_count: %s", node, e)
                 authoritative_count = persisted_count
             self.graph_store.update_task_graph_node(
                 node_id,

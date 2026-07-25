@@ -11,15 +11,20 @@ LLM 结束一轮探索时调 → 写 checkpoint.json (pending_branches + continu
   DVS_RUN_DIR  - 任务 run 目录 (checkpoint.json 所在)
 """
 import json
+import logging
 import os
 import sys
 import time
+
+logger = logging.getLogger("dvs.autonomous.checkpoint")
 
 RUN_DIR = os.environ.get("DVS_RUN_DIR") or ""
 CHECKPOINT_PATH = os.path.join(RUN_DIR, "checkpoint.json") if RUN_DIR else ""
 
 
 def main():
+    logging.basicConfig(level=os.environ.get("DVS_LOG_LEVEL", "INFO"), stream=sys.stderr,
+                        format="%(levelname)s %(name)s: %(message)s")
     if len(sys.argv) < 2:
         print("用法: checkpoint '<JSON: {continue, stop_reason, pending_branches}>'", file=sys.stderr)
         sys.exit(2)
@@ -40,7 +45,8 @@ def main():
         if os.path.exists(CHECKPOINT_PATH):
             prev = json.load(open(CHECKPOINT_PATH, encoding="utf-8")).get("round", 0)
         data["round"] = prev + 1
-    except Exception:
+    except Exception as e:
+        logger.warning("read prev checkpoint round failed, default to 1: %s", e)
         data["round"] = 1
     with open(CHECKPOINT_PATH, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)

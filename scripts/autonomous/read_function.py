@@ -11,10 +11,13 @@
   DVS_SOURCE_ROOT    - 源码根
 """
 import json
+import logging
 import os
 import sys
 import time
 from pathlib import Path
+
+logger = logging.getLogger("dvs.autonomous.read_function")
 
 RUN_DIR = os.environ.get("DVS_RUN_DIR") or ""
 V2_DB_DIR = os.environ.get("DVS_V2_DB_DIR") or os.path.join(RUN_DIR, "dataflow-v2")
@@ -47,8 +50,8 @@ def _resolve(rec_name: str, store):
         rel_file, _ = found
         try:
             ensure_file_indexed(SOURCE_ROOT, rel_file, store)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("ensure_file_indexed failed (rel=%s): %s", rel_file, e)
         rec = store.find_function(rec_name) or store.find_function("", rel_file)
         if rec:
             return rec
@@ -70,6 +73,8 @@ def _prefix_candidates(name: str, store):
 
 
 def main():
+    logging.basicConfig(level=os.environ.get("DVS_LOG_LEVEL", "INFO"), stream=sys.stderr,
+                        format="%(levelname)s %(name)s: %(message)s")
     if len(sys.argv) < 2:
         print("用法: read_function <函数名|file:line> [start-end]", file=sys.stderr)
         sys.exit(2)
@@ -106,7 +111,8 @@ def main():
                 body = "\n".join(body_lines[offset: offset + (b_i - a_i + 1)])
                 ranged = True
                 disp_start, disp_end = a_i, b_i
-            except Exception:
+            except Exception as e:
+                logger.debug("parse line range failed, show whole function (range=%s): %s", line_range, e)
                 ranged = False
         # 记 trajectory (流式)
         step = {"ts": time.time(), "func": rec.name, "file": rec.file,

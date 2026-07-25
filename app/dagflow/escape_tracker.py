@@ -17,6 +17,7 @@ def resolve(store: DagflowStore, *, origin_func: str, origin_taint: str,
             origin_node: int, origin_edge: str,
             reader_finder: Callable[[dict], list[str]] | None,
             func_lookup: Callable[[str], Any],
+            func_lookup_by_id: Callable[[str], Any] | None = None,
             on_enqueue: Callable[[str, str], None], on_event: Any = None) -> int:
     """处理 escape_track 项: 找读者 -> relay 插入 callee 边 + 入队。
 
@@ -32,7 +33,9 @@ def resolve(store: DagflowStore, *, origin_func: str, origin_taint: str,
         return 0
     esc_edges = [e for e in src_node.children if e.kind in ("extern", "container")]
     # 解析源函数信息 (供 reader_finder 内嵌 prompt, 不用 LLM 查 hash)
-    src_func = func_lookup(origin_func) if func_lookup else None
+    # origin_func 是 func_id hash, 必须用 get_by_id 查 (不是 get_by_name)
+    _lookup_by_id = func_lookup_by_id or func_lookup
+    src_func = _lookup_by_id(origin_func) if _lookup_by_id else None
     src_func_name = getattr(src_func, "name", origin_func) if src_func else origin_func
     src_func_file = getattr(src_func, "file", "") if src_func else ""
     src_start = getattr(src_func, "start_line", 0) if src_func else 0
@@ -63,8 +66,8 @@ def resolve(store: DagflowStore, *, origin_func: str, origin_taint: str,
             try:
                 on_event("v2_dagflow_escape_resolved", origin=origin_func[:10],
                          node=origin_node, readers=readers, taints=e.taints)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.info("emit v2_dagflow_escape_resolved failed (func=%s): %s", origin_func[:10], exc)
     if n_readers:
         store.save_dag(dag)  # relay 边回填图
     return n_readers

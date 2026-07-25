@@ -43,7 +43,8 @@ class FuncIndex:
                 "SELECT func_id,file,name,signature,start_line,end_line,description "
                 "FROM functions WHERE name=?", (name,)).fetchall()
             return self._row_to_rec(rows[0]) if rows else self._ondemand(name)
-        except sqlite3.Error:
+        except sqlite3.Error as e:
+            logger.warning("get_by_name sqlite query failed (name=%s): %s", name, e)
             return None
         finally:
             conn.close()
@@ -64,7 +65,8 @@ class FuncIndex:
                 "SELECT func_id,file,name,signature,start_line,end_line,description "
                 "FROM functions WHERE func_id=?", (func_id,)).fetchall()
             return self._row_to_rec(rows[0]) if rows else None
-        except sqlite3.Error:
+        except sqlite3.Error as e:
+            logger.warning("get_by_id sqlite query failed (func_id=%s): %s", func_id, e)
             return None
         finally:
             conn.close()

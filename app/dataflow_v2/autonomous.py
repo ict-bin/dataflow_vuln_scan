@@ -158,7 +158,8 @@ class AutonomousRunner:
             sp_path = Path(__file__).parent.parent.parent / "prompts" / "v2" / "autonomous-explore.md"
             try:
                 system_prompt = system_prompt + "\n\n" + sp_path.read_text(encoding="utf-8")
-            except Exception:
+            except Exception as e:
+                logger.debug("append autonomous-explore prompt failed, fallback to plain read: %s", e)
                 system_prompt = sp_path.read_text(encoding="utf-8") if sp_path.exists() else system_prompt
 
             # 入口提示 (用解析到的 root_func.name, 不靠 cfg.function_name)
@@ -281,14 +282,16 @@ class AutonomousRunner:
         p = run_dir / "checkpoint.json"
         try:
             return json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
-        except Exception:
+        except Exception as e:
+            logger.warning("read checkpoint.json failed (run=%s): %s", run_dir, e)
             return {}
 
     def _count_path(self, run_dir: Path) -> int:
         p = run_dir / "path.log"
         try:
             return sum(1 for _ in p.read_text(encoding="utf-8").splitlines() if _.strip()) if p.exists() else 0
-        except Exception:
+        except Exception as e:
+            logger.debug("count path.log lines failed (run=%s): %s", run_dir, e)
             return 0
 
     def _build_call_tree_from_path(self, run_dir: Path, store, root_func) -> None:
@@ -309,7 +312,8 @@ class AutonomousRunner:
                 continue
             try:
                 d = json.loads(line)
-            except Exception:
+            except Exception as e:
+                logger.debug("path.log line json parse failed, skip: %s", e)
                 continue
             all_entries.append(d)
         if not all_entries:
@@ -399,7 +403,8 @@ class AutonomousRunner:
             lines = [json.loads(l) for l in p.read_text(encoding="utf-8").splitlines() if l.strip()]
             lines = lines[-limit:]
             return "\n".join(f"- {s.get('func','')} ({s.get('file','')} 行 {s.get('start_line','')})" for s in lines)
-        except Exception:
+        except Exception as e:
+            logger.debug("read explored trajectory failed, return placeholder: %s", e)
             return "(无)"
 
     def _write_final_report(self, run_dir: Path, out_dir: Path) -> None:

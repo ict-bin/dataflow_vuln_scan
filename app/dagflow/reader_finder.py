@@ -49,7 +49,8 @@ class ReaderFinder:
             return ""
         try:
             lines = src_path.read_text(encoding="utf-8", errors="replace").splitlines()
-        except Exception:
+        except Exception as e:
+            logger.warning("read reader source failed (src=%s): %s", src_path, e)
             return ""
         s = max(0, start - 1)
         e = min(len(lines), end) if end else min(len(lines), s + 200)

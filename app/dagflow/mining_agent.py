@@ -177,9 +177,9 @@ class MiningAgent:
         import re
         for blk in reversed(re.findall(r"```json\s*(.*?)```", text, re.S)):
             try: return json.loads(blk.strip())
-            except Exception: continue
+            except Exception as e: logger.debug("mining greedy json block parse failed, skip: %s", e); continue
         s, e = text.find("{"), text.rfind("}")
         if s >= 0 and e > s:
             try: return json.loads(text[s:e + 1])
-            except Exception: return None
+            except Exception as exc: logger.debug("mining greedy json slice parse failed, return None: %s", exc); return None
         return None

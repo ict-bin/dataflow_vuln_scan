@@ -18,9 +18,11 @@ class TrackerDispatcher:
     def __init__(self, *, store: DagflowStore, func_lookup: Callable[[str], Any],
                  on_enqueue: Callable[[str, str], None], on_event: Any = None,
                  reader_finder: Callable[[dict], list[str]] | None = None,
-                 function_resolver: Callable[[str, str], list[str]] | None = None) -> None:
+                 function_resolver: Callable[[str, str], list[str]] | None = None,
+                 func_lookup_by_id: Callable[[str], Any] | None = None) -> None:
         self.store = store
         self.func_lookup = func_lookup
+        self.func_lookup_by_id = func_lookup_by_id or func_lookup
         self.on_enqueue = on_enqueue
         self.on_event = on_event
         self.reader_finder = reader_finder
@@ -32,6 +34,7 @@ class TrackerDispatcher:
             self.store, origin_func=origin_func, origin_taint=origin_taint,
             origin_node=origin_node, origin_edge=origin_edge,
             reader_finder=self.reader_finder, func_lookup=self.func_lookup,
+            func_lookup_by_id=self.func_lookup_by_id,
             on_enqueue=self.on_enqueue, on_event=self.on_event)
 
     def handle_indirect(self, *, origin_func: str, origin_taint: str, origin_node: int,
@@ -40,4 +43,5 @@ class TrackerDispatcher:
             self.store, origin_func=origin_func, origin_taint=origin_taint,
             origin_node=origin_node, origin_edge=origin_edge,
             function_resolver=self.function_resolver, func_lookup=self.func_lookup,
+            func_lookup_by_id=self.func_lookup_by_id,
             on_enqueue=self.on_enqueue, on_event=self.on_event)

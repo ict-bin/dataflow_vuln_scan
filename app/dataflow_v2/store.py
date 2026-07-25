@@ -209,7 +209,8 @@ class DataflowStore:
                 pk_cols = sorted(r["name"] for r in cols if r["pk"] > 0)
                 if pk_cols == ["func_id", "taint_signature"]:
                     return  # 已是新 schema
-            except Exception:
+            except Exception as e:
+                logger.debug("processed_taints schema check failed: %s", e)
                 return
             logger.info("[V2-store] migrating processed_taints PK: (func,taint,pre_val) → (func,taint)")
             c.executescript("""

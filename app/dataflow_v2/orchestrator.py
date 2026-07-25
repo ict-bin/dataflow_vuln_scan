@@ -307,7 +307,8 @@ class DfsOrchestrator:
                 body = read_function_body(self.cbs.source_root, f, max_lines=500)
                 if body and (fname + "(" in body or fname + " (" in body):
                     callers.append(f)
-            except Exception:
+            except Exception as e:
+                logger.warning("read caller function body failed, skip caller (func=%s): %s", f, e)
                 continue
         if callers:
             self.cbs.on_event("v2_caller_tracked", function=func.name,
@@ -324,8 +325,8 @@ class DfsOrchestrator:
                     from ..copy_utils import safe_copyfile
                     try:
                         safe_copyfile(base_session, new_session)
-                    except OSError:
-                        pass
+                    except OSError as e:
+                        logger.debug("copy base_session for return-followup failed (base=%s): %s", base_session, e)
                 caller_ctx = ctx.fork(_path_id(caller.func_id, rt_sig, "-1"))
                 self._upsert_return_followup_edge(
                     source_func=func,
@@ -475,6 +476,7 @@ class DfsOrchestrator:
                         with results_lock:
                             all_callee_return_taints.extend(rts)
                     except BaseException as exc:
+                        logger.warning("_run_path sub-thread failed (func=%s target=%s): %s", func.name, getattr(ps, "target_function", "?"), exc, exc_info=not isinstance(exc, KeyboardInterrupt))
                         with results_lock:
                             errs.append(exc)
                 t = threading.Thread(target=_run_one, daemon=True,
@@ -509,8 +511,8 @@ class DfsOrchestrator:
                     rt_name=rt.name, rt_sig=rt_sig, rt_raw_sig=rt.signature,
                     pre_val_sig=pre_val_sig[:60] if pre_val_sig else "(empty)",
                     n_return_taints=len(all_callee_return_taints))
-            except Exception:
-                pass
+            except Exception as e:
+                logger.info("emit v2_step7_find_miss_debug failed (func=%s): %s", func.name, e)
             if rt_sig in my_taint_sigs:
                 # 本函数已持有该污点 (escape 源头场景): reader 回传=冗余, 跳过, 终止循环
                 self.cbs.on_event("v2_return_taint_skipped_redundant",
@@ -523,8 +525,8 @@ class DfsOrchestrator:
                 from ..copy_utils import safe_copyfile
                 try:
                     safe_copyfile(chain_session, new_session)
-                except OSError:
-                    pass
+                except OSError as e:
+                    logger.debug("copy chain_session failed (base=%s): %s", chain_session, e)
             new_tp = TaintParamInfo(positions=[], signature=rt_sig, names=[rt.name])
             source_func = getattr(rt, "_graph_return_source_func", func)
             self._upsert_return_followup_edge(
@@ -979,8 +981,8 @@ class DfsOrchestrator:
                                               function=p.target_function,
                                               callee=p.target_function,
                                               indexed_file=found[0])
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("lazy import function_extractor / ensure indexed failed (target=%s): %s", getattr(p, "target_function", "?"), e)
         if not recs:
             return []
         unique_recs: list[FunctionRecord] = []
