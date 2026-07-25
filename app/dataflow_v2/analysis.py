@@ -951,7 +951,7 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
 
     def _read_body(self, func: FunctionRecord) -> str:
         from .function_extractor import read_function_body
-        return read_function_body(self.source_root, func, max_lines=500)
+        return read_function_body(self.source_root, func, max_lines=4000)
 
     # ── 函数指针间接调用跟踪 (复用 V1 function_pointer tracker) ──────────────
     def resolve_indirect_call(self, store: DataflowStore, func: FunctionRecord,
@@ -1212,7 +1212,7 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                               store: DataflowStore | None = None) -> str:
         from .function_extractor import read_function_body
         pre_val = "\n".join(f"- {v.left} {v.op} {v.right} (行 {v.line})" for v in ctx.pre_validations if v.left and v.op) or "(无)"
-        func_body = read_function_body(self.source_root, func, max_lines=500)
+        func_body = read_function_body(self.source_root, func, max_lines=4000)
         lines = [f"## 函数: {func.file}::{func.name} (行 {func.start_line}-{func.end_line})",
                  f"功能: {func.description or '(待分析)'}",
                  f"入口污点: 位置 {tp.positions} 签名 {tp.signature} 名字 {tp.names}",
