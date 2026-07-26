@@ -11,11 +11,13 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from pathlib import Path
 from typing import Any, Callable
 
 from ..copy_utils import safe_copyfile
 from ..runner import run_agent
+from ..service.session_lineage_index import session_relpath_for_run_root, update_session_index_item, upsert_session_index_item
 from ..vuln_report_utils import safe_name, build_v2_system_prompt
 from ..parsers import _extract_json_object
 from .models import FunctionRecord, TaintParamInfo, PropagationRecord
@@ -50,6 +52,18 @@ def resolve_external(
             safe_copyfile(base_session, str(fork_session))
     except OSError as e:
         logger.debug("tracker session copy failed (base=%s): %s", base_session, e)
+    tracker_session_relpath = upsert_session_index_item(
+        run_root=sessions_dir.parent,
+        task_id="",
+        session_relpath=session_relpath_for_run_root(sessions_dir.parent, fork_session),
+        parent_session_relpath=session_relpath_for_run_root(sessions_dir.parent, base_session) if str(base_session or "").strip() else "",
+        relation_kind="fork" if str(base_session or "").strip() else "root",
+        session_role="worker",
+        session_kind="track",
+        display_name=fork_session.stem,
+        status="running",
+        started_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+    )
     v2_system = build_v2_system_prompt(custom="tracker")
     system_prompt = (v2_system + "\n\n" if v2_system else "") + (
         "你是数据流污点分析中的外部逃逸下游读者追踪器。\n"
@@ -86,19 +100,28 @@ def resolve_external(
         f"- description: {prop.description or '(无)'}\n\n"
         f"请按系统提示词策略, 用 v2_db 查找读取这条逃逸污点的下游函数。\n"
     )
-    output = run_agent(
-        prompt=prompt, model=acfg.model, tools=acfg.tools or cfg.workers.default_tools,
-        cwd=source_root, session_file=str(fork_session), system_prompt=system_prompt,
-        cancel_event=cancel_event, run_timeout_seconds=min(cfg.agent_run_timeout_seconds, 1600),
-        timeout_retry_enabled=cfg.agent_timeout_retry_enabled,
-        timeout_max_retries=cfg.agent_timeout_max_retries,
-        pi_max_retries=cfg.pi_max_retries, pi_retry_delay=cfg.pi_retry_delay,
-        env=v2_env,
-        thinking_level="off",
-        task_context={"task_id": "", "task_root": "", "task_run_root": "",
-                      "task_pi_dir": "", "agent_role": "workers",
-                      "fork_purpose": "external_tracking"},
-    )
+    try:
+        output = run_agent(
+            prompt=prompt, model=acfg.model, tools=acfg.tools or cfg.workers.default_tools,
+            cwd=source_root, session_file=str(fork_session), system_prompt=system_prompt,
+            cancel_event=cancel_event, run_timeout_seconds=min(cfg.agent_run_timeout_seconds, 1600),
+            timeout_retry_enabled=cfg.agent_timeout_retry_enabled,
+            timeout_max_retries=cfg.agent_timeout_max_retries,
+            pi_max_retries=cfg.pi_max_retries, pi_retry_delay=cfg.pi_retry_delay,
+            env=v2_env,
+            thinking_level="off",
+            task_context={"task_id": "", "task_root": "", "task_run_root": "",
+                          "task_pi_dir": "", "agent_role": "workers",
+                          "fork_purpose": "external_tracking"},
+        )
+    finally:
+        update_session_index_item(
+            run_root=sessions_dir.parent,
+            task_id="",
+            session_relpath=tracker_session_relpath,
+            status="done" if not (cancel_event is not None and cancel_event.is_set()) else "cancelled",
+            ended_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        )
     parsed = _extract_json_object(output.output, "confirmed") or {}
     confirmed: list[tuple[FunctionRecord, TaintParamInfo]] = []
     for item in parsed.get("confirmed") or []:
@@ -192,6 +215,18 @@ def resolve_indirect(
             safe_copyfile(base_session, str(fork_session))
     except OSError as e:
         logger.debug("fptracker session copy failed (base=%s): %s", base_session, e)
+    tracker_session_relpath = upsert_session_index_item(
+        run_root=sessions_dir.parent,
+        task_id="",
+        session_relpath=session_relpath_for_run_root(sessions_dir.parent, fork_session),
+        parent_session_relpath=session_relpath_for_run_root(sessions_dir.parent, base_session) if str(base_session or "").strip() else "",
+        relation_kind="fork" if str(base_session or "").strip() else "root",
+        session_role="worker",
+        session_kind="fptrack",
+        display_name=fork_session.stem,
+        status="running",
+        started_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+    )
     v2_system = build_v2_system_prompt(custom="tracker")
     system_prompt = (v2_system + "\n\n" if v2_system else "") + (
         "你是数据流污点分析中的函数指针/回调目标追踪器。\n"
@@ -213,19 +248,28 @@ def resolve_indirect(
         f"## 候选函数 (数据库前后缀匹配预筛):\n" + "\n".join(cand_info) + "\n\n"
         f"从候选中找出 `{fp_expr}` 的真实注册处理函数。如果候选中无匹配, 可自行 grep 搜索。"
     )
-    output = run_agent(
-        prompt=prompt, model=acfg.model, tools=acfg.tools or cfg.workers.default_tools,
-        cwd=source_root, session_file=str(fork_session), system_prompt=system_prompt,
-        cancel_event=cancel_event, run_timeout_seconds=min(cfg.agent_run_timeout_seconds, 1600),
-        timeout_retry_enabled=cfg.agent_timeout_retry_enabled,
-        timeout_max_retries=cfg.agent_timeout_max_retries,
-        pi_max_retries=cfg.pi_max_retries, pi_retry_delay=cfg.pi_retry_delay,
-        env=v2_env,
-        thinking_level="off",
-        task_context={"task_id": "", "task_root": "", "task_run_root": "",
-                      "task_pi_dir": "", "agent_role": "workers",
-                      "fork_purpose": "indirect_call_tracking"},
-    )
+    try:
+        output = run_agent(
+            prompt=prompt, model=acfg.model, tools=acfg.tools or cfg.workers.default_tools,
+            cwd=source_root, session_file=str(fork_session), system_prompt=system_prompt,
+            cancel_event=cancel_event, run_timeout_seconds=min(cfg.agent_run_timeout_seconds, 1600),
+            timeout_retry_enabled=cfg.agent_timeout_retry_enabled,
+            timeout_max_retries=cfg.agent_timeout_max_retries,
+            pi_max_retries=cfg.pi_max_retries, pi_retry_delay=cfg.pi_retry_delay,
+            env=v2_env,
+            thinking_level="off",
+            task_context={"task_id": "", "task_root": "", "task_run_root": "",
+                          "task_pi_dir": "", "agent_role": "workers",
+                          "fork_purpose": "indirect_call_tracking"},
+        )
+    finally:
+        update_session_index_item(
+            run_root=sessions_dir.parent,
+            task_id="",
+            session_relpath=tracker_session_relpath,
+            status="done" if not (cancel_event is not None and cancel_event.is_set()) else "cancelled",
+            ended_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        )
     parsed = _extract_json_object(output.output, "handlers") or {}
     out = []
     for item in parsed.get("handlers") or []:

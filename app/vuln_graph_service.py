@@ -6,6 +6,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from .service.file_access_logging import resolve_path_logged
 from .vuln_store import VulnScanStore
 
 logger = logging.getLogger("dvs.vuln_graph_service")
@@ -14,8 +15,6 @@ logger = logging.getLogger("dvs.vuln_graph_service")
 def load_vuln_scan_graph(run_root: str | Path) -> dict[str, Any]:
     root = Path(run_root)
     candidates: list[Path] = []
-    # NFS mirror directory (written by Worker pod's periodic sync)
-    _nfs_mirror_dir = ".run_nfs"
 
     if root.parts and "epochs" in root.parts:
         epoch_idx = list(root.parts).index("epochs")
@@ -25,9 +24,6 @@ def load_vuln_scan_graph(run_root: str | Path) -> dict[str, Any]:
         # Prefer final archives over epoch-local snapshots so the UI sees the
         # completed recursive graph instead of an early pending followup view.
         candidates.extend([task_output_dir, run_dir])
-        # Also check .run_nfs mirror (for API pods during execution)
-        candidates.append(task_root / _nfs_mirror_dir)
-        candidates.append(task_root / _nfs_mirror_dir / "output")
         if root.name.isdigit():
             candidates.append(root)
         epochs_dir = run_dir / "epochs"
@@ -46,13 +42,11 @@ def load_vuln_scan_graph(run_root: str | Path) -> dict[str, Any]:
             root,
             root / "output",
             root.parent / "output",
-            root.parent / _nfs_mirror_dir,
-            root.parent / _nfs_mirror_dir / "output",
         ])
     seen: set[Path] = set()
     for candidate in candidates:
         try:
-            resolved = candidate.resolve()
+            resolved = resolve_path_logged(candidate, logger=logger, purpose="vuln_graph.resolve_candidate")
         except (OSError, RuntimeError) as e:
             logger.debug("candidate resolve broken symlink, skip: %s", e)
             # Broken symlink (Worker pod replaced path with symlink to local /tmp)
@@ -63,6 +57,11 @@ def load_vuln_scan_graph(run_root: str | Path) -> dict[str, Any]:
         db_path = resolved / "vuln-scan.sqlite"
         if db_path.exists():
             return VulnScanStore(db_path).export_json()
+    logger.warning(
+        "vuln graph sqlite not found for run_root=%s candidates=%s",
+        str(run_root),
+        [str(candidate) for candidate in candidates],
+    )
     return {"analysis_runs": [], "taint_nodes": [], "taint_edges": [], "followups": [], "vulnerability_findings": [], "context_forks": []}
 
 

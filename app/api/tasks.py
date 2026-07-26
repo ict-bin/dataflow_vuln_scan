@@ -20,6 +20,7 @@ from app.db import get_db
 from app.db.models import AppDvsTask
 from app.time_utils import isoformat_local
 from app.service.worker_snapshot import build_worker_cluster_snapshot
+from app.service.file_access_logging import path_exists_logged, read_json_logged
 from app.service.task_service import generate_prompt_from_path, get_task_service
 from app.service.task_paths import (
     _task_root,
@@ -590,9 +591,10 @@ def _read_text(path: Path, warnings: List[str], label: str, limit: int = 2_000_0
 
 def _load_result_json(row, root: Path, warnings: List[str]) -> Dict[str, Any]:
     result_path = root / "run" / "result.json"
-    if result_path.exists():
+    if path_exists_logged(result_path, logger=logger, purpose="api.tasks.result_json"):
         try:
-            return json.loads(result_path.read_text(encoding="utf-8", errors="replace") or "{}")
+            loaded = read_json_logged(result_path, logger=logger, purpose="api.tasks.result_json", encoding="utf-8")
+            return loaded if isinstance(loaded, dict) else {}
         except Exception as exc:
             warnings.append(f"解析 run/result.json 失败: {exc}")
     return row.result_json or {}
@@ -1615,9 +1617,14 @@ def _do_report_finding(task_id: str, finding_id: str, db: Session):
         taint_path_report_path=taint_path,
     )
     reported_ok = result.get("status") == "reported"
-    # 无论上报成败都更新 SQLite 并同步 MySQL 统计
+    # 无论上报成败都尽量同步 SQLite / MySQL 统计，并单独保证 DB commit 不被前序异常吞掉。
     try:
-        store = _graph_store_for_run_root(run_root, task_id=task_id, task_root=root)
+        store = _graph_store_for_run_root(
+            run_root,
+            task_id=task_id,
+            task_root=root,
+            readonly=False,
+        )
         if reported_ok:
             store.update_finding_report_status(
                 finding_id,
@@ -1625,11 +1632,17 @@ def _do_report_finding(task_id: str, finding_id: str, db: Session):
                 case_id=str(result.get("case_id") or ""),
                 task_id=task_id,
             )
+    except Exception:
+        logger.warning("update finding report status failed: task_id=%s finding_id=%s", task_id, finding_id, exc_info=True)
+    try:
         from app.service.task_service import _sync_task_vuln_stats
         _sync_task_vuln_stats(row)
+    except Exception:
+        logger.warning("sync task vuln stats failed after report: task_id=%s finding_id=%s", task_id, finding_id, exc_info=True)
+    try:
         db.commit()
     except Exception:
-        pass
+        logger.warning("db commit failed after report: task_id=%s finding_id=%s", task_id, finding_id, exc_info=True)
     return {
         "task_id": task_id,
         "finding_id": finding_id,
@@ -2003,13 +2016,19 @@ def get_task_logs(task_id: str, db: Session = Depends(get_db)):
 def generate_prompt(body: GeneratePromptRequest):
     """Auto-generate a data flow analysis prompt from an input path."""
     return {"prompt": generate_prompt_from_path(body.input_path)}
-def _graph_store_for_run_root(run_root: Path, task_id: str = "", *, task_root: Path | None = None):
+def _graph_store_for_run_root(
+    run_root: Path,
+    task_id: str = "",
+    *,
+    task_root: Path | None = None,
+    readonly: bool = True,
+):
     """图谱详情固定从 task_root 下的 authoritative SQLite 读取。"""
     store = open_authoritative_vuln_scan_store(
         task_root,
         prefer_live=True,
-        readonly=True,
-        enable_wal=False,
+        readonly=readonly,
+        enable_wal=not readonly,
     )
     if store is not None:
         return store

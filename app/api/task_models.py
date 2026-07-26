@@ -71,6 +71,7 @@ class TaskSessionIndexNodeResponse(BaseModel):
     judge_index: Optional[int] = None
     batch_index: Optional[int] = None
     parent_relative_path: Optional[str] = None
+    relation_kind: Optional[str] = None
     parallel_group: Optional[str] = None
     family_key: Optional[str] = None
     flow_kind: Optional[str] = None

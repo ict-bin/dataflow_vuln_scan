@@ -2348,6 +2348,229 @@ def test_route_level_session_index_does_not_invent_edges_from_orphan_sessions(tm
     assert all(isinstance(node["session_header"], dict) for node in session_index["nodes"])
 
 
+def test_route_level_session_index_prefers_runtime_authoritative_lineage_index(tmp_path: Path, monkeypatch):
+    task_id = "task-route-runtime-lineage-authority"
+    output_root = tmp_path / "output"
+    task_root = output_root / task_id
+    run_root = task_root / "run"
+    sessions_root = run_root / "sessions"
+    run_root.mkdir(parents=True, exist_ok=True)
+    _write_session_file(sessions_root / "root.jsonl")
+    _write_session_file(sessions_root / "child.jsonl")
+    _write_session_file(sessions_root / "guess.jsonl")
+
+    lineage_index = {
+        "version": 2,
+        "generated_at": "2026-07-26T09:00:00Z",
+        "task_id": task_id,
+        "run_root": str(run_root),
+        "sessions_root": str(sessions_root),
+        "items": [
+            {
+                "session_relpath": "sessions/root.jsonl",
+                "parent_session_relpath": "",
+                "relation_kind": "root",
+                "node_id": "node-root",
+                "edge_id": "",
+                "session_role": "worker",
+                "session_kind": "taint",
+                "display_name": "Root Session",
+                "status": "done",
+                "started_at": "2026-07-26T08:59:00Z",
+                "ended_at": "2026-07-26T09:00:00Z",
+                "event_count": 2,
+                "mtime": 123.0,
+            },
+            {
+                "session_relpath": "sessions/child.jsonl",
+                "parent_session_relpath": "sessions/root.jsonl",
+                "relation_kind": "fork",
+                "node_id": "node-child",
+                "edge_id": "edge-child",
+                "session_role": "worker",
+                "session_kind": "vuln_mining",
+                "display_name": "Child Session",
+                "status": "running",
+                "started_at": "2026-07-26T09:00:01Z",
+                "event_count": 2,
+                "mtime": 124.0,
+            },
+            {
+                "session_relpath": "sessions/guess.jsonl",
+                "parent_session_relpath": "sessions/root.jsonl",
+                "relation_kind": "supplementary",
+                "node_id": "node-guess",
+                "edge_id": "edge-guess",
+                "session_role": "worker",
+                "session_kind": "infer_ext",
+                "display_name": "Guess Session",
+                "status": "done",
+                "started_at": "2026-07-26T09:00:02Z",
+                "ended_at": "2026-07-26T09:00:04Z",
+                "event_count": 2,
+                "mtime": 125.0,
+            },
+        ],
+    }
+    (run_root / "session-index.json").write_text(
+        json.dumps(lineage_index, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    row = SimpleNamespace(
+        task_id=task_id,
+        output_path=str(output_root),
+        result_json={},
+        status="running",
+    )
+    monkeypatch.setattr(tasks_module, "_get_task_row", lambda db, value: row)
+
+    session_index = get_task_session_index(task_id, db=None)
+    nodes_by_path = {node["relative_path"]: node for node in session_index["nodes"]}
+    edges_by_id = {edge["edge_id"]: edge for edge in session_index["edges"]}
+
+    assert session_index["sessions_root"] == str(sessions_root)
+    assert session_index["index_path"] == str(run_root / "session-index.json")
+    assert session_index["generated_at"] == "2026-07-26T09:00:00Z"
+    assert session_index["summary"] == {
+        "session_count": 3,
+        "active_session_count": 1,
+        "edge_count": 2,
+    }
+    assert session_index["warnings"] == []
+    assert nodes_by_path["sessions/root.jsonl"]["parent_relative_path"] is None
+    assert nodes_by_path["sessions/root.jsonl"]["relation_kind"] == "root"
+    assert nodes_by_path["sessions/root.jsonl"]["session_header"]["relation_kind"] == "root"
+    assert nodes_by_path["sessions/child.jsonl"]["parent_relative_path"] == "sessions/root.jsonl"
+    assert nodes_by_path["sessions/child.jsonl"]["relation_kind"] == "fork"
+    assert nodes_by_path["sessions/guess.jsonl"]["parent_relative_path"] == "sessions/root.jsonl"
+    assert nodes_by_path["sessions/guess.jsonl"]["relation_kind"] == "supplementary"
+    assert nodes_by_path["sessions/child.jsonl"]["is_active"] is True
+    assert nodes_by_path["sessions/guess.jsonl"]["is_active"] is False
+    assert edges_by_id == {
+        "fork:sessions/root.jsonl->sessions/child.jsonl": {
+            "edge_id": "fork:sessions/root.jsonl->sessions/child.jsonl",
+            "source_node_id": "sessions/root.jsonl",
+            "target_node_id": "sessions/child.jsonl",
+            "kind": "fork",
+            "label": "fork",
+        },
+        "supplementary:sessions/root.jsonl->sessions/guess.jsonl": {
+            "edge_id": "supplementary:sessions/root.jsonl->sessions/guess.jsonl",
+            "source_node_id": "sessions/root.jsonl",
+            "target_node_id": "sessions/guess.jsonl",
+            "kind": "supplementary",
+            "label": "supplementary",
+        },
+    }
+
+
+def test_route_level_session_index_falls_back_to_legacy_output_index_when_runtime_lineage_missing(tmp_path: Path, monkeypatch):
+    task_id = "task-route-runtime-lineage-fallback"
+    output_root = tmp_path / "output"
+    task_root = output_root / task_id
+    run_root = task_root / "run"
+    sessions_root = task_root / "output" / "sessions"
+    run_root.mkdir(parents=True, exist_ok=True)
+    _write_session_file(sessions_root / "root.jsonl")
+    _write_session_file(sessions_root / "child.jsonl")
+
+    store = VulnScanStore(_graph_sqlite_path(run_root))
+    store.start_task_graph_run(TaskGraphRunRecord(
+        task_id=task_id,
+        epoch="fallback-1",
+        run_root=str(run_root),
+        root_function="Root",
+    ))
+    store.upsert_task_graph_node(TaskGraphNodeRecord(
+        node_id="node-root",
+        task_id=task_id,
+        epoch="fallback-1",
+        func_id="root-func",
+        function_name_resolved="Root",
+        function_name_raw="Root",
+        source_file="src/root.cpp",
+        depth=0,
+        status="done",
+        analysis_status="done",
+    ))
+    store.upsert_task_graph_node(TaskGraphNodeRecord(
+        node_id="node-child",
+        task_id=task_id,
+        epoch="fallback-1",
+        func_id="child-func",
+        function_name_resolved="Child",
+        function_name_raw="Child",
+        source_file="src/child.cpp",
+        depth=1,
+        status="done",
+        analysis_status="done",
+    ))
+    store.upsert_task_graph_session(TaskGraphSessionRecord(
+        session_relpath="sessions/root.jsonl",
+        task_id=task_id,
+        epoch="fallback-1",
+        node_id="node-root",
+        edge_id="",
+        session_role="worker",
+        session_kind="taint",
+        display_name="root",
+        status="done",
+        event_count=2,
+    ))
+    store.upsert_task_graph_session(TaskGraphSessionRecord(
+        session_relpath="sessions/child.jsonl",
+        task_id=task_id,
+        epoch="fallback-1",
+        node_id="node-child",
+        edge_id="edge-child",
+        session_role="worker",
+        session_kind="vuln_mining",
+        display_name="child",
+        status="done",
+        event_count=2,
+    ))
+    store.upsert_task_graph_edge(TaskGraphEdgeRecord(
+        edge_id="edge-child",
+        task_id=task_id,
+        epoch="fallback-1",
+        source_node_id="node-root",
+        target_node_id="node-child",
+        source_func_id="root-func",
+        target_func_id="child-func",
+        source_function_resolved="Root",
+        target_function_resolved="Child",
+        target_function_raw="Child",
+        source_file="src/root.cpp",
+        target_file="src/child.cpp",
+        edge_kind="direct_call",
+        status="done",
+        source_prop_id="prop-child",
+        visible_in_tree=1,
+        visible_in_all_propagations=1,
+    ))
+
+    row = SimpleNamespace(
+        task_id=task_id,
+        output_path=str(output_root),
+        result_json={},
+        status="done",
+    )
+    monkeypatch.setattr(tasks_module, "_get_task_row", lambda db, value: row)
+
+    session_index = get_task_session_index(task_id, db=None)
+    nodes_by_path = {node["relative_path"]: node for node in session_index["nodes"]}
+
+    assert session_index["sessions_root"] == str(sessions_root)
+    assert session_index["index_path"] == str(sessions_root / "index.json")
+    assert set(nodes_by_path) == {"sessions/root.jsonl", "sessions/child.jsonl"}
+    assert session_index["edges"] == []
+    assert nodes_by_path["sessions/root.jsonl"].get("parent_relative_path") is None
+    assert nodes_by_path["sessions/root.jsonl"].get("relation_kind") is None
+    assert nodes_by_path["sessions/child.jsonl"].get("parent_relative_path") is None
+    assert nodes_by_path["sessions/child.jsonl"].get("relation_kind") is None
+
+
 def test_get_task_session_file_reads_output_sessions_only(tmp_path: Path, monkeypatch):
     task_id = "task-session-file-output-only"
     output_root = tmp_path / "output"

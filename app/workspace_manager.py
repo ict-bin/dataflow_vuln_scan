@@ -450,8 +450,9 @@ class WorkspaceManager:
         """Background thread: periodically sync the runtime minimum set to NFS.
 
         Sessions sync directly to output/sessions/ on NFS so runtime and
-        terminal reads use the same path. The only other runtime artifact we
-        keep incrementally visible is run/vuln-scan.sqlite.
+        terminal reads use the same path. Other runtime artifacts that API pods
+        may read during execution are also kept incrementally visible under the
+        task_root/run compatibility directory.
 
         Large runtime trees such as output/, vulnerabilities/ and dataflow-v2/
         stay local during execution and are published by the terminal archive.
@@ -488,6 +489,27 @@ class WorkspaceManager:
                     if _safe_copyfile(str(local_db), str(nfs_db)):
                         synced_targets.append(str(nfs_db))
 
+                # Sync result.json for runtime result page reads.
+                local_result = self._local_run_root / "result.json"
+                if local_result.exists():
+                    nfs_result = nfs_run_parent / "result.json"
+                    if _safe_copyfile(str(local_result), str(nfs_result)):
+                        synced_targets.append(str(nfs_result))
+
+                # Sync explicit session lineage index for relationship graph reads.
+                local_session_index = self._local_run_root / "session-index.json"
+                if local_session_index.exists():
+                    nfs_session_index = nfs_run_parent / "session-index.json"
+                    if _safe_copyfile(str(local_session_index), str(nfs_session_index)):
+                        synced_targets.append(str(nfs_session_index))
+
+                # Sync minimal dataflow-v2 database set for runtime graph reads.
+                local_v2_dir = self._local_run_root / "dataflow-v2"
+                if local_v2_dir.exists():
+                    nfs_v2_dir = nfs_run_parent / "dataflow-v2"
+                    synced = self._sync_dataflow_v2_minimal(local_v2_dir, nfs_v2_dir)
+                    synced_targets.extend(synced)
+
                 self._emit_event(
                     "workspace_periodic_sync_completed",
                     nfs_path=str(self._nfs_run_root),
@@ -521,6 +543,19 @@ class WorkspaceManager:
             dst = nfs_sessions / src.name
             if _needs_copy(src, dst):
                 _safe_copyfile(str(src), str(dst))
+
+    def _sync_dataflow_v2_minimal(self, local_v2_dir: Path, nfs_v2_dir: Path) -> list[str]:
+        """Copy the minimal live dataflow-v2 DB set that runtime readers need."""
+        synced: list[str] = []
+        nfs_v2_dir.mkdir(parents=True, exist_ok=True)
+        for filename in ("functions.db", "orchestration.db", "propagations.db", "taints.db"):
+            src = local_v2_dir / filename
+            if not src.exists():
+                continue
+            dst = nfs_v2_dir / filename
+            if _needs_copy(src, dst) and _safe_copyfile(str(src), str(dst)):
+                synced.append(str(dst))
+        return synced
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────

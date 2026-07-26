@@ -39,6 +39,11 @@ from ..vuln_store import (
     VulnScanStore,
 )
 from ..service.task_vuln_stats import refresh_task_vuln_snapshot_by_task_id
+from ..service.session_lineage_index import (
+    session_relpath_for_run_root,
+    update_session_index_item,
+    upsert_session_index_item,
+)
 from .function_extractor import ensure_file_indexed
 from .finding_store import persist_finding
 from .models import (
@@ -59,6 +64,34 @@ def _short_list_preview(items: list[str], *, limit: int = 8) -> list[str]:
     if len(items) > limit:
         preview.append(f"...(+{len(items) - limit} more)")
     return preview
+
+
+def _infer_ext_session_path(
+    sessions_dir: Path,
+    *,
+    func_name: str,
+    base_session: str = "",
+    session_key: str = "",
+) -> Path:
+    """Name infer-ext sessions as taint-analysis supplements when possible.
+
+    Preferred format:
+      <parent-taint-session>-TaintFunctionGuess[-NN].jsonl
+
+    This keeps the relationship obvious in the frontend. If the parent session
+    is unavailable, fall back to the legacy infer-ext naming convention.
+    """
+    if not base_session:
+        return _session_path(sessions_dir, -1, func_name, session_key[:80], kind="infer-ext")
+
+    parent_stem = _safe_name(Path(base_session).stem) or _safe_name(func_name) or "infer-ext"
+    base = f"{parent_stem}-TaintFunctionGuess"
+    path = sessions_dir / f"{base}.jsonl"
+    n = 0
+    while path.exists():
+        n += 1
+        path = sessions_dir / f"{base}-{n:02d}.jsonl"
+    return path
 
 
 def _try_extract_truncated_json(text: str) -> dict | None:
@@ -223,6 +256,10 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
     def graph_node_id(self, func: FunctionRecord) -> str:
         return f"node::{self.task_id}::{self.graph_epoch}::{func.func_id}"
 
+    @property
+    def session_lineage_run_root(self) -> Path:
+        return self.run_dir.parent
+
     def graph_session_relpath(self, session_path: str | Path) -> str:
         session = Path(session_path)
         try:
@@ -264,8 +301,30 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
         session_role: str,
         session_kind: str,
         status: str,
+        parent_session_path: str | Path = "",
+        relation_kind: str = "",
     ) -> str:
         relpath = self.graph_session_relpath(session_path)
+        lineage_relpath = session_relpath_for_run_root(self.session_lineage_run_root, session_path)
+        parent_relpath = (
+            session_relpath_for_run_root(self.session_lineage_run_root, parent_session_path)
+            if str(parent_session_path or "").strip()
+            else ""
+        )
+        upsert_session_index_item(
+            run_root=self.session_lineage_run_root,
+            task_id=self.task_id,
+            session_relpath=lineage_relpath,
+            parent_session_relpath=parent_relpath,
+            relation_kind=relation_kind or ("root" if not parent_relpath else "fork"),
+            node_id=node_id,
+            edge_id=edge_id,
+            session_role=session_role,
+            session_kind=session_kind,
+            display_name=Path(session_path).stem,
+            status=status,
+            started_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        )
         if not self._graph_store_ready():
             return relpath
         self.graph_store.upsert_task_graph_session(TaskGraphSessionRecord(
@@ -313,6 +372,8 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
             session_role="worker",
             session_kind="taint",
             status="running",
+            parent_session_path=base_session,
+            relation_kind="root" if not str(base_session or "").strip() else "fork",
         )
         if self._graph_store_ready():
             self.graph_store.update_task_graph_node(node_id, primary_session_relpath=session_relpath)
@@ -420,6 +481,13 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                 status=terminal_status,
                 ended_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"),
             )
+        update_session_index_item(
+            run_root=self.session_lineage_run_root,
+            task_id=self.task_id,
+            session_relpath=session_relpath_for_run_root(self.session_lineage_run_root, fork_session),
+            status=terminal_status,
+            ended_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        )
         return self._build_result(store, func, taint_params, parsed, fork_session, body, taint_failed=taint_failed)
 
     # ── 结果构造 + clang 标注 ───────────────────────────────────────────────
@@ -861,12 +929,30 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
         session_key = "_".join(_safe_name(p.target_function or "external") for p in external_props[:3]) or "external"
         if len(external_props) > 3:
             session_key = f"{session_key}_plus{len(external_props) - 3}"
-        fork_session = _session_path(self.sessions_dir, -1, func.name, session_key[:80], kind="infer-ext")
+        fork_session = _infer_ext_session_path(
+            self.sessions_dir,
+            func_name=func.name,
+            base_session=base_session,
+            session_key=session_key,
+        )
         try:
             if base_session and Path(base_session).exists():
                 safe_copyfile(base_session, str(fork_session))
         except OSError as e:
             logger.debug("infer-ext session copy failed (base=%s): %s", base_session, e)
+        infer_session_relpath = upsert_session_index_item(
+            run_root=self.session_lineage_run_root,
+            task_id=self.task_id,
+            session_relpath=session_relpath_for_run_root(self.session_lineage_run_root, fork_session),
+            parent_session_relpath=session_relpath_for_run_root(self.session_lineage_run_root, base_session) if str(base_session or "").strip() else "",
+            relation_kind="supplementary",
+            node_id=self.graph_node_id(func),
+            session_role="worker",
+            session_kind="infer-ext",
+            display_name=fork_session.stem,
+            status="running",
+            started_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        )
         logger.info(
             "[V2-infer-ext] CALLING run_agent (session=%s timeout=%ss)",
             str(fork_session)[-80:],
@@ -891,20 +977,29 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
         )
         logger.info("[V2-infer-ext] DONE func=%s duration=%.1fs error=%s output_len=%d",
                     func.name, time.time() - _t0, (result.error or "")[:100], len(result.output or ""))
-        # 解析 JSON 数组
-        from ..parsers import _extract_json_object
-        text = result.output or ""
-        import json as _json
-        # 尝试解析 JSON 数组
-        import re as _re
-        m = _re.search(r'\[.*?\]', text, _re.DOTALL)
-        if not m:
-            return {}
         try:
-            arr = _json.loads(m.group())
-        except Exception as e:
-            logger.debug("parse inference JSON match failed: %s", e)
-            return {}
+            # 解析 JSON 数组
+            from ..parsers import _extract_json_object
+            text = result.output or ""
+            import json as _json
+            # 尝试解析 JSON 数组
+            import re as _re
+            m = _re.search(r'\[.*?\]', text, _re.DOTALL)
+            if not m:
+                return {}
+            try:
+                arr = _json.loads(m.group())
+            except Exception as e:
+                logger.debug("parse inference JSON match failed: %s", e)
+                return {}
+        finally:
+            update_session_index_item(
+                run_root=self.session_lineage_run_root,
+                task_id=self.task_id,
+                session_relpath=infer_session_relpath,
+                status="cancelled" if self._cancel_requested() else "done",
+                ended_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            )
         inferred = {}
         for item in arr:
             if isinstance(item, dict):
@@ -999,6 +1094,8 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
             session_role="worker",
             session_kind="vuln",
             status="running",
+            parent_session_path=base_session,
+            relation_kind="fork" if str(base_session or "").strip() else "root",
         )
         taints = store.list_taints_in_function(func.func_id)
         props = store.list_propagations_from(func.func_id)
@@ -1092,6 +1189,13 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                 status=session_status,
                 ended_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"),
             )
+        update_session_index_item(
+            run_root=self.session_lineage_run_root,
+            task_id=self.task_id,
+            session_relpath=session_relpath_for_run_root(self.session_lineage_run_root, fork_session),
+            status=session_status,
+            ended_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        )
         return persisted_count
 
     def _report_finding_to_intake(self, finding_id: str, rec: VulnFindingRecord,

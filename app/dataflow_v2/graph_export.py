@@ -18,35 +18,38 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
+from ..service.file_access_logging import resolve_path_logged, sqlite_connect_logged
+
 logger = logging.getLogger("dvs.dataflow_v2.graph_export")
 
 
 def _find_v2_dir(run_root: str | Path) -> Path | None:
     """定位 dataflow-v2/ 目录 (优先 output 归档, 次 run/)。"""
     root = Path(run_root)
-    _nfs = ".run_nfs"
     candidates: list[Path] = []
     if "epochs" in root.parts:
         epoch_idx = list(root.parts).index("epochs")
         run_dir = Path(*root.parts[:epoch_idx])
         candidates += [run_dir.parent / "output" / "dataflow-v2",
-                       run_dir / "dataflow-v2",
-                       run_dir.parent / _nfs / "output" / "dataflow-v2",
-                       run_dir.parent / _nfs / "dataflow-v2"]
+                       run_dir / "dataflow-v2"]
         if root.name.isdigit():
             candidates.append(root / "dataflow-v2")
     else:
         candidates += [root / "dataflow-v2", root / "output" / "dataflow-v2",
-                       root.parent / "output" / "dataflow-v2",
-                       root.parent / _nfs / "output" / "dataflow-v2"]
+                       root.parent / "output" / "dataflow-v2"]
     for c in candidates:
         try:
-            r = c.resolve()
+            r = resolve_path_logged(c, logger=logger, purpose="graph_export.find_v2_dir")
         except (OSError, RuntimeError) as e:
             logger.debug("candidate resolve failed, skip (c=%s): %s", c, e)
             continue
         if r.is_dir() and (r / "functions.db").exists():
             return r
+    logger.warning(
+        "dataflow-v2 directory not found for run_root=%s candidates=%s",
+        str(run_root),
+        [str(candidate) for candidate in candidates],
+    )
     return None
 
 
@@ -58,19 +61,23 @@ def _find_vuln_sqlite(run_root: str | Path) -> Path | None:
         epoch_idx = list(root.parts).index("epochs")
         run_dir = Path(*root.parts[:epoch_idx])
         candidates += [run_dir.parent / "output" / "vuln-scan.sqlite",
-                       run_dir / "vuln-scan.sqlite",
-                       run_dir.parent / ".run_nfs" / "output" / "vuln-scan.sqlite"]
+                       run_dir / "vuln-scan.sqlite"]
     else:
         candidates += [root / "vuln-scan.sqlite", root / "output" / "vuln-scan.sqlite",
                        root.parent / "output" / "vuln-scan.sqlite"]
     for c in candidates:
         try:
-            r = c.resolve()
+            r = resolve_path_logged(c, logger=logger, purpose="graph_export.find_vuln_sqlite")
         except (OSError, RuntimeError) as e:
             logger.debug("candidate resolve failed, skip (c=%s): %s", c, e)
             continue
         if r.exists():
             return r
+    logger.warning(
+        "vuln-scan sqlite not found for run_root=%s candidates=%s",
+        str(run_root),
+        [str(candidate) for candidate in candidates],
+    )
     return None
 
 
@@ -83,7 +90,7 @@ def _load_func_map(v2: Path) -> dict[str, dict]:
     """func_id → {name, file, signature, start_line, description, processed_taints}。
     processed_taints 迁移到独立表后, 列已弃用; 这里从 processed_taints 表 COUNT 填充,
     保持返回 JSON list 字符串 (len=计数, !='[]' 当计数>0) 兼容下游判断。"""
-    fc = sqlite3.connect(v2 / "functions.db")
+    fc = sqlite_connect_logged(v2 / "functions.db", logger=logger, purpose="graph_export.functions_db")
     fc.row_factory = sqlite3.Row
     rows = _q(fc, "SELECT func_id, file, name, signature, start_line, end_line, description FROM functions")
     func_map = {r["func_id"]: dict(r) for r in rows}
@@ -98,7 +105,7 @@ def _load_func_map(v2: Path) -> dict[str, dict]:
 
 def _load_taints_by_func(v2: Path) -> dict[str, list[dict]]:
     """func_id → [{symbol, kind, line, description}]"""
-    tc = sqlite3.connect(v2 / "taints.db")
+    tc = sqlite_connect_logged(v2 / "taints.db", logger=logger, purpose="graph_export.taints_db")
     rows = _q(tc, "SELECT taint_id, func_id, name, signature, file, function, description FROM taints")
     tc.close()
     out: dict[str, list[dict]] = {}
@@ -111,7 +118,7 @@ def _load_taints_by_func(v2: Path) -> dict[str, list[dict]]:
 
 def _load_props_by_source(v2: Path) -> dict[str, list[dict]]:
     """source_func_id → [{from_symbol, to_symbol, line, operation, evidence, termination_reason, prop_id, target_function, target_func_id, call_line}]"""
-    pc = sqlite3.connect(v2 / "propagations.db")
+    pc = sqlite_connect_logged(v2 / "propagations.db", logger=logger, purpose="graph_export.propagations_db")
     rows = _q(pc, "SELECT prop_id, source_func_id, source_taint_name, source_taint_signature, "
                    "target_taint_name, target_taint_signature, target_function, target_func_id, "
                    "call_line, condition, is_external, callsite_validated, "
@@ -141,7 +148,7 @@ def _load_findings_by_func(vuln_sqlite: Path | None) -> dict[str, int]:
     if vuln_sqlite is None:
         return {}
     try:
-        vc = sqlite3.connect(vuln_sqlite)
+        vc = sqlite_connect_logged(vuln_sqlite, logger=logger, purpose="graph_export.vuln_sqlite")
         vc.row_factory = sqlite3.Row
         rows = vc.execute("SELECT function_name, COUNT(*) as cnt FROM vulnerability_findings "
                           "GROUP BY function_name").fetchall()
@@ -175,7 +182,7 @@ def load_dataflow_v2_graph(run_root: str | Path) -> dict[str, Any]:
     findings_by_func = _load_findings_by_func(vuln_sqlite)
 
     # orchestration → DFS 路径 + 邻接
-    oc = sqlite3.connect(v2 / "orchestration.db")
+    oc = sqlite_connect_logged(v2 / "orchestration.db", logger=logger, purpose="graph_export.orchestration_db")
     orch_edges = _q(oc, "SELECT edge_id, path_id, source_function, source_signature, source_func_id, "
                          "target_function, target_signature, target_func_id, taint_params, "
                          "depth, edge_order, status FROM orchestration ORDER BY path_id, edge_order")
@@ -316,7 +323,7 @@ def build_v2_trace_tree(run_root: str | Path) -> dict[str, Any] | None:
     vuln_sqlite = _find_vuln_sqlite(run_root)
     findings_by_func = _load_findings_by_func(vuln_sqlite)
 
-    oc = sqlite3.connect(v2 / "orchestration.db")
+    oc = sqlite_connect_logged(v2 / "orchestration.db", logger=logger, purpose="graph_export.trace_orchestration_db")
     orch_edges = _q(oc, "SELECT edge_id, path_id, source_function, source_func_id, "
                          "target_function, target_func_id, taint_params, "
                          "depth, edge_order, status FROM orchestration ORDER BY path_id, edge_order")

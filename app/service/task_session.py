@@ -9,6 +9,7 @@ import tempfile
 from pathlib import Path
 
 from app.db.models import AppDvsTask
+from .file_access_logging import path_exists_logged, path_is_file_logged, read_text_logged, resolve_path_logged
 
 logger = logging.getLogger("dvs.task_session")
 
@@ -39,8 +40,8 @@ def _safe_session_file(root: Path, relative_path: str) -> Path:
     if rel.is_absolute() or ".." in rel.parts:
         from fastapi import HTTPException
         raise HTTPException(400, "非法会话路径")
-    output_root = (root / "output").resolve()
-    target = (output_root / rel).resolve()
+    output_root = resolve_path_logged(root / "output", logger=logger, purpose="task_session.output_root")
+    target = resolve_path_logged(output_root / rel, logger=logger, purpose="task_session.target_path")
     try:
         target.relative_to(output_root)
     except ValueError:
@@ -64,10 +65,15 @@ def _parse_session_file(path: Path) -> dict[str, object]:
     events: list[dict[str, object]] = []
     warnings: list[str] = []
     session_meta: dict[str, object] | None = None
-    if not path.exists() or not path.is_file():
+    if not path_exists_logged(path, logger=logger, purpose="task_session.parse.exists") or not path_is_file_logged(path, logger=logger, purpose="task_session.parse.is_file"):
         from fastapi import HTTPException
         raise HTTPException(404, "会话文件不存在")
-    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    try:
+        lines = read_text_logged(path, logger=logger, purpose="task_session.parse.read", encoding="utf-8", errors="replace").splitlines()
+    except Exception as exc:
+        logger.warning("failed to read session file: path=%s error=%s", str(path), exc, exc_info=True)
+        from fastapi import HTTPException
+        raise HTTPException(500, "读取会话文件失败")
     for index, raw in enumerate(lines, start=1):
         line = raw.strip()
         if not line:
@@ -98,9 +104,114 @@ def _parse_session_file(path: Path) -> dict[str, object]:
 
 
 def _build_task_session_catalog(row: AppDvsTask) -> dict[str, object]:
-    from .task_paths import _task_output_sessions_root, _task_root
+    from .session_lineage_index import lineage_index_path, load_lineage_index, normalize_relative_path
+    from .task_paths import _latest_epoch_run_root, _resolve_run_path, _task_output_sessions_root, _task_root
     from .task_result import _load_task_result_json
     from .session_index import build_session_catalog
+
+    run_root = _resolve_run_path(row) or _latest_epoch_run_root(row)
+    if run_root is not None:
+        authority_index_path = lineage_index_path(run_root)
+        if path_exists_logged(authority_index_path, logger=logger, purpose="task_session.authority_index.exists"):
+            lineage = load_lineage_index(run_root, task_id=row.task_id)
+            items = lineage.get("items") if isinstance(lineage, dict) else []
+            normalized_items = [item for item in items if isinstance(item, dict)]
+            nodes: list[dict[str, object]] = []
+            edges: list[dict[str, object]] = []
+            warnings: list[str] = []
+            session_count = 0
+            active_count = 0
+            relation_count = 0
+            seen_edge_ids: set[str] = set()
+            for item in normalized_items:
+                relative_path = normalize_relative_path(str(item.get("session_relpath") or ""))
+                if not relative_path:
+                    continue
+                session_count += 1
+                status = str(item.get("status") or "unknown")
+                is_active = status == "running"
+                if is_active:
+                    active_count += 1
+                relation_kind = str(item.get("relation_kind") or "").strip()
+                parent_relative_path = normalize_relative_path(str(item.get("parent_session_relpath") or ""))
+                node = {
+                    "node_id": relative_path,
+                    "relative_path": relative_path,
+                    "session_name": str(item.get("display_name") or Path(relative_path).stem),
+                    "display_name": str(item.get("display_name") or Path(relative_path).stem),
+                    "role": str(item.get("session_kind") or item.get("session_role") or "worker"),
+                    "role_label": str(item.get("session_role") or item.get("session_kind") or "worker"),
+                    "status": status,
+                    "is_active": is_active,
+                    "stage_key": "worker",
+                    "stage_label": "数据流漏洞挖掘",
+                    "stage_order": 10,
+                    "stage_group": str(item.get("node_id") or "root"),
+                    "module_name": None,
+                    "parent_relative_path": parent_relative_path or None,
+                    "relation_kind": relation_kind or None,
+                    "flow_kind": "lineage",
+                    "started_at": item.get("started_at"),
+                    "ended_at": item.get("ended_at"),
+                    "started_ts": None,
+                    "last_event_at": item.get("ended_at") or item.get("started_at"),
+                    "last_event_ts": None,
+                    "mtime": float(item.get("mtime") or 0.0),
+                    "size": 0,
+                    "event_count": int(item.get("event_count") or 0),
+                    "line_count": int(item.get("event_count") or 0),
+                    "warnings": [],
+                    "session_header": {
+                        "node_id": item.get("node_id") or "",
+                        "edge_id": item.get("edge_id") or "",
+                        "session_kind": item.get("session_kind") or "",
+                        "relation_kind": relation_kind or "",
+                    },
+                    "round_refs": [],
+                    "attempts_seen": [],
+                }
+                nodes.append(node)
+                if parent_relative_path:
+                    edge_id = f"{relation_kind or 'fork'}:{parent_relative_path}->{relative_path}"
+                    if edge_id not in seen_edge_ids:
+                        seen_edge_ids.add(edge_id)
+                        edges.append({
+                            "edge_id": edge_id,
+                            "source_node_id": parent_relative_path,
+                            "target_node_id": relative_path,
+                            "kind": relation_kind or "fork",
+                            "label": relation_kind or "fork",
+                        })
+                        relation_count += 1
+            return {
+                "task_id": row.task_id,
+                "status": row.status,
+                "sessions_root": str(run_root / "sessions"),
+                "index_path": str(authority_index_path),
+                "generated_at": lineage.get("generated_at"),
+                "items": [],
+                "index": {
+                    "version": lineage.get("version") or 2,
+                    "generated_at": lineage.get("generated_at"),
+                    "task_id": row.task_id,
+                    "task_status": row.status,
+                    "sessions_root": str(run_root / "sessions"),
+                    "summary": {
+                        "session_count": session_count,
+                        "active_session_count": active_count,
+                        "edge_count": relation_count,
+                    },
+                    "nodes": nodes,
+                    "edges": edges,
+                    "groups": [],
+                    "warnings": warnings,
+                },
+            }
+        logger.info(
+            "authoritative session lineage index missing, fallback to legacy catalog: task_id=%s path=%s",
+            row.task_id,
+            str(authority_index_path),
+        )
 
     root = _task_root(row)
     sessions_root = _task_output_sessions_root(row) or (root / "output" / "sessions" if root else Path())

@@ -1,8 +1,8 @@
 """Task directory structure helpers — compute run/epoch/output paths from a DB row.
 
 Also provides NFS-safe path resolution for API pods that need to read
-session files while a Worker pod has replaced the NFS run/ directory with
-a symlink to local storage (DVS_LOCAL_WORKSPACE_ENABLED).
+runtime files while a Worker pod has replaced an epoch-local run directory
+with a symlink to local storage (DVS_LOCAL_WORKSPACE_ENABLED).
 """
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ import hashlib, logging, os, shutil
 from pathlib import Path
 
 from app.db.models import AppDvsTask
+from .file_access_logging import path_exists_logged, resolve_path_logged
 
 logger = logging.getLogger("dvs.task_paths")
 
@@ -24,7 +25,7 @@ _NFS_MIRROR_DIR = ".run_nfs"
 def _task_root(row: AppDvsTask) -> Path | None:
     output_path = str(row.output_path or "").strip()
     if output_path:
-        return Path(output_path).expanduser().resolve() / row.task_id
+        return resolve_path_logged(Path(output_path).expanduser(), logger=logger, purpose="task_paths.task_root.output_path") / row.task_id
     project_id = str(getattr(row, "project_id", "") or "").strip()
     if project_id:
         fileserver_root = os.environ.get("FILESERVER_ROOT", "/data/files")
@@ -56,14 +57,14 @@ def resolve_live_vuln_scan_sqlite(task_root: Path | None) -> Path | None:
     if task_root is None:
         return None
     path = task_root / "run" / "vuln-scan.sqlite"
-    return path if path.exists() else None
+    return path if path_exists_logged(path, logger=logger, purpose="task_paths.live_vuln_sqlite") else None
 
 
 def resolve_archived_vuln_scan_sqlite(task_root: Path | None) -> Path | None:
     if task_root is None:
         return None
     path = task_root / "output" / "vuln-scan.sqlite"
-    return path if path.exists() else None
+    return path if path_exists_logged(path, logger=logger, purpose="task_paths.archived_vuln_sqlite") else None
 
 
 def resolve_authoritative_vuln_scan_sqlite(task_root: Path | None, *, prefer_live: bool = True) -> Path | None:
@@ -113,9 +114,11 @@ def _resolve_run_path(row: AppDvsTask, relative: str = "") -> Path | None:
     On API pods (different node), this symlink is broken.
 
     This function first checks if the primary path is accessible.
-    If the primary run/ directory exists but its epochs/ subdirectory
-    contains broken symlinks (indicating active workspace redirection),
-    it falls back to the .run_nfs/ mirror.
+    If the requested target itself is unreadable and run/epochs contains
+    broken symlinks (indicating active workspace redirection), it falls
+    back to the .run_nfs/ mirror. Root-level compatibility files already
+    synced back into run/ should keep using the primary path even if some
+    epoch directories are broken symlinks.
     """
     root = _task_root(row)
     if root is None:
@@ -131,18 +134,23 @@ def _resolve_run_path(row: AppDvsTask, relative: str = "") -> Path | None:
     # Check if epochs/ contains broken symlinks -> workspace is redirected
     epochs_dir = primary / "epochs"
     has_broken_epoch_symlinks = False
-    if epochs_dir.exists():
+    if path_exists_logged(epochs_dir, logger=logger, purpose="task_paths.epochs_dir_exists"):
         for entry in epochs_dir.iterdir():
             if entry.is_symlink() and not _path_readable(entry):
                 has_broken_epoch_symlinks = True
                 break
 
-    # Use primary path only if it's readable AND epochs are not broken
-    if _path_readable(target) and not has_broken_epoch_symlinks:
+    # Root-level compatibility files in run/ stay authoritative once they are
+    # synced back to NFS, even if some epoch dirs are broken symlinks.
+    target_uses_epoch_subtree = "epochs" in target.parts
+
+    if _path_readable(target) and (not has_broken_epoch_symlinks or not target_uses_epoch_subtree):
         return target
 
-    # Fall back to .run_nfs mirror
-    if fallback.exists():
+    # Fall back to .run_nfs mirror only when the requested target itself is not
+    # readable. This keeps synced compatibility files on the primary run/
+    # path and limits mirror use to genuinely unavailable epoch-local paths.
+    if not _path_readable(target) and path_exists_logged(fallback, logger=logger, purpose="task_paths.fallback_exists"):
         logger.debug(
             "_resolve_run_path: primary %s has broken epoch symlinks, "
             "falling back to %s",
@@ -161,7 +169,7 @@ def _path_readable(path: Path) -> bool:
     because a symlink to local /tmp on a different pod IS broken.
     """
     try:
-        return path.exists()
+        return path_exists_logged(path, logger=logger, purpose="task_paths.path_readable")
     except OSError as e:
         logger.debug("path.exists check failed (broken symlink?): %s", e)
         return False
@@ -195,7 +203,7 @@ def latest_epoch_run_root_from_task_root(task_root: Path | None) -> Path | None:
         return None
     run_root = task_root / "run"
     epochs_root = run_root / "epochs"
-    if not epochs_root.exists():
+    if not path_exists_logged(epochs_root, logger=logger, purpose="task_paths.latest_epoch.exists"):
         return run_root
     candidates = [path for path in epochs_root.iterdir() if path.is_dir() and path.name.isdigit()]
     if not candidates:
