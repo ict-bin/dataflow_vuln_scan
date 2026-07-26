@@ -14,6 +14,18 @@ from .file_access_logging import path_exists_logged, path_is_file_logged, read_t
 logger = logging.getLogger("dvs.task_session")
 
 
+def _session_sort_timestamp(value: object) -> float:
+    raw = str(value or "").strip()
+    if not raw:
+        return 0.0
+    normalized = raw.replace("Z", "+00:00")
+    try:
+        from datetime import datetime
+        return float(datetime.fromisoformat(normalized).timestamp())
+    except Exception:
+        return 0.0
+
+
 def _write_json_atomic(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(
@@ -195,6 +207,14 @@ def _build_task_raw_session_catalog(row: AppDvsTask) -> dict[str, object]:
         except Exception as exc:
             logger.warning("failed to parse raw session file: path=%s error=%s", str(session_path), exc, exc_info=True)
             warnings.append(f"会话文件解析失败: sessions/{session_path.name}")
+    items.sort(
+        key=lambda current: (
+            _session_sort_timestamp(current.get("started_at")),
+            float(current.get("mtime") or 0.0),
+            str(current.get("relative_path") or ""),
+        ),
+        reverse=True,
+    )
     return {
         "task_id": row.task_id,
         "status": row.status,
