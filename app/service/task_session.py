@@ -150,6 +150,7 @@ def _build_task_session_catalog(row: AppDvsTask) -> dict[str, object]:
                     "ended_at": item.get("ended_at"),
                     "event_count": int(item.get("event_count") or 0),
                     "line_count": int(item.get("line_count") or item.get("event_count") or 0),
+                    "findings_count": int(item.get("findings_count") or 0),
                     "is_active": bool(item.get("is_active")) if "is_active" in item else is_active,
                     "display_name": display_name,
                     "warnings": list(item.get("warnings") or []),
@@ -183,6 +184,7 @@ def _build_task_session_catalog(row: AppDvsTask) -> dict[str, object]:
                     "size": 0,
                     "event_count": int(item.get("event_count") or 0),
                     "line_count": int(item.get("event_count") or 0),
+                    "findings_count": int(item.get("findings_count") or 0),
                     "warnings": [],
                     "session_header": {
                         "node_id": item.get("node_id") or "",

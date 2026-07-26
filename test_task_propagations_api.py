@@ -2394,6 +2394,7 @@ def test_route_level_session_index_prefers_runtime_authoritative_lineage_index(t
                 "started_at": "2026-07-26T09:00:01Z",
                 "event_count": 2,
                 "mtime": 124.0,
+                "findings_count": 3,
             },
             {
                 "session_relpath": "sessions/guess.jsonl",
@@ -2439,6 +2440,7 @@ def test_route_level_session_index_prefers_runtime_authoritative_lineage_index(t
     assert sessions_by_path["sessions/root.jsonl"]["is_active"] is False
     assert sessions_by_path["sessions/child.jsonl"]["is_active"] is True
     assert sessions_by_path["sessions/child.jsonl"]["relation_kind"] == "fork"
+    assert sessions_by_path["sessions/child.jsonl"]["findings_count"] == 3
     assert sessions_by_path["sessions/guess.jsonl"]["relation_kind"] == "supplementary"
     assert session_index["sessions_root"] == str(sessions_root)
     assert session_index["index_path"] == str(run_root / "session-index.json")
@@ -2454,6 +2456,7 @@ def test_route_level_session_index_prefers_runtime_authoritative_lineage_index(t
     assert nodes_by_path["sessions/root.jsonl"]["session_header"]["relation_kind"] == "root"
     assert nodes_by_path["sessions/child.jsonl"]["parent_relative_path"] == "sessions/root.jsonl"
     assert nodes_by_path["sessions/child.jsonl"]["relation_kind"] == "fork"
+    assert nodes_by_path["sessions/child.jsonl"]["findings_count"] == 3
     assert nodes_by_path["sessions/guess.jsonl"]["parent_relative_path"] == "sessions/root.jsonl"
     assert nodes_by_path["sessions/guess.jsonl"]["relation_kind"] == "supplementary"
     assert nodes_by_path["sessions/child.jsonl"]["is_active"] is True

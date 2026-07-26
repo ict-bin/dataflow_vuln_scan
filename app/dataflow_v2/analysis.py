@@ -1159,13 +1159,13 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                 cfg_task_origin_type=self.cfg.task_origin_type, on_event=self.on_event)
             if fid:
                 persisted_count += 1
+        authoritative_count = persisted_count
         # 实时同步任务快照计数: authoritative source = vuln-scan.sqlite
         if self._graph_store_ready():
             try:
                 refresh_task_vuln_snapshot_by_task_id(self.task_id, prefer_live=True)
             except Exception as e:
                 logger.warning("refresh_task_vuln_snapshot failed (task=%s): %s", self.task_id, e)
-            authoritative_count = persisted_count
             try:
                 with self.graph_store.connect() as conn:
                     row = conn.execute(
@@ -1195,6 +1195,7 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
             session_relpath=session_relpath_for_run_root(self.session_lineage_run_root, fork_session),
             status=session_status,
             ended_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            findings_count=authoritative_count,
         )
         return persisted_count
 

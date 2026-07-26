@@ -109,6 +109,7 @@ def normalize_session_index_item(item: dict[str, Any]) -> dict[str, Any]:
     status = str(item.get("status") or "unknown").strip()
     event_count = int(item.get("event_count") or 0)
     line_count = int(item.get("line_count") or event_count)
+    findings_count = int(item.get("findings_count") or 0)
     mtime = float(item.get("mtime") or 0.0)
     role_name = str(item.get("role_name") or item.get("session_role") or item.get("session_kind") or "worker").strip()
     stage_group = str(item.get("stage_group") or item.get("node_id") or "root").strip()
@@ -126,6 +127,7 @@ def normalize_session_index_item(item: dict[str, Any]) -> dict[str, Any]:
         "ended_at": item.get("ended_at"),
         "event_count": event_count,
         "line_count": line_count,
+        "findings_count": findings_count,
         "is_active": bool(item.get("is_active")) if "is_active" in item else status == "running",
         "display_name": display_name,
         "warnings": list(item.get("warnings") or []),
@@ -200,6 +202,7 @@ def update_session_index_item(
     ended_at: str | None = None,
     mtime: float | None = None,
     event_count: int | None = None,
+    findings_count: int | None = None,
 ) -> str:
     normalized_relpath = normalize_relative_path(session_relpath)
     with _LOCK:
@@ -219,6 +222,8 @@ def update_session_index_item(
         item["mtime"] = mtime if mtime is not None else (fs_mtime if fs_mtime is not None else item.get("mtime"))
         item["event_count"] = event_count if event_count is not None else (fs_event_count if fs_event_count is not None else item.get("event_count", 0))
         item["line_count"] = item["event_count"]
+        if findings_count is not None:
+            item["findings_count"] = int(findings_count)
         item["is_active"] = str(item.get("status") or "") == "running"
         item = normalize_session_index_item(item)
         by_path[normalized_relpath] = item
