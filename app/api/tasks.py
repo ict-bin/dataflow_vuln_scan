@@ -651,15 +651,21 @@ def _safe_session_file(root: Path, relative_path: str) -> Path:
     rel = Path(relative_path)
     if rel.is_absolute() or ".." in rel.parts:
         raise HTTPException(400, "非法会话路径")
-    output_root = (root / "output").resolve()
-    target = (output_root / rel).resolve()
-    try:
-        target.relative_to(output_root)
-    except ValueError:
-        raise HTTPException(400, "非法会话路径")
-    if target.suffix != ".jsonl":
+    if rel.suffix != ".jsonl":
         raise HTTPException(400, "仅支持 jsonl 会话文件")
-    return target
+    candidate_roots = [
+        (root / "output").resolve(),
+        (root / "run").resolve(),
+    ]
+    for base_root in candidate_roots:
+        target = (base_root / rel).resolve()
+        try:
+            target.relative_to(base_root)
+        except ValueError:
+            continue
+        if target.exists():
+            return target
+    return (candidate_roots[0] / rel).resolve()
 
 
 def _parse_session_file(path: Path) -> Dict[str, Any]:
@@ -1828,9 +1834,9 @@ def get_task_result(task_id: str, db: Session = Depends(get_db)):
 @router.get("/tasks/{task_id}/sessions")
 def list_task_sessions(task_id: str, db: Session = Depends(get_db)):
     if db is None:
-        from app.service.task_session import _build_task_session_catalog
+        from app.service.task_session import _build_task_raw_session_catalog
         row = _get_task_row(db, task_id)
-        catalog = _build_task_session_catalog(row)
+        catalog = _build_task_raw_session_catalog(row)
         return {"task_id": task_id, "items": catalog.get("items", []), "current_epoch": None}
     return {
         "task_id": task_id,

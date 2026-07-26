@@ -2437,11 +2437,13 @@ def test_route_level_session_index_prefers_runtime_authoritative_lineage_index(t
         "sessions/child.jsonl",
         "sessions/guess.jsonl",
     }
-    assert sessions_by_path["sessions/root.jsonl"]["is_active"] is False
+    assert sessions_by_path["sessions/root.jsonl"]["display_name"] == "root"
+    assert sessions_by_path["sessions/root.jsonl"]["started_at"] == "2026-07-20T00:00:00Z"
+    assert sessions_by_path["sessions/root.jsonl"]["line_count"] == 2
     assert sessions_by_path["sessions/child.jsonl"]["is_active"] is True
-    assert sessions_by_path["sessions/child.jsonl"]["relation_kind"] == "fork"
-    assert sessions_by_path["sessions/child.jsonl"]["findings_count"] == 3
-    assert sessions_by_path["sessions/guess.jsonl"]["relation_kind"] == "supplementary"
+    assert sessions_by_path["sessions/child.jsonl"]["display_name"] == "child"
+    assert sessions_by_path["sessions/child.jsonl"]["event_count"] == 1
+    assert sessions_by_path["sessions/guess.jsonl"]["display_name"] == "guess"
     assert session_index["sessions_root"] == str(sessions_root)
     assert session_index["index_path"] == str(run_root / "session-index.json")
     assert session_index["generated_at"] == "2026-07-26T09:00:00Z"

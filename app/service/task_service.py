@@ -1125,7 +1125,8 @@ class TaskService:
 
     def list_task_sessions(self, db: Session, task_id: str) -> list[dict[str, object]]:
         row = self._get_or_404(db, task_id)
-        return list(_build_task_session_catalog(row).get("items", []))
+        from .task_session import _build_task_raw_session_catalog
+        return list(_build_task_raw_session_catalog(row).get("items", []))
 
     def get_task_session_index(self, db: Session, task_id: str) -> dict[str, object]:
         row = self._get_or_404(db, task_id)

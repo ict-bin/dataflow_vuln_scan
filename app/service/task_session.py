@@ -40,17 +40,22 @@ def _safe_session_file(root: Path, relative_path: str) -> Path:
     if rel.is_absolute() or ".." in rel.parts:
         from fastapi import HTTPException
         raise HTTPException(400, "非法会话路径")
-    output_root = resolve_path_logged(root / "output", logger=logger, purpose="task_session.output_root")
-    target = resolve_path_logged(output_root / rel, logger=logger, purpose="task_session.target_path")
-    try:
-        target.relative_to(output_root)
-    except ValueError:
-        from fastapi import HTTPException
-        raise HTTPException(400, "非法会话路径")
-    if target.suffix != ".jsonl":
+    candidate_roots = [
+        resolve_path_logged(root / "output", logger=logger, purpose="task_session.output_root"),
+        resolve_path_logged(root / "run", logger=logger, purpose="task_session.run_root"),
+    ]
+    if rel.suffix != ".jsonl":
         from fastapi import HTTPException
         raise HTTPException(400, "仅支持 jsonl 会话文件")
-    return target
+    for base_root in candidate_roots:
+        target = resolve_path_logged(base_root / rel, logger=logger, purpose="task_session.target_path")
+        try:
+            target.relative_to(base_root)
+        except ValueError:
+            continue
+        if path_exists_logged(target, logger=logger, purpose="task_session.target.exists"):
+            return target
+    return resolve_path_logged(candidate_roots[0] / rel, logger=logger, purpose="task_session.target.default")
 
 
 def _path_accessible(path: Path) -> bool:
@@ -100,6 +105,102 @@ def _parse_session_file(path: Path) -> dict[str, object]:
         "warnings": warnings,
         "session_meta": session_meta,
         "line_count": len(lines),
+    }
+
+
+def _build_raw_session_meta(
+    *,
+    row: AppDvsTask,
+    sessions_root: Path,
+    session_path: Path,
+) -> dict[str, object]:
+    parsed = _parse_session_file(session_path)
+    stat = session_path.stat()
+    relative_path = f"sessions/{session_path.name}"
+    session_meta = parsed.get("session_meta") if isinstance(parsed.get("session_meta"), dict) else {}
+    events = parsed.get("events") if isinstance(parsed.get("events"), list) else []
+    started_at = session_meta.get("timestamp") if isinstance(session_meta, dict) else None
+    last_event_at = None
+    if events:
+        last_event = events[-1] if isinstance(events[-1], dict) else {}
+        last_event_at = last_event.get("timestamp") if isinstance(last_event, dict) else None
+    is_active = bool(str(row.status or "").strip() == "running")
+    display_name = str(
+        session_meta.get("session_id")
+        or session_meta.get("session_name")
+        or session_path.stem
+    ).strip() or session_path.stem
+    role_name = str(
+        session_meta.get("agent_role")
+        or session_meta.get("role")
+        or session_meta.get("session_kind")
+        or session_path.stem
+    ).strip() or session_path.stem
+    return {
+        "session_id": str(session_meta.get("session_id") or relative_path),
+        "session_name": display_name,
+        "relative_path": relative_path,
+        "stage_group": "原始会话",
+        "role_name": role_name,
+        "size": int(stat.st_size),
+        "mtime": float(stat.st_mtime),
+        "started_at": started_at,
+        "ended_at": None,
+        "last_event_at": last_event_at or started_at,
+        "event_count": len(events),
+        "line_count": int(parsed.get("line_count") or 0),
+        "is_active": is_active,
+        "display_name": display_name,
+        "warnings": list(parsed.get("warnings") or []),
+        "agent_session": session_meta if isinstance(session_meta, dict) else {},
+    }
+
+
+def _build_task_raw_session_catalog(row: AppDvsTask) -> dict[str, object]:
+    from .task_paths import _task_output_sessions_root, _task_root, _task_run_root
+
+    root = _task_root(row)
+    sessions_root = _task_output_sessions_root(row) or (root / "output" / "sessions" if root else Path())
+    if not path_exists_logged(sessions_root, logger=logger, purpose="task_session.raw_sessions.output_exists"):
+        run_root = _task_run_root(row)
+        sessions_root = run_root / "sessions" if run_root else sessions_root
+    if not path_exists_logged(sessions_root, logger=logger, purpose="task_session.raw_sessions.exists"):
+        return {
+            "task_id": row.task_id,
+            "status": row.status,
+            "sessions_root": str(sessions_root),
+            "items": [],
+            "warnings": [],
+        }
+    items: list[dict[str, object]] = []
+    warnings: list[str] = []
+    try:
+        session_paths = sorted(
+            [path for path in sessions_root.glob("*.jsonl") if path_is_file_logged(path, logger=logger, purpose="task_session.raw_sessions.is_file")],
+            key=lambda current: current.stat().st_mtime,
+            reverse=True,
+        )
+    except Exception as exc:
+        logger.warning("failed to enumerate raw sessions: root=%s error=%s", str(sessions_root), exc, exc_info=True)
+        return {
+            "task_id": row.task_id,
+            "status": row.status,
+            "sessions_root": str(sessions_root),
+            "items": [],
+            "warnings": ["读取原始会话目录失败"],
+        }
+    for session_path in session_paths:
+        try:
+            items.append(_build_raw_session_meta(row=row, sessions_root=sessions_root, session_path=session_path))
+        except Exception as exc:
+            logger.warning("failed to parse raw session file: path=%s error=%s", str(session_path), exc, exc_info=True)
+            warnings.append(f"会话文件解析失败: sessions/{session_path.name}")
+    return {
+        "task_id": row.task_id,
+        "status": row.status,
+        "sessions_root": str(sessions_root),
+        "items": items,
+        "warnings": warnings,
     }
 
 
