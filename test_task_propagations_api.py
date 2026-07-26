@@ -2425,10 +2425,21 @@ def test_route_level_session_index_prefers_runtime_authoritative_lineage_index(t
     )
     monkeypatch.setattr(tasks_module, "_get_task_row", lambda db, value: row)
 
+    sessions = list_task_sessions(task_id, db=None)
     session_index = get_task_session_index(task_id, db=None)
+    sessions_by_path = {item["relative_path"]: item for item in sessions["items"]}
     nodes_by_path = {node["relative_path"]: node for node in session_index["nodes"]}
     edges_by_id = {edge["edge_id"]: edge for edge in session_index["edges"]}
 
+    assert set(sessions_by_path) == {
+        "sessions/root.jsonl",
+        "sessions/child.jsonl",
+        "sessions/guess.jsonl",
+    }
+    assert sessions_by_path["sessions/root.jsonl"]["is_active"] is False
+    assert sessions_by_path["sessions/child.jsonl"]["is_active"] is True
+    assert sessions_by_path["sessions/child.jsonl"]["relation_kind"] == "fork"
+    assert sessions_by_path["sessions/guess.jsonl"]["relation_kind"] == "supplementary"
     assert session_index["sessions_root"] == str(sessions_root)
     assert session_index["index_path"] == str(run_root / "session-index.json")
     assert session_index["generated_at"] == "2026-07-26T09:00:00Z"

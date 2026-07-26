@@ -101,6 +101,42 @@ def _session_file_stats(run_root: Path, session_relpath: str) -> tuple[float | N
         return None, None
 
 
+def normalize_session_index_item(item: dict[str, Any]) -> dict[str, Any]:
+    relative_path = normalize_relative_path(str(item.get("session_relpath") or item.get("relative_path") or ""))
+    relation_kind = str(item.get("relation_kind") or "").strip()
+    parent_relative_path = normalize_relative_path(str(item.get("parent_session_relpath") or item.get("parent_relative_path") or ""))
+    display_name = str(item.get("display_name") or item.get("session_name") or Path(relative_path or "session").stem).strip()
+    status = str(item.get("status") or "unknown").strip()
+    event_count = int(item.get("event_count") or 0)
+    line_count = int(item.get("line_count") or event_count)
+    mtime = float(item.get("mtime") or 0.0)
+    role_name = str(item.get("role_name") or item.get("session_role") or item.get("session_kind") or "worker").strip()
+    stage_group = str(item.get("stage_group") or item.get("node_id") or "root").strip()
+    normalized = dict(item)
+    normalized.update({
+        "session_id": str(item.get("session_id") or relative_path).strip(),
+        "session_name": str(item.get("session_name") or display_name).strip(),
+        "session_relpath": relative_path,
+        "relative_path": relative_path,
+        "stage_group": stage_group,
+        "role_name": role_name,
+        "size": int(item.get("size") or 0),
+        "mtime": mtime,
+        "started_at": item.get("started_at"),
+        "ended_at": item.get("ended_at"),
+        "event_count": event_count,
+        "line_count": line_count,
+        "is_active": bool(item.get("is_active")) if "is_active" in item else status == "running",
+        "display_name": display_name,
+        "warnings": list(item.get("warnings") or []),
+        "status": status,
+        "parent_session_relpath": parent_relative_path,
+        "parent_relative_path": parent_relative_path or None,
+        "relation_kind": relation_kind or None,
+    })
+    return normalized
+
+
 def upsert_session_index_item(
     *,
     run_root: Path,
@@ -129,7 +165,7 @@ def upsert_session_index_item(
         }
         item = by_path.get(normalized_relpath, {})
         mtime, event_count = _session_file_stats(run_root, normalized_relpath)
-        item.update({
+        item.update(normalize_session_index_item({
             "session_relpath": normalized_relpath,
             "parent_session_relpath": normalized_parent,
             "relation_kind": str(relation_kind or item.get("relation_kind") or "").strip(),
@@ -143,7 +179,10 @@ def upsert_session_index_item(
             "ended_at": ended_at or item.get("ended_at"),
             "mtime": mtime if mtime is not None else item.get("mtime"),
             "event_count": event_count if event_count is not None else item.get("event_count", 0),
-        })
+            "line_count": event_count if event_count is not None else item.get("line_count", item.get("event_count", 0)),
+            "size": int(item.get("size") or 0),
+            "warnings": item.get("warnings") or [],
+        }))
         by_path[normalized_relpath] = item
         payload["task_id"] = str(task_id or payload.get("task_id") or "").strip()
         payload["generated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -179,6 +218,9 @@ def update_session_index_item(
             item["ended_at"] = ended_at
         item["mtime"] = mtime if mtime is not None else (fs_mtime if fs_mtime is not None else item.get("mtime"))
         item["event_count"] = event_count if event_count is not None else (fs_event_count if fs_event_count is not None else item.get("event_count", 0))
+        item["line_count"] = item["event_count"]
+        item["is_active"] = str(item.get("status") or "") == "running"
+        item = normalize_session_index_item(item)
         by_path[normalized_relpath] = item
         payload["task_id"] = str(task_id or payload.get("task_id") or "").strip()
         payload["generated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())

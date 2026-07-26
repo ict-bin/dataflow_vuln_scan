@@ -104,7 +104,7 @@ def _parse_session_file(path: Path) -> dict[str, object]:
 
 
 def _build_task_session_catalog(row: AppDvsTask) -> dict[str, object]:
-    from .session_lineage_index import lineage_index_path, load_lineage_index, normalize_relative_path
+    from .session_lineage_index import lineage_index_path, load_lineage_index, normalize_relative_path, normalize_session_index_item
     from .task_paths import _latest_epoch_run_root, _resolve_run_path, _task_output_sessions_root, _task_root
     from .task_result import _load_task_result_json
     from .session_index import build_session_catalog
@@ -115,7 +115,8 @@ def _build_task_session_catalog(row: AppDvsTask) -> dict[str, object]:
         if path_exists_logged(authority_index_path, logger=logger, purpose="task_session.authority_index.exists"):
             lineage = load_lineage_index(run_root, task_id=row.task_id)
             items = lineage.get("items") if isinstance(lineage, dict) else []
-            normalized_items = [item for item in items if isinstance(item, dict)]
+            normalized_items = [normalize_session_index_item(item) for item in items if isinstance(item, dict)]
+            session_items: list[dict[str, object]] = []
             nodes: list[dict[str, object]] = []
             edges: list[dict[str, object]] = []
             warnings: list[str] = []
@@ -133,12 +134,34 @@ def _build_task_session_catalog(row: AppDvsTask) -> dict[str, object]:
                 if is_active:
                     active_count += 1
                 relation_kind = str(item.get("relation_kind") or "").strip()
-                parent_relative_path = normalize_relative_path(str(item.get("parent_session_relpath") or ""))
+                parent_relative_path = normalize_relative_path(str(item.get("parent_session_relpath") or item.get("parent_relative_path") or ""))
+                display_name = str(item.get("display_name") or Path(relative_path).stem)
+                session_name = str(item.get("session_name") or display_name)
+                stage_group = str(item.get("stage_group") or item.get("node_id") or "root")
+                session_items.append({
+                    "session_id": str(item.get("session_id") or relative_path),
+                    "session_name": session_name,
+                    "relative_path": relative_path,
+                    "stage_group": stage_group,
+                    "role_name": str(item.get("role_name") or item.get("session_role") or item.get("session_kind") or "worker"),
+                    "size": int(item.get("size") or 0),
+                    "mtime": float(item.get("mtime") or 0.0),
+                    "started_at": item.get("started_at"),
+                    "ended_at": item.get("ended_at"),
+                    "event_count": int(item.get("event_count") or 0),
+                    "line_count": int(item.get("line_count") or item.get("event_count") or 0),
+                    "is_active": bool(item.get("is_active")) if "is_active" in item else is_active,
+                    "display_name": display_name,
+                    "warnings": list(item.get("warnings") or []),
+                    "status": status,
+                    "parent_relative_path": parent_relative_path or None,
+                    "relation_kind": relation_kind or None,
+                })
                 node = {
                     "node_id": relative_path,
                     "relative_path": relative_path,
-                    "session_name": str(item.get("display_name") or Path(relative_path).stem),
-                    "display_name": str(item.get("display_name") or Path(relative_path).stem),
+                    "session_name": session_name,
+                    "display_name": display_name,
                     "role": str(item.get("session_kind") or item.get("session_role") or "worker"),
                     "role_label": str(item.get("session_role") or item.get("session_kind") or "worker"),
                     "status": status,
@@ -146,7 +169,7 @@ def _build_task_session_catalog(row: AppDvsTask) -> dict[str, object]:
                     "stage_key": "worker",
                     "stage_label": "数据流漏洞挖掘",
                     "stage_order": 10,
-                    "stage_group": str(item.get("node_id") or "root"),
+                    "stage_group": stage_group,
                     "module_name": None,
                     "parent_relative_path": parent_relative_path or None,
                     "relation_kind": relation_kind or None,
@@ -189,7 +212,7 @@ def _build_task_session_catalog(row: AppDvsTask) -> dict[str, object]:
                 "sessions_root": str(run_root / "sessions"),
                 "index_path": str(authority_index_path),
                 "generated_at": lineage.get("generated_at"),
-                "items": [],
+                "items": session_items,
                 "index": {
                     "version": lineage.get("version") or 2,
                     "generated_at": lineage.get("generated_at"),
