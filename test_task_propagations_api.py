@@ -2481,6 +2481,87 @@ def test_route_level_session_index_prefers_runtime_authoritative_lineage_index(t
     }
 
 
+def test_route_level_session_index_backfills_findings_from_graph_primary_session(tmp_path: Path, monkeypatch):
+    task_id = "task-route-runtime-lineage-findings-backfill"
+    output_root = tmp_path / "output"
+    task_root = output_root / task_id
+    run_root = task_root / "run"
+    sessions_root = run_root / "sessions"
+    run_root.mkdir(parents=True, exist_ok=True)
+    _write_session_file(sessions_root / "root.jsonl")
+    _write_session_file(sessions_root / "vuln.jsonl")
+
+    lineage_index = {
+        "version": 2,
+        "generated_at": "2026-07-26T09:00:00Z",
+        "task_id": task_id,
+        "run_root": str(run_root),
+        "sessions_root": str(sessions_root),
+        "items": [
+            {
+                "session_relpath": "sessions/root.jsonl",
+                "relation_kind": "root",
+                "node_id": "node-root",
+                "session_role": "worker",
+                "session_kind": "taint",
+                "display_name": "Root Session",
+                "status": "done",
+                "event_count": 2,
+                "findings_count": 0,
+            },
+            {
+                "session_relpath": "sessions/vuln.jsonl",
+                "parent_session_relpath": "sessions/root.jsonl",
+                "relation_kind": "fork",
+                "node_id": "node-vuln",
+                "session_role": "worker",
+                "session_kind": "vuln",
+                "display_name": "Vuln Session",
+                "status": "done",
+                "event_count": 2,
+                "findings_count": 0,
+            },
+        ],
+    }
+    (run_root / "session-index.json").write_text(
+        json.dumps(lineage_index, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    db_path = task_root / "output" / "vuln-scan.sqlite"
+    store = VulnScanStore(db_path)
+    store.start_task_graph_run(TaskGraphRunRecord(
+        task_id=task_id,
+        epoch="default",
+        run_root=str(run_root),
+        root_function="Root",
+        generated_at=1.0,
+    ))
+    store.upsert_task_graph_node(TaskGraphNodeRecord(
+        node_id="node-vuln",
+        task_id=task_id,
+        epoch="default",
+        func_id="src.c::Vuln",
+        function_name_resolved="Vuln",
+        findings_count=1,
+        primary_session_relpath="sessions/vuln.jsonl",
+    ))
+
+    row = SimpleNamespace(
+        task_id=task_id,
+        output_path=str(output_root),
+        result_json={},
+        status="completed",
+    )
+    monkeypatch.setattr(tasks_module, "_get_task_row", lambda db, value: row)
+
+    session_index = get_task_session_index(task_id, db=None)
+    nodes_by_path = {node["relative_path"]: node for node in session_index["nodes"]}
+
+    assert nodes_by_path["sessions/root.jsonl"]["findings_count"] == 0
+    assert nodes_by_path["sessions/vuln.jsonl"]["findings_count"] == 1
+
+
 def test_route_level_session_index_falls_back_to_legacy_output_index_when_runtime_lineage_missing(tmp_path: Path, monkeypatch):
     task_id = "task-route-runtime-lineage-fallback"
     output_root = tmp_path / "output"

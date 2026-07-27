@@ -224,6 +224,31 @@ def _build_task_raw_session_catalog(row: AppDvsTask) -> dict[str, object]:
     }
 
 
+def _graph_findings_by_session_relpath(*, task_root: Path | None, task_id: str) -> dict[str, int]:
+    if task_root is None:
+        return {}
+    try:
+        from .session_lineage_index import normalize_relative_path
+        from .task_paths import open_authoritative_vuln_scan_store
+
+        store = open_authoritative_vuln_scan_store(task_root, prefer_live=True, readonly=True, enable_wal=False)
+        if store is None:
+            return {}
+        view = store.export_task_graph_view(task_id)
+    except Exception as exc:
+        logger.warning("failed to load graph findings for session index: task_id=%s error=%s", task_id, exc, exc_info=True)
+        return {}
+    findings_by_session: dict[str, int] = {}
+    for node in view.get("nodes") or []:
+        if not isinstance(node, dict):
+            continue
+        relpath = normalize_relative_path(str(node.get("primary_session_relpath") or ""))
+        if not relpath:
+            continue
+        findings_by_session[relpath] = max(findings_by_session.get(relpath, 0), int(node.get("findings_count") or 0))
+    return findings_by_session
+
+
 def _build_task_session_catalog(row: AppDvsTask) -> dict[str, object]:
     from .session_lineage_index import lineage_index_path, load_lineage_index, normalize_relative_path, normalize_session_index_item
     from .task_paths import _latest_epoch_run_root, _resolve_run_path, _task_output_sessions_root, _task_root
@@ -235,6 +260,8 @@ def _build_task_session_catalog(row: AppDvsTask) -> dict[str, object]:
         authority_index_path = lineage_index_path(run_root)
         if path_exists_logged(authority_index_path, logger=logger, purpose="task_session.authority_index.exists"):
             lineage = load_lineage_index(run_root, task_id=row.task_id)
+            task_root = _task_root(row)
+            graph_findings_by_session = _graph_findings_by_session_relpath(task_root=task_root, task_id=row.task_id)
             items = lineage.get("items") if isinstance(lineage, dict) else []
             normalized_items = [normalize_session_index_item(item) for item in items if isinstance(item, dict)]
             session_items: list[dict[str, object]] = []
@@ -259,6 +286,10 @@ def _build_task_session_catalog(row: AppDvsTask) -> dict[str, object]:
                 display_name = str(item.get("display_name") or Path(relative_path).stem)
                 session_name = str(item.get("session_name") or display_name)
                 stage_group = str(item.get("stage_group") or item.get("node_id") or "root")
+                findings_count = max(
+                    int(item.get("findings_count") or 0),
+                    int(graph_findings_by_session.get(relative_path, 0)),
+                )
                 session_items.append({
                     "session_id": str(item.get("session_id") or relative_path),
                     "session_name": session_name,
@@ -271,7 +302,7 @@ def _build_task_session_catalog(row: AppDvsTask) -> dict[str, object]:
                     "ended_at": item.get("ended_at"),
                     "event_count": int(item.get("event_count") or 0),
                     "line_count": int(item.get("line_count") or item.get("event_count") or 0),
-                    "findings_count": int(item.get("findings_count") or 0),
+                    "findings_count": findings_count,
                     "is_active": bool(item.get("is_active")) if "is_active" in item else is_active,
                     "display_name": display_name,
                     "warnings": list(item.get("warnings") or []),
@@ -305,7 +336,7 @@ def _build_task_session_catalog(row: AppDvsTask) -> dict[str, object]:
                     "size": 0,
                     "event_count": int(item.get("event_count") or 0),
                     "line_count": int(item.get("event_count") or 0),
-                    "findings_count": int(item.get("findings_count") or 0),
+                    "findings_count": findings_count,
                     "warnings": [],
                     "session_header": {
                         "node_id": item.get("node_id") or "",
