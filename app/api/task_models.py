@@ -84,6 +84,7 @@ class TaskSessionIndexNodeResponse(BaseModel):
     size: int = 0
     event_count: int = 0
     line_count: int = 0
+    findings_count: int = 0
     warnings: List[str] = []
     session_header: Dict[str, Any] = {}
     cwd: Optional[str] = None
