@@ -84,7 +84,6 @@ class MiningAgent:
             tools=self._acfg.tools or self._default_tools or [],
             cwd=str(self.source_root), env=v2_env, session_file=sp,
             system_prompt=_system_prompt(),
-            extension="/opt/dataflow_vuln_scan/extensions/dagflow-bash.ts",
             cancel_event=getattr(self, "cancel_event", None),
             thinking_level="off",
             run_timeout_seconds=getattr(self.config, "agent_run_timeout_seconds", 1500),
