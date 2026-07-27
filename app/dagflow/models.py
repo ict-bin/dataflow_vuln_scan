@@ -132,8 +132,14 @@ class TaintEdge:
         if cond_raw is None:
             cl = d.get("cond_line")
             cond_raw = [cl] if cl is not None else []
+        def _safe_int(v, default=0):
+            """安全 int 转换: LLM 可能输出 list/str/None 等非预期类型。"""
+            try:
+                return int(v)
+            except (ValueError, TypeError):
+                return default
         return TaintEdge(
-            to_node=int(d.get("to", -1) if d.get("to") is not None else -1),
+            to_node=_safe_int(d.get("to", -1), -1),
             line=sl, line_end=el,
             kind=str(d.get("kind", "inside")),
             taints=list(d.get("taints") or []),
@@ -188,8 +194,13 @@ class TaintNode:
     def from_dict(d: dict) -> "TaintNode":
         sl, el = _norm_line(d.get("line", 0))
         source = str(d.get("source", "") or "")
+        def _safe_int(v, default=0):
+            try:
+                return int(v)
+            except (ValueError, TypeError):
+                return default
         return TaintNode(
-            id=int(d.get("id", 0)),
+            id=_safe_int(d.get("id", 0)),
             line=sl, line_end=el,
             taint=str(d.get("taint", "")),
             source=source,
