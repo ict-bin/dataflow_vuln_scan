@@ -107,6 +107,7 @@ class ReaderFinder:
             tools=self._acfg.tools or self.config.workers.default_tools,
             cwd=str(self.source_root), env=env, session_file=sp,
             system_prompt=_system_prompt(), cancel_event=self.cancel_event,
+            extension="/opt/dataflow_vuln_scan/extensions/dagflow-bash.ts",
             thinking_level="off",
             run_timeout_seconds=min(getattr(self.config, "agent_run_timeout_seconds", 1500), 1600),
             timeout_retry_enabled=getattr(self.config, "agent_timeout_retry_enabled", True),
