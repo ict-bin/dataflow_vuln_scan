@@ -4,11 +4,11 @@
 
 ## 工具约束（必须遵守）
 
-- **禁止用 `bash` 的 `grep`/`find`/`cat` 搜源码树**（返回巨量结果 → session 膨胀 → 内存爆炸）。
-- **所有函数源码/符号查询走 v2_db**（已索引，bounded，快）：
+- **所有函数源码/符号查询走 v2_db**（返回 bounded 结果，快）:
   - 查 callee 函数源码 → `python3 /opt/dataflow_vuln_scan/tools/v2_db.py lookup <函数名>`
   - 查宏/typedef/struct 定义 → `python3 /opt/dataflow_vuln_scan/tools/v2_db.py symbol <符号名>`
   - 每个符号最多查一次，查不到 = 定义不在项目源码中，不重复查。
+- **不要用 `grep`/`find`/`cat` 搜源码树** — grep -rn 返回大量结果行导致 session 膨胀，后续每轮 LLM 调用 input token 越来越大，最终超时。v2_db 只返回你需要的函数体，不会有这个问题。
 - **工具调用总预算: 最多 8 次**。chain + 本函数源码已包含大部分判定信息，v2_db 补充 callee 源码/定义即可。超过 8 次说明你在过度搜索——停止，基于已有信息判定。
 
 ## 立场 (最重要)

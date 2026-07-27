@@ -33,9 +33,12 @@
 
 ## 工具约束
 
-- **禁止 `grep`/`find` 搜索源码树**（密源码树返回巨量结果 → 内存爆炸 OOM）。
-- 查函数定义/符号 → 走 `python3 /opt/dataflow_vuln_scan/tools/v2_db.py lookup <函数名>` / `... symbol <符号>`。
-- 可 `read` 特定已知路径的文件（不能 grep/find 搜索）。
+- **查函数定义/符号 → 走 v2_db**（返回 bounded 结果，快）:
+  - `python3 /opt/dataflow_vuln_scan/tools/v2_db.py lookup <函数名>` — 返回函数体
+  - `python3 /opt/dataflow_vuln_scan/tools/v2_db.py symbol <符号名>` — 返回宏/struct/typedef 定义
+- **不要用 `grep`/`find` 搜源码树** — grep -rn 返回大量结果行导致 session 膨胀，后续每轮 LLM 调用 input token 越来越大，最终超时。v2_db 只返回你需要的函数体，不会有这个问题。
+- 可 `read` 特定已知路径的文件（带 offset/limit）。
+- **工具调用总预算: 最多 5 次**。源函数体已在 prompt 中，v2_db 只用于查候选读者函数。
 
 ## 输出格式（唯一输出，最后输出）
 
