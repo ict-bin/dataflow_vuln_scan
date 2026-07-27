@@ -75,6 +75,16 @@ def _preview_text(text: str, *, limit: int = 500) -> str:
     return f"{value[: limit - 1]}…"
 
 
+def _truncate_text_by_estimated_tokens(text: str, *, max_tokens: int, chars_per_token: int = 3) -> str:
+    """Quick token-budget truncation using a rough chars/token estimate."""
+    if max_tokens <= 0:
+        return ""
+    max_chars = max_tokens * max(1, chars_per_token)
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars]
+
+
 def _emit_v2_llm_json_parse_event(
     on_event: Callable[..., None] | None,
     *,
@@ -1164,7 +1174,7 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
             f"源码绝对根目录: `{self.source_root}`。`{func.file}` 是相对该根目录的源码路径；如果需要使用 read/find 读取源码，请基于这个绝对根目录定位文件，不要基于当前工作目录拼接路径。\n"
             f"污点: 位置 {taint_params.positions} 签名 {taint_params.signature} 名字 {taint_params.names}\n\n"
             "## 本函数污点分析摘要\n"
-            f"```markdown\n{dataflow_text[:30000]}\n```\n\n"
+            f"```markdown\n{_truncate_text_by_estimated_tokens(dataflow_text, max_tokens=30000)}\n```\n\n"
             "结合链上 callee 的行为 (如返回借用指针/分配/不释放等), 判断本函数是否存在漏洞。输出 JSON: {\"findings\":[]}。"
         )
         miner_system = (_build_v2_system_prompt(custom="vuln-mining")

@@ -36,6 +36,7 @@ from .models import (
     TaintParamInfo, TaintRecord, Validation,
 )
 from .store import DataflowStore
+from ..service.session_lineage_index import session_relpath_for_run_root, upsert_session_index_item
 from ..vuln_report_utils import safe_name as _safe_name
 from ..vuln_store import TaskGraphEdgeRecord
 
@@ -217,6 +218,50 @@ class DfsOrchestrator:
     def _graph_epoch(self) -> str:
         return str(getattr(self.cbs, "graph_epoch", "run") or "run")
 
+    def _session_lineage_run_root(self) -> Path | None:
+        run_root = getattr(self.cbs, "session_lineage_run_root", None)
+        if isinstance(run_root, Path):
+            return run_root
+        sessions_dir = getattr(self.cbs, "sessions_dir", None)
+        if isinstance(sessions_dir, Path):
+            return sessions_dir.parent
+        return None
+
+    def _register_created_base_session(
+        self,
+        *,
+        session_path: str | Path,
+        parent_session_path: str | Path = "",
+        relation_kind: str = "fork",
+        session_kind: str = "taint",
+    ) -> None:
+        run_root = self._session_lineage_run_root()
+        task_id = self._graph_task_id()
+        if run_root is None or not task_id or not str(session_path or "").strip():
+            return
+        session_file = Path(session_path)
+        if not session_file.exists():
+            return
+        upsert_session_index_item(
+            run_root=run_root,
+            task_id=task_id,
+            session_relpath=session_relpath_for_run_root(run_root, session_file),
+            parent_session_relpath=(
+                session_relpath_for_run_root(run_root, parent_session_path)
+                if str(parent_session_path or "").strip()
+                else ""
+            ),
+            relation_kind=relation_kind,
+            node_id="",
+            edge_id="",
+            session_role="worker",
+            session_kind=session_kind,
+            display_name=session_file.stem,
+            status="done",
+            started_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            ended_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        )
+
     def _return_followup_edge_id(
         self,
         *,
@@ -325,6 +370,12 @@ class DfsOrchestrator:
                     from ..copy_utils import safe_copyfile
                     try:
                         safe_copyfile(base_session, new_session)
+                        self._register_created_base_session(
+                            session_path=new_session,
+                            parent_session_path=base_session,
+                            relation_kind="fork",
+                            session_kind="taint",
+                        )
                     except OSError as e:
                         logger.debug("copy base_session for return-followup failed (base=%s): %s", base_session, e)
                 caller_ctx = ctx.fork(_path_id(caller.func_id, rt_sig, "-1"))
@@ -525,6 +576,12 @@ class DfsOrchestrator:
                 from ..copy_utils import safe_copyfile
                 try:
                     safe_copyfile(chain_session, new_session)
+                    self._register_created_base_session(
+                        session_path=new_session,
+                        parent_session_path=chain_session,
+                        relation_kind="fork",
+                        session_kind="taint",
+                    )
                 except OSError as e:
                     logger.debug("copy chain_session failed (base=%s): %s", chain_session, e)
             new_tp = TaintParamInfo(positions=[], signature=rt_sig, names=[rt.name])

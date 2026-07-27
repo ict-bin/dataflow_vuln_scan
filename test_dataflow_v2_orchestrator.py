@@ -7,7 +7,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).parent))
 
 from app.dataflow_v2 import (
-    DataflowStore, FunctionRecord, PropagationRecord, TaintParamInfo, TaintRecord, Validation,
+    DataflowStore, FunctionRecord, PropagationRecord, ProcessedTaint, TaintParamInfo, TaintRecord, Validation,
 )
 from app.dataflow_v2.analysis import TaintAnalysisCallbacks
 from app.dataflow_v2.orchestrator import DfsOrchestrator, AnalysisCallbacks, AnalysisResult, PathContext
@@ -577,6 +577,89 @@ class TestTrackerSessionPropagation(unittest.TestCase):
 
             self.assertEqual(1, len(paths))
             self.assertEqual("/tmp/chain-session.jsonl", seen["base_session"])
+            store.close()
+
+
+class TestBaseSessionIndexing(unittest.TestCase):
+    def test_analyze_callers_records_created_base_session_in_runtime_index(self):
+        with tempfile.TemporaryDirectory() as td:
+            run_dir = Path(td) / "run"
+            sessions_dir = run_dir / "sessions"
+            sessions_dir.mkdir(parents=True, exist_ok=True)
+            store = DataflowStore(run_dir / "dataflow-v2")
+            root = _func(store, "Root", file="root.c")
+            caller = _func(store, "Caller", file="caller.c")
+            base_session = sessions_dir / "root-base.jsonl"
+            base_session.write_text('{"type":"session","timestamp":"2026-07-27T00:00:00Z"}\n', encoding="utf-8")
+
+            class _Cbs(AnalysisCallbacks):
+                def __init__(self):
+                    self.task_id = "task-callers-base-index"
+                    self.graph_epoch = "run"
+                    self.cancel_event = None
+                    self.sessions_dir = sessions_dir
+                    self.session_lineage_run_root = run_dir
+                    self.source_root = td
+                    self.on_event = lambda *args, **kwargs: None
+
+                def analyze_function(self, store, func, taint_params, pre_validations, base_session, ctx):
+                    raise RuntimeError("stop after base session creation")
+
+            orch = DfsOrchestrator(store, _Cbs(), concurrent=False, max_depth=2)
+            return_taint = TaintRecord(
+                func_id=root.func_id,
+                name="ret",
+                signature="ret_sig",
+                file=root.file,
+                function=root.name,
+                description="return taint",
+            )
+
+            with patch("app.dataflow_v2.function_extractor.read_function_body", side_effect=lambda source_root, func, max_lines=4000: "Root(" if func.func_id == caller.func_id else ""):
+                with self.assertRaises(RuntimeError):
+                    orch._analyze_callers(root, [return_taint], str(base_session), PathContext("p0"))
+
+            payload = json.loads((run_dir / "session-index.json").read_text(encoding="utf-8"))
+            relpaths = {str(item.get("session_relpath")) for item in payload.get("items", []) if isinstance(item, dict)}
+            self.assertIn("sessions/d-1-Caller-taint-ret-00.jsonl", relpaths)
+            child = next(item for item in payload["items"] if item.get("session_relpath") == "sessions/d-1-Caller-taint-ret-00.jsonl")
+            self.assertEqual("sessions/root-base.jsonl", child.get("parent_session_relpath"))
+            self.assertEqual("fork", child.get("relation_kind"))
+            store.close()
+
+    def test_register_created_base_session_writes_runtime_index(self):
+        with tempfile.TemporaryDirectory() as td:
+            run_dir = Path(td) / "run"
+            sessions_dir = run_dir / "sessions"
+            sessions_dir.mkdir(parents=True, exist_ok=True)
+            store = DataflowStore(run_dir / "dataflow-v2")
+            chain_session = sessions_dir / "d00-Root-taint-msg-00.jsonl"
+            chain_session.write_text('{"type":"session","timestamp":"2026-07-27T00:00:00Z"}\n', encoding="utf-8")
+
+            class _Cbs(AnalysisCallbacks):
+                def __init__(self):
+                    self.task_id = "task-return-followup-base-index"
+                    self.graph_epoch = "run"
+                    self.cancel_event = None
+                    self.sessions_dir = sessions_dir
+                    self.session_lineage_run_root = run_dir
+                    self.source_root = td
+                    self.on_event = lambda *args, **kwargs: None
+
+            orch = DfsOrchestrator(store, _Cbs(), concurrent=False, max_depth=2)
+            orch._register_created_base_session(
+                session_path=chain_session,
+                parent_session_path=sessions_dir / "parent.jsonl",
+                relation_kind="fork",
+                session_kind="taint",
+            )
+
+            payload = json.loads((run_dir / "session-index.json").read_text(encoding="utf-8"))
+            relpaths = {str(item.get("session_relpath")) for item in payload.get("items", []) if isinstance(item, dict)}
+            self.assertIn("sessions/d00-Root-taint-msg-00.jsonl", relpaths)
+            child = next(item for item in payload["items"] if item.get("session_relpath") == "sessions/d00-Root-taint-msg-00.jsonl")
+            self.assertEqual("sessions/parent.jsonl", child.get("parent_session_relpath"))
+            self.assertEqual("fork", child.get("relation_kind"))
             store.close()
 
 
