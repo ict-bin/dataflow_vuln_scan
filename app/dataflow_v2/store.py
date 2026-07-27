@@ -23,6 +23,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from ..service.file_access_logging import sqlite_connect_logged
 from .models import (
     FunctionRecord, OrchestrationEdge, ProcessedTaint, PropagationRecord,
     TaintParamInfo, TaintRecord, Validation, _norm_sig, _sha,
@@ -180,7 +181,13 @@ class DataflowStore:
         self._conns: dict[str, sqlite3.Connection] = {}
         self._locks: dict[str, threading.Lock] = {}
         for name, p in self._paths.items():
-            conn = sqlite3.connect(str(p), check_same_thread=False, timeout=30)
+            conn = sqlite_connect_logged(
+                p,
+                logger=logger,
+                purpose=f"v2_store_{name}",
+                check_same_thread=False,
+                timeout=30,
+            )
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA busy_timeout=30000")

@@ -19,12 +19,60 @@ from ..copy_utils import safe_copyfile
 from ..runner import run_agent
 from ..service.session_lineage_index import session_relpath_for_run_root, update_session_index_item, upsert_session_index_item
 from ..vuln_report_utils import safe_name, build_v2_system_prompt
-from ..parsers import _extract_json_object
+from ..parsers import extract_llm_structured_output
 from .models import FunctionRecord, TaintParamInfo, PropagationRecord
 from .store import DataflowStore
 from .function_extractor import ensure_file_indexed, read_function_body
 
 logger = logging.getLogger("dvs.dataflow_v2.trackers")
+
+
+def _preview_text(text: object, *, limit: int = 500) -> str:
+    value = " ".join(str(text or "").split())
+    if len(value) <= limit:
+        return value
+    return f"{value[: limit - 1]}…"
+
+
+def _emit_v2_llm_json_parse_event(
+    on_event: Callable[..., None] | None,
+    *,
+    event_type: str,
+    stage: str,
+    func: FunctionRecord,
+    error: str | None,
+    output_text: str,
+    required_key: str | None,
+    expected_kind: str,
+    repair_actions: list[str] | None = None,
+    level: str = "error",
+) -> None:
+    if on_event is None:
+        return
+    actions = ",".join(repair_actions or [])
+    if event_type == "v2_llm_json_parse_recovered":
+        message = (
+            f"模型 JSON 容错解析已恢复: {func.file}::{func.name} | "
+            f"stage={stage} | key={required_key or '-'} | 修复={actions or '-'}"
+        )
+    else:
+        message = (
+            f"模型 JSON 解析失败: {func.file}::{func.name} | "
+            f"stage={stage} | key={required_key or '-'} | 原因={error or 'unknown'}"
+        )
+    on_event(
+        event_type,
+        level=level,
+        stage=stage,
+        function=func.name,
+        source_file=func.file,
+        message=message,
+        error=error or "failed to parse structured JSON output",
+        required_key=required_key or "",
+        expected_kind=expected_kind,
+        repair_actions=list(repair_actions or []),
+        output_preview=_preview_text(output_text),
+    )
 
 
 # ── 外部逃逸下游读者追踪 (全 LLM + v2_db, 无字符串 pattern) ──────────────
@@ -122,7 +170,38 @@ def resolve_external(
             status="done" if not (cancel_event is not None and cancel_event.is_set()) else "cancelled",
             ended_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         )
-    parsed = _extract_json_object(output.output, "confirmed") or {}
+    parse_result = extract_llm_structured_output(
+        output.output or "",
+        required_key="confirmed",
+        expected_kind="object",
+        required_container_type=list,
+        allow_truncated_recovery=False,
+    )
+    parsed = parse_result.value if isinstance(parse_result.value, dict) else {}
+    if parse_result.value is None:
+        _emit_v2_llm_json_parse_event(
+            on_event,
+            event_type="v2_llm_json_parse_failed",
+            stage="external_tracking_v2",
+            func=func,
+            error=parse_result.error,
+            output_text=output.output or "",
+            required_key="confirmed",
+            expected_kind="object",
+        )
+    elif parse_result.repaired:
+        _emit_v2_llm_json_parse_event(
+            on_event,
+            event_type="v2_llm_json_parse_recovered",
+            stage="external_tracking_v2",
+            func=func,
+            error=None,
+            output_text=output.output or "",
+            required_key="confirmed",
+            expected_kind="object",
+            repair_actions=parse_result.repair_actions,
+            level="warning",
+        )
     confirmed: list[tuple[FunctionRecord, TaintParamInfo]] = []
     for item in parsed.get("confirmed") or []:
         if not isinstance(item, dict):
@@ -270,7 +349,38 @@ def resolve_indirect(
             status="done" if not (cancel_event is not None and cancel_event.is_set()) else "cancelled",
             ended_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         )
-    parsed = _extract_json_object(output.output, "handlers") or {}
+    parse_result = extract_llm_structured_output(
+        output.output or "",
+        required_key="handlers",
+        expected_kind="object",
+        required_container_type=list,
+        allow_truncated_recovery=False,
+    )
+    parsed = parse_result.value if isinstance(parse_result.value, dict) else {}
+    if parse_result.value is None:
+        _emit_v2_llm_json_parse_event(
+            on_event,
+            event_type="v2_llm_json_parse_failed",
+            stage="indirect_tracking_v2",
+            func=func,
+            error=parse_result.error,
+            output_text=output.output or "",
+            required_key="handlers",
+            expected_kind="object",
+        )
+    elif parse_result.repaired:
+        _emit_v2_llm_json_parse_event(
+            on_event,
+            event_type="v2_llm_json_parse_recovered",
+            stage="indirect_tracking_v2",
+            func=func,
+            error=None,
+            output_text=output.output or "",
+            required_key="handlers",
+            expected_kind="object",
+            repair_actions=parse_result.repair_actions,
+            level="warning",
+        )
     out = []
     for item in parsed.get("handlers") or []:
         if not isinstance(item, dict):

@@ -24,7 +24,9 @@ from ..agent_runtime_events import emit_agent_runtime_events
 from ..clang_analyzer import analyze_function_callsites, clang_parse_ok
 from ..copy_utils import safe_copyfile
 from ..models import TaskConfig
-from ..parsers import _extract_json_object
+from ..parsers import (
+    extract_llm_structured_output,
+)
 from ..runner import run_agent
 from ..llm_retry import run_agent_with_design_retry
 from ..vuln_intake_reporter import report_finding_to_intake
@@ -66,6 +68,54 @@ def _short_list_preview(items: list[str], *, limit: int = 8) -> list[str]:
     return preview
 
 
+def _preview_text(text: str, *, limit: int = 500) -> str:
+    value = " ".join(str(text or "").split())
+    if len(value) <= limit:
+        return value
+    return f"{value[: limit - 1]}…"
+
+
+def _emit_v2_llm_json_parse_event(
+    on_event: Callable[..., None] | None,
+    *,
+    event_type: str,
+    stage: str,
+    func: FunctionRecord,
+    error: str | None,
+    output_text: str,
+    required_key: str | None,
+    expected_kind: str,
+    repair_actions: list[str] | None = None,
+    level: str = "error",
+) -> None:
+    if on_event is None:
+        return
+    action_text = ",".join(repair_actions or [])
+    if event_type == "v2_llm_json_parse_recovered":
+        message = (
+            f"模型 JSON 容错解析已恢复: {func.file}::{func.name} | "
+            f"stage={stage} | key={required_key or '-'} | 修复={action_text or '-'}"
+        )
+    else:
+        message = (
+            f"模型 JSON 解析失败: {func.file}::{func.name} | "
+            f"stage={stage} | key={required_key or '-'} | 原因={error or 'unknown'}"
+        )
+    on_event(
+        event_type,
+        level=level,
+        stage=stage,
+        function=func.name,
+        source_file=func.file,
+        message=message,
+        error=error or "failed to parse structured JSON output",
+        required_key=required_key or "",
+        expected_kind=expected_kind,
+        repair_actions=list(repair_actions or []),
+        output_preview=_preview_text(output_text),
+    )
+
+
 def _infer_ext_session_path(
     sessions_dir: Path,
     *,
@@ -92,54 +142,6 @@ def _infer_ext_session_path(
         n += 1
         path = sessions_dir / f"{base}-{n:02d}.jsonl"
     return path
-
-
-def _try_extract_truncated_json(text: str) -> dict | None:
-    """尝试从被 stopReason=length 截断的文本中提取部分 JSON。
-
-    LLM 输出被截断时, text 可能包含不完整的 ```json {... ``` 块。
-    尝试找到 JSON 开头, 补全缺失的括号/引号, 解析。
-    """
-    import json
-    # 找 json 代码块开头
-    idx = text.find('{')
-    if idx < 0:
-        return None
-    fragment = text[idx:]
-    # 去掉末尾不完整的部分 (最后一个完整字段后截断)
-    # 尝试直接解析
-    try:
-        return json.loads(fragment)
-    except json.JSONDecodeError as e:
-        logger.debug("json fragment direct parse failed: %s", e)
-    # 尝试补全: 找最后一个完整的 key-value 对, 截断后面的
-    last_comma = fragment.rfind(',')
-    last_brace = fragment.rfind('}')
-    last_bracket = fragment.rfind(']')
-    # 尝试在最后一个逗号/括号后截断并补全
-    for cut_pos in [last_bracket, last_brace, last_comma]:
-        if cut_pos <= 0:
-            continue
-        partial = fragment[:cut_pos + 1]
-        # 补全缺失的闭合符号
-        opens_braces = partial.count('{') - partial.count('}')
-        opens_brackets = partial.count('[') - partial.count(']')
-        # 去掉末尾可能的逗号
-        partial = partial.rstrip().rstrip(',')
-        candidate = partial + ('}' * max(0, opens_braces)) + (']' * max(0, opens_brackets))
-        try:
-            result = json.loads(candidate)
-            if isinstance(result, dict) and ('propagations' in result or 'taints' in result or 'description' in result):
-                # 确保有 propagations 字段
-                if 'propagations' not in result:
-                    result['propagations'] = []
-                if not isinstance(result.get('propagations'), list):
-                    result['propagations'] = []
-                return result
-        except json.JSONDecodeError as e:
-            logger.debug("candidate json parse failed, skip: %s", e)
-            continue
-    return None
 
 
 def _extract_params(func: FunctionRecord) -> set[str]:
@@ -398,22 +400,36 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
         #    parse_check 由本模式提供 (key="propagations"); 例程负责 length/error 回退 +
         #    Error-xx 会话 + 3 次后 compact。内层 run_agent(delegate_api_retry=True)
         #    不再抢先重试 stop_reason=error, 把结果交回本例程统一处理。
+        parse_state: dict[str, Any] = {"result": None}
+
         def _parse_and_check(result, all_texts):
             text = getattr(result, "output", "") or ""
-            p = _extract_json_object(text, "propagations")
-            if not p:
-                p = _try_extract_truncated_json(text)
-            if not p and all_texts:
+            parse_result = extract_llm_structured_output(
+                text,
+                required_key="propagations",
+                expected_kind="object",
+                required_container_type=list,
+                allow_truncated_recovery=True,
+            )
+            parse_state["result"] = parse_result
+            if parse_result.value is not None:
+                return parse_result.value, ""
+            if all_texts:
                 for prev_text in all_texts:
-                    p = _extract_json_object(prev_text, "propagations")
-                    if p: break
-                    p = _try_extract_truncated_json(prev_text)
-                    if p: break
-            if not p:
-                return None, "missing taint-analysis JSON (no object containing 'propagations')"
-            if not isinstance(p.get("propagations"), list):
-                return p, "propagations must be a list"
-            return p, ""
+                    parse_result = extract_llm_structured_output(
+                        prev_text,
+                        required_key="propagations",
+                        expected_kind="object",
+                        required_container_type=list,
+                        allow_truncated_recovery=True,
+                    )
+                    parse_state["result"] = parse_result
+                    if parse_result.value is not None:
+                        return parse_result.value, ""
+            return None, (
+                parse_result.error
+                or "missing taint-analysis JSON (no object containing 'propagations')"
+            )
 
         def _on_result(stage, res, extra):
             if self.on_event:
@@ -457,7 +473,31 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
             on_result=_on_result,
             label=func.name, retry_max=3,
         )
+        parse_result = parse_state.get("result")
+        if getattr(parse_result, "repaired", False):
+            _emit_v2_llm_json_parse_event(
+                self.on_event,
+                event_type="v2_llm_json_parse_recovered",
+                stage="taint_analysis_v2",
+                func=func,
+                error=None,
+                output_text=output.output or "",
+                required_key="propagations",
+                expected_kind="object",
+                repair_actions=list(getattr(parse_result, "repair_actions", []) or []),
+                level="warning",
+            )
         if parse_warn:
+            _emit_v2_llm_json_parse_event(
+                self.on_event,
+                event_type="v2_llm_json_parse_failed",
+                stage="taint_analysis_v2",
+                func=func,
+                error=parse_warn,
+                output_text=output.output or "",
+                required_key="propagations",
+                expected_kind="object",
+            )
             parsed = parsed or {}
 
         # taint 分析失败时跳过后续 mining — 无污点分析结果, 挖掘无意义
@@ -978,20 +1018,37 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
         logger.info("[V2-infer-ext] DONE func=%s duration=%.1fs error=%s output_len=%d",
                     func.name, time.time() - _t0, (result.error or "")[:100], len(result.output or ""))
         try:
-            # 解析 JSON 数组
-            from ..parsers import _extract_json_object
-            text = result.output or ""
-            import json as _json
-            # 尝试解析 JSON 数组
-            import re as _re
-            m = _re.search(r'\[.*?\]', text, _re.DOTALL)
-            if not m:
+            parse_result = extract_llm_structured_output(
+                result.output or "",
+                expected_kind="array",
+                allow_truncated_recovery=False,
+            )
+            if parse_result.value is None:
+                _emit_v2_llm_json_parse_event(
+                    self.on_event,
+                    event_type="v2_llm_json_parse_failed",
+                    stage="infer_external_v2",
+                    func=func,
+                    error=parse_result.error,
+                    output_text=result.output or "",
+                    required_key=None,
+                    expected_kind="array",
+                )
                 return {}
-            try:
-                arr = _json.loads(m.group())
-            except Exception as e:
-                logger.debug("parse inference JSON match failed: %s", e)
-                return {}
+            if parse_result.repaired:
+                _emit_v2_llm_json_parse_event(
+                    self.on_event,
+                    event_type="v2_llm_json_parse_recovered",
+                    stage="infer_external_v2",
+                    func=func,
+                    error=None,
+                    output_text=result.output or "",
+                    required_key=None,
+                    expected_kind="array",
+                    repair_actions=parse_result.repair_actions,
+                    level="warning",
+                )
+            arr = parse_result.value
         finally:
             update_session_index_item(
                 run_root=self.session_lineage_run_root,
@@ -1140,8 +1197,47 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
         if self.on_event:
             emit_agent_runtime_events(self.on_event, result=output, stage="vuln_mining_v2",
                                       role="workers", model=acfg.model, extra={"function": func.name})
-        from ..parsers import _extract_json_object as _ej
-        parsed = _ej(output.output, "findings") or {"findings": []}
+        parse_result = extract_llm_structured_output(
+            output.output or "",
+            required_key="findings",
+            expected_kind="object",
+            required_container_type=list,
+            allow_truncated_recovery=False,
+        )
+        parsed = parse_result.value if isinstance(parse_result.value, dict) else None
+        if parsed is None:
+            if parse_result.error or "findings" in (output.output or "") or "```" in (output.output or ""):
+                logger.warning(
+                    "[V2-mine] findings parse failed func=%s::%s error=%s output_len=%d",
+                    func.file,
+                    func.name,
+                    parse_result.error or "failed to extract findings json",
+                    len(output.output or ""),
+                )
+                _emit_v2_llm_json_parse_event(
+                    self.on_event,
+                    event_type="v2_llm_json_parse_failed",
+                    stage="vuln_mining_v2",
+                    func=func,
+                    error=parse_result.error,
+                    output_text=output.output or "",
+                    required_key="findings",
+                    expected_kind="object",
+                )
+            parsed = {"findings": []}
+        elif parse_result.repaired:
+            _emit_v2_llm_json_parse_event(
+                self.on_event,
+                event_type="v2_llm_json_parse_recovered",
+                stage="vuln_mining_v2",
+                func=func,
+                error=None,
+                output_text=output.output or "",
+                required_key="findings",
+                expected_kind="object",
+                repair_actions=parse_result.repair_actions,
+                level="warning",
+            )
         node = f"{func.file}::{func.name}"
         persisted_count = 0
         for idx, item in enumerate(parsed.get("findings") or []):

@@ -13,6 +13,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from ..service.file_access_logging import read_bytes_logged, read_text_logged
 from .models import FunctionRecord
 from .store import DataflowStore
 
@@ -47,7 +48,7 @@ def _parser_for(path: Path, source: bytes | None = None):
         src = source if source is not None else b""
         if not src and path.is_file():
             try:
-                src = path.read_bytes()
+                src = read_bytes_logged(path, logger=logger, purpose="v2_parser_probe")
             except OSError as e:
                 logger.warning("read source bytes failed, skip file (path=%s): %s", path, e)
                 src = b""
@@ -105,7 +106,13 @@ def read_function_body(source_root: str, func: FunctionRecord, max_lines: int = 
     if not src_path.is_file():
         return f"// 源文件不可读: {func.file}\n// 行 {func.start_line}-{func.end_line}"
     try:
-        lines = src_path.read_text(encoding="utf-8", errors="replace").splitlines()
+        lines = read_text_logged(
+            src_path,
+            logger=logger,
+            purpose="v2_read_function_body",
+            encoding="utf-8",
+            errors="replace",
+        ).splitlines()
         start = max(0, func.start_line - 1)
         end = min(len(lines), func.end_line)
         body_lines = lines[start:end]
@@ -124,7 +131,10 @@ def extract_file_functions(source_root: str, rel_file: str, store: DataflowStore
     src_path = Path(source_root) / rel_file
     if not src_path.is_file():
         return []
-    source = src_path.read_bytes()
+    try:
+        source = read_bytes_logged(src_path, logger=logger, purpose="v2_extract_file_functions")
+    except OSError:
+        return []
     try:
         parser = _parser_for(src_path, source)
         if parser is None:
@@ -236,7 +246,11 @@ def find_function_in_file(source_root: str, rel_file: str, name: str) -> tuple[i
     if not src_path.is_file():
         import sys; print(f"[v2db-ffi] file not found {rel_file}", file=sys.stderr, flush=True)
         return None
-    source = src_path.read_bytes()
+    try:
+        source = read_bytes_logged(src_path, logger=logger, purpose="v2_find_function_in_file")
+    except OSError:
+        import sys; print(f"[v2db-ffi] read failed {rel_file}", file=sys.stderr, flush=True)
+        return None
     parser = _parser_for(src_path, source)
     if parser is None:
         import sys; print(f"[v2db-ffi] parser None {rel_file}", file=sys.stderr, flush=True)
@@ -287,7 +301,13 @@ def _extract_includes(source_root: str, rel_file: str) -> list[str]:
     if not src_path.is_file():
         return []
     try:
-        text = src_path.read_text(encoding="utf-8", errors="replace")
+        text = read_text_logged(
+            src_path,
+            logger=logger,
+            purpose="v2_extract_includes",
+            encoding="utf-8",
+            errors="replace",
+        )
     except OSError as e:
         logger.warning("read includes source failed (src=%s): %s", src_path, e)
         return []
@@ -428,7 +448,10 @@ def _extract_class_info_for_file(source_root: str, rel_file: str, store: Dataflo
     path = Path(source_root) / rel_file
     if not path.is_file():
         return
-    source = path.read_bytes()
+    try:
+        source = read_bytes_logged(path, logger=logger, purpose="v2_extract_class_info_for_file")
+    except OSError:
+        return
     try:
         parser = _parser_for(path, source)
         if parser is None:
@@ -459,7 +482,10 @@ def _build_class_hierarchy(source_root: str, store: DataflowStore) -> int:
         except ValueError as e:
             logger.debug("path not under source, skip (path=%s): %s", path, e)
             continue
-        source = path.read_bytes()
+        try:
+            source = read_bytes_logged(path, logger=logger, purpose="v2_build_class_hierarchy")
+        except OSError:
+            continue
         try:
             parser = _parser_for(path, source)
             if parser is None:

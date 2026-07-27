@@ -2,6 +2,7 @@
 parsers.py — 输出文件解析 + 评审结果解析工具
 """
 from __future__ import annotations
+from dataclasses import dataclass, field
 from sqlalchemy import func
 
 import json
@@ -15,9 +16,259 @@ logger = logging.getLogger("dvs.parsers")
 from .models import CalleeRef, WorkerResult
 
 
+@dataclass
+class LLMStructuredParseResult:
+    value: object | None
+    error: str | None = None
+    repaired: bool = False
+    repair_actions: list[str] = field(default_factory=list)
+    source: str = ""
+    raw_preview: str = ""
+
+
 def _extract_result(output: str) -> str:
     m = re.search(r"<result>(.*?)</result>", output, re.DOTALL)
     return m.group(1).strip() if m else output
+
+
+def _preview_text(text: object, *, limit: int = 240) -> str:
+    value = " ".join(str(text or "").split())
+    if len(value) <= limit:
+        return value
+    return f"{value[: limit - 1]}…"
+
+
+def _iter_balanced_json_candidates(text: str, *, open_char: str, close_char: str) -> list[str]:
+    candidates: list[str] = []
+    for i, ch in enumerate(text):
+        if ch != open_char:
+            continue
+        depth = 0
+        in_str = False
+        escape = False
+        for j in range(i, len(text)):
+            c = text[j]
+            if escape:
+                escape = False
+                continue
+            if c == "\\":
+                if in_str:
+                    escape = True
+                continue
+            if c == '"':
+                in_str = not in_str
+                continue
+            if in_str:
+                continue
+            if c == open_char:
+                depth += 1
+            elif c == close_char:
+                depth -= 1
+                if depth == 0:
+                    candidates.append(text[i:j + 1])
+                    break
+    return candidates
+
+
+def _strip_trailing_commas(text: str) -> str:
+    return re.sub(r",(\s*[\]}])", r"\1", text)
+
+
+def _escape_invalid_backslashes(text: str) -> str:
+    return re.sub(r'\\(?!["\\/bfnrtu])', r"\\\\", text)
+
+
+def _normalize_json_candidate(text: str) -> tuple[str, list[str]]:
+    actions: list[str] = []
+    normalized = text
+    replaced_quotes = {
+        "\u201c": '"',
+        "\u201d": '"',
+        "\u2018": "'",
+        "\u2019": "'",
+    }
+    for src, dst in replaced_quotes.items():
+        if src in normalized:
+            normalized = normalized.replace(src, dst)
+            if "normalize_quotes" not in actions:
+                actions.append("normalize_quotes")
+    cleaned = "".join(
+        ch for ch in normalized
+        if ch in ("\n", "\r", "\t") or ord(ch) >= 0x20
+    )
+    if cleaned != normalized:
+        normalized = cleaned
+        actions.append("strip_control_chars")
+    escaped = _escape_invalid_backslashes(normalized)
+    if escaped != normalized:
+        normalized = escaped
+        actions.append("escape_invalid_backslashes")
+    stripped = _strip_trailing_commas(normalized)
+    if stripped != normalized:
+        normalized = stripped
+        actions.append("strip_trailing_commas")
+    return normalized, actions
+
+
+def _validate_parsed_value(
+    value: object,
+    *,
+    expected_kind: str,
+    required_key: str | None,
+    required_container_type: type | None,
+) -> tuple[bool, str | None]:
+    if expected_kind == "array":
+        if not isinstance(value, list):
+            return False, "parsed value is not a JSON array"
+        return True, None
+    if not isinstance(value, dict):
+        return False, "parsed value is not a JSON object"
+    if required_key and required_key not in value:
+        return False, f"missing required key '{required_key}'"
+    if required_key and required_container_type is not None:
+        container = value.get(required_key)
+        if not isinstance(container, required_container_type):
+            return False, f"key '{required_key}' must be {required_container_type.__name__}"
+    return True, None
+
+
+def _try_parse_candidate(
+    candidate: str,
+    *,
+    expected_kind: str,
+    required_key: str | None,
+    required_container_type: type | None,
+) -> tuple[object | None, str | None]:
+    try:
+        value = json.loads(candidate)
+    except json.JSONDecodeError as exc:
+        return None, str(exc)
+    ok, error = _validate_parsed_value(
+        value,
+        expected_kind=expected_kind,
+        required_key=required_key,
+        required_container_type=required_container_type,
+    )
+    if not ok:
+        return None, error
+    return value, None
+
+
+def _try_recover_truncated_json(
+    text: str,
+    *,
+    expected_kind: str,
+    required_key: str | None,
+    required_container_type: type | None,
+) -> tuple[object | None, str | None]:
+    opener = "[" if expected_kind == "array" else "{"
+    idx = text.find(opener)
+    if idx < 0:
+        return None, "no json opener found for truncated recovery"
+    fragment = text[idx:]
+    cut_positions = [fragment.rfind(ch) for ch in ("]", "}", ",")]
+    for cut_pos in cut_positions:
+        if cut_pos <= 0:
+            continue
+        partial = fragment[:cut_pos + 1].rstrip().rstrip(",")
+        open_braces = partial.count("{") - partial.count("}")
+        open_brackets = partial.count("[") - partial.count("]")
+        candidate = partial
+        if open_brackets > 0:
+            candidate += "]" * open_brackets
+        if open_braces > 0:
+            candidate += "}" * open_braces
+        value, error = _try_parse_candidate(
+            candidate,
+            expected_kind=expected_kind,
+            required_key=required_key,
+            required_container_type=required_container_type,
+        )
+        if value is not None:
+            return value, None
+    return None, "truncated recovery failed"
+
+
+def extract_llm_structured_output(
+    text: str,
+    *,
+    required_key: str | None = None,
+    expected_kind: str = "object",
+    required_container_type: type | None = None,
+    allow_truncated_recovery: bool = False,
+) -> LLMStructuredParseResult:
+    last_error: str | None = None
+    opener = "[" if expected_kind == "array" else "{"
+    closer = "]" if expected_kind == "array" else "}"
+    candidates: list[tuple[str, str]] = []
+
+    for match in re.finditer(r"```(?:json)?\s*\n(.*?)\n\s*```", text, re.DOTALL):
+        candidates.append(("code_block", match.group(1)))
+    for candidate in _iter_balanced_json_candidates(text, open_char=opener, close_char=closer):
+        candidates.append((f"balanced_{expected_kind}", candidate))
+
+    seen: set[str] = set()
+    for source, candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        value, error = _try_parse_candidate(
+            candidate,
+            expected_kind=expected_kind,
+            required_key=required_key,
+            required_container_type=required_container_type,
+        )
+        if value is not None:
+            return LLMStructuredParseResult(
+                value=value,
+                source=source,
+                raw_preview=_preview_text(candidate),
+            )
+        if error:
+            last_error = f"{source} parse failed: {error}"
+        repaired_candidate, repair_actions = _normalize_json_candidate(candidate)
+        if repaired_candidate == candidate:
+            continue
+        value, error = _try_parse_candidate(
+            repaired_candidate,
+            expected_kind=expected_kind,
+            required_key=required_key,
+            required_container_type=required_container_type,
+        )
+        if value is not None:
+            return LLMStructuredParseResult(
+                value=value,
+                repaired=True,
+                repair_actions=repair_actions,
+                source=f"{source}_repaired",
+                raw_preview=_preview_text(repaired_candidate),
+            )
+        if error:
+            last_error = f"{source} repaired parse failed: {error}"
+
+    if allow_truncated_recovery:
+        value, error = _try_recover_truncated_json(
+            text,
+            expected_kind=expected_kind,
+            required_key=required_key,
+            required_container_type=required_container_type,
+        )
+        if value is not None:
+            return LLMStructuredParseResult(
+                value=value,
+                repaired=True,
+                repair_actions=["truncated_recovery"],
+                source="truncated_recovery",
+                raw_preview=_preview_text(text),
+            )
+        if error:
+            last_error = error
+
+    return LLMStructuredParseResult(
+        value=None,
+        error=last_error or "no valid JSON candidate found",
+        raw_preview=_preview_text(text),
+    )
 
 
 
@@ -360,58 +611,23 @@ _STDLIB_SKIP: frozenset[str] = frozenset({
 
 
 
-def _extract_json_object(text: str, required_key: str) -> dict | None:
-    """从文本中提取包含指定 key 的 JSON 对象。支持多行、嵌套引号、转义字符。"""
-    # 先尝试从 code block 中提取
-    code_match = re.search(r"```(?:json)?\s*\n(.*?)\n\s*```", text, re.DOTALL)
-    if code_match:
-        try:
-            obj = json.loads(code_match.group(1))
-            if isinstance(obj, dict) and required_key in obj:
-                return obj
-        except json.JSONDecodeError as e:
-            logger.debug("parse json code block failed, skip: %s", e)
+def _extract_json_object_with_error(text: str, required_key: str) -> tuple[dict | None, str | None]:
+    """从文本中提取包含指定 key 的 JSON 对象，并返回失败原因。"""
+    result = extract_llm_structured_output(
+        text,
+        required_key=required_key,
+        expected_kind="object",
+        required_container_type=None,
+        allow_truncated_recovery=False,
+    )
+    if isinstance(result.value, dict):
+        return result.value, None
+    return None, result.error
 
-    # 找所有 '{' 的位置,尝试从每个位置开始解析完整 JSON
-    for i, ch in enumerate(text):
-        if ch != '{':
-            continue
-        # 快速跳过明显不是目标 JSON 的(如 C 代码的 {)
-        ahead = text[i:i+100]
-        if required_key not in ahead and '"' not in ahead[:30]:
-            continue
-        # 尝试匹配平衡的 {}
-        depth = 0
-        in_str = False
-        escape = False
-        for j in range(i, len(text)):
-            c = text[j]
-            if escape:
-                escape = False
-                continue
-            if c == '\\':
-                if in_str:
-                    escape = True
-                continue
-            if c == '"' and not escape:
-                in_str = not in_str
-                continue
-            if in_str:
-                continue
-            if c == '{':
-                depth += 1
-            elif c == '}':
-                depth -= 1
-                if depth == 0:
-                    candidate = text[i:j+1]
-                    try:
-                        obj = json.loads(candidate)
-                        if isinstance(obj, dict) and required_key in obj:
-                            return obj
-                    except json.JSONDecodeError as e:
-                        logger.debug("parse json candidate failed, skip: %s", e)
-                    break
-    return None
+
+def _extract_json_object(text: str, required_key: str) -> dict | None:
+    obj, _error = _extract_json_object_with_error(text, required_key)
+    return obj
 
 
 def _parse_eval_md(output: str) -> dict:

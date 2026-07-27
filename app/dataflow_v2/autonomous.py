@@ -19,6 +19,7 @@ from typing import Any, Callable
 
 from ..models import SwarmEvent, TaskConfig
 from ..llm_retry import run_agent_with_design_retry, _last_stop_reason
+from ..service.file_access_logging import path_exists_logged, read_json_logged, read_text_logged
 from ..vuln_report_utils import build_v2_system_prompt
 from .function_extractor import ensure_file_indexed, find_func_in_source
 from .store import DataflowStore
@@ -157,10 +158,21 @@ class AutonomousRunner:
             system_prompt = (build_v2_system_prompt(custom="autonomous") or "")
             sp_path = Path(__file__).parent.parent.parent / "prompts" / "v2" / "autonomous-explore.md"
             try:
-                system_prompt = system_prompt + "\n\n" + sp_path.read_text(encoding="utf-8")
+                system_prompt = system_prompt + "\n\n" + read_text_logged(
+                    sp_path,
+                    logger=logger,
+                    purpose="v2_autonomous_prompt",
+                    encoding="utf-8",
+                )
             except Exception as e:
                 logger.debug("append autonomous-explore prompt failed, fallback to plain read: %s", e)
-                system_prompt = sp_path.read_text(encoding="utf-8") if sp_path.exists() else system_prompt
+                if path_exists_logged(sp_path, logger=logger, purpose="v2_autonomous_prompt_fallback_exists"):
+                    system_prompt = read_text_logged(
+                        sp_path,
+                        logger=logger,
+                        purpose="v2_autonomous_prompt_fallback",
+                        encoding="utf-8",
+                    )
 
             # 入口提示 (用解析到的 root_func.name, 不靠 cfg.function_name)
             taint_desc = ",".join(cfg.taint_params) if cfg.taint_params else "(自行识别入口污点源)"
@@ -281,7 +293,9 @@ class AutonomousRunner:
     def _read_checkpoint(self, run_dir: Path) -> dict:
         p = run_dir / "checkpoint.json"
         try:
-            return json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
+            if not path_exists_logged(p, logger=logger, purpose="v2_autonomous_checkpoint_exists"):
+                return {}
+            return read_json_logged(p, logger=logger, purpose="v2_autonomous_checkpoint", encoding="utf-8")
         except Exception as e:
             logger.warning("read checkpoint.json failed (run=%s): %s", run_dir, e)
             return {}
@@ -289,7 +303,14 @@ class AutonomousRunner:
     def _count_path(self, run_dir: Path) -> int:
         p = run_dir / "path.log"
         try:
-            return sum(1 for _ in p.read_text(encoding="utf-8").splitlines() if _.strip()) if p.exists() else 0
+            if not path_exists_logged(p, logger=logger, purpose="v2_autonomous_pathlog_exists"):
+                return 0
+            return sum(1 for _ in read_text_logged(
+                p,
+                logger=logger,
+                purpose="v2_autonomous_pathlog_count",
+                encoding="utf-8",
+            ).splitlines() if _.strip())
         except Exception as e:
             logger.debug("count path.log lines failed (run=%s): %s", run_dir, e)
             return 0
@@ -303,11 +324,16 @@ class AutonomousRunner:
         """
         from .models import OrchestrationEdge, TaintParamInfo
         p = run_dir / "path.log"
-        if not p.exists():
+        if not path_exists_logged(p, logger=logger, purpose="v2_autonomous_pathlog_tree_exists"):
             return
         # 解析全部条目, 保留顺序
         all_entries = []
-        for line in p.read_text(encoding="utf-8").splitlines():
+        for line in read_text_logged(
+            p,
+            logger=logger,
+            purpose="v2_autonomous_pathlog_tree",
+            encoding="utf-8",
+        ).splitlines():
             if not line.strip():
                 continue
             try:
@@ -397,10 +423,19 @@ class AutonomousRunner:
 
     def _read_path_render(self, run_dir: Path, limit: int = 60) -> str:
         p = run_dir / "path.log"
-        if not p.exists():
+        if not path_exists_logged(p, logger=logger, purpose="v2_autonomous_pathlog_render_exists"):
             return "(无)"
         try:
-            lines = [json.loads(l) for l in p.read_text(encoding="utf-8").splitlines() if l.strip()]
+            lines = [
+                json.loads(l)
+                for l in read_text_logged(
+                    p,
+                    logger=logger,
+                    purpose="v2_autonomous_pathlog_render",
+                    encoding="utf-8",
+                ).splitlines()
+                if l.strip()
+            ]
             lines = lines[-limit:]
             return "\n".join(f"- {s.get('func','')} ({s.get('file','')} 行 {s.get('start_line','')})" for s in lines)
         except Exception as e:
