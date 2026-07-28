@@ -66,24 +66,26 @@ def _source_root() -> str:
 
 
 def _query(db_name: str, sql: str, params: tuple = ()) -> list[dict]:
+    """SQLite 只读查询 (回退用)。mode=ro + 不开 WAL → 不产生 -shm,
+    不与 worker 的 WAL 写者争共享内存, 避免跨进程 WAL 损坏。
+    MySQL 为主, 仅 MySQL 报错时才走到这里。"""
     db = _db_dir() / db_name
     if not db.exists():
-        print(f"ERROR: 数据库不存在: {db_name}", file=sys.stderr)
         return []
+    conn = None
     try:
-        conn = sqlite3.connect(db, timeout=30, check_same_thread=False)
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=30)
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=30000")
-        rows = [dict(r) for r in conn.execute(sql, params).fetchall()]
-        conn.close()
-        return rows
-    except sqlite3.OperationalError as e:
-        log.warning("query failed db=%s: %s", db_name, e)
-        return []
+        return [dict(r) for r in conn.execute(sql, params).fetchall()]
     except Exception as e:
-        log.warning("query error db=%s: %s", db_name, e)
+        log.warning("sqlite read failed db=%s: %s", db_name, e)
         return []
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 _mysql_store = None
@@ -110,10 +112,11 @@ def _get_mysql_store():
         return None
 
 def _mysql_query_functions(name: str, file: str = "") -> list[dict]:
-    """MySQL fallback: 查 functions 表 (按名, 支持 short/tail/suffix 匹配)。"""
+    """MySQL 查 functions 表 (按名)。store 不可用/查询报错时 raise 供调用方回退 SQLite;
+    查到空 = 真没有 (返回 [], 不回退)。"""
     ms = _get_mysql_store()
     if ms is None:
-        return []
+        raise RuntimeError("mysql store unavailable")
     recs = ms.read_functions(name, file)
     return [{"func_id": r.func_id, "file": r.file, "name": r.name,
              "signature": r.signature, "start_line": r.start_line,
@@ -121,10 +124,10 @@ def _mysql_query_functions(name: str, file: str = "") -> list[dict]:
              "description": r.description} for r in recs]
 
 def _mysql_query_taints(func_name: str) -> list[dict]:
-    """MySQL fallback: 查 taints 表 (按 function 名)。"""
+    """MySQL 查 taints 表。store 不可用/报错时 raise 供回退; 空 = 真没有。"""
     ms = _get_mysql_store()
     if ms is None:
-        return []
+        raise RuntimeError("mysql store unavailable")
     recs = ms.read_functions(func_name)
     if not recs:
         recs = ms.read_functions(func_name.split("::")[-1])
@@ -140,10 +143,10 @@ def _mysql_query_taints(func_name: str) -> list[dict]:
     return out
 
 def _mysql_query_propagations(func_name: str) -> list[dict]:
-    """MySQL fallback: 查 propagations 表 (按 func_name → func_id → propagations)。"""
+    """MySQL 查 propagations 表。store 不可用/报错时 raise 供回退; 空 = 真没有。"""
     ms = _get_mysql_store()
     if ms is None:
-        return []
+        raise RuntimeError("mysql store unavailable")
     recs = ms.read_functions(func_name)
     if not recs:
         recs = ms.read_functions(func_name.split("::")[-1])
@@ -163,45 +166,48 @@ def _mysql_query_propagations(func_name: str) -> list[dict]:
     return out
 
 def _mysql_query_orchestration(func_name: str) -> list[dict]:
-    """MySQL fallback: 查 orchestration 表 (按 source/target function)。"""
+    """MySQL 查 orchestration 表。store 不可用/报错时 raise 供回退; 空 = 真没有。"""
     ms = _get_mysql_store()
     if ms is None:
-        return []
+        raise RuntimeError("mysql store unavailable")
     from sqlalchemy import text as sa_text
-    try:
-        with ms._engine.connect() as conn:
-            rows = conn.execute(sa_text(
-                "SELECT * FROM orchestration WHERE source_dir_id=:sid AND "
-                "(source_function=:fn OR target_function=:fn) ORDER BY edge_order"),
-                {"sid": ms.source_dir_id, "fn": func_name}).fetchall()
-            return [dict(r._mapping) for r in rows]
-    except Exception as e:
-        log.warning("mysql orchestration query failed: %s", e)
-        return []
+    with ms._engine.connect() as conn:
+        rows = conn.execute(sa_text(
+            "SELECT * FROM orchestration WHERE source_dir_id=:sid AND "
+            "(source_function=:fn OR target_function=:fn) ORDER BY edge_order"),
+            {"sid": ms.source_dir_id, "fn": func_name}).fetchall()
+        return [dict(r._mapping) for r in rows]
 
 def _mysql_is_indexed(rel_file: str) -> bool:
     ms = _get_mysql_store()
     if ms is None:
-        return False
+        raise RuntimeError("mysql store unavailable")
     return ms.read_is_indexed(rel_file)
 
 def _mysql_is_indexing(rel_file: str) -> bool:
     ms = _get_mysql_store()
     if ms is None:
-        return False
+        raise RuntimeError("mysql store unavailable")
     return ms.read_is_indexing(rel_file)
 
 def _find_func(name: str) -> dict | None:
-    """查函数库, 支持短名后缀匹配 (C++ Class::Method)。"""
-    # MySQL 优先
-    mrows = _mysql_query_functions(name)
-    if mrows:
-        return mrows[0]
-    rows = _query("functions.db", "SELECT * FROM functions WHERE name = ?", (name,))
-    if rows:
-        return rows[0]
-    rows = _query("functions.db", "SELECT * FROM functions WHERE name LIKE ?", (f"%{name}",))
-    return rows[0] if rows else None
+    """查函数库, 支持短名后缀匹配 (C++ Class::Method)。
+
+    MySQL 为主; 仅 MySQL 报错才回退 SQLite 只读 (mode=ro, 不开 WAL)。
+    MySQL 查到空 = 真没有, 不回退 SQLite。
+    """
+    try:
+        mrows = _mysql_query_functions(name)
+        if mrows:
+            return mrows[0]
+        return None
+    except Exception as e:
+        log.warning("mysql find_func failed, fallback sqlite read-only: %s", e)
+        rows = _query("functions.db", "SELECT * FROM functions WHERE name = ?", (name,))
+        if rows:
+            return rows[0]
+        rows = _query("functions.db", "SELECT * FROM functions WHERE name LIKE ?", (f"%{name}",))
+        return rows[0] if rows else None
 
 def _read_body(func: dict) -> str:
     """从原源文件按 start_line/end_line 读取函数体, 带行号前缀。"""
@@ -294,7 +300,7 @@ def _async_index_file(src_root, rel_file, db_dir):
             sys.path.insert(0, os.environ.get("DVS_APP_DIR", "/opt/dataflow_vuln_scan"))
             from app.dataflow_v2.function_extractor import ensure_file_indexed
             from app.dataflow_v2.store import DataflowStore
-            store = DataflowStore(db_dir)
+            store = DataflowStore(db_dir, mysql_store=_get_mysql_store())
             ensure_file_indexed(str(src_root), rel_file, store)
             store.close()
         except Exception as e:
@@ -346,13 +352,14 @@ def cmd_lookup(name: str) -> None:
     # 3. 遍历每个候选文件
     for rel_file, _ in found:
         # 3a. 文件是否在索引中?
+        # MySQL 为主; 仅 MySQL 报错才回退 SQLite 只读 (mode=ro, 不开 WAL)
         try:
-            idx_rows = _query("functions.db", "SELECT 1 FROM indexing_files WHERE file_path=?", (rel_file,))
-            if not idx_rows:
-                idx_rows = [{"1": 1}] if _mysql_is_indexed(rel_file) else []
-            is_indexing = len(idx_rows) > 0
+            is_indexing = _mysql_is_indexing(rel_file) or _mysql_is_indexed(rel_file)
         except Exception:
-            is_indexing = False
+            try:
+                is_indexing = len(_query("functions.db", "SELECT 1 FROM indexing_files WHERE file_path=?", (rel_file,))) > 0
+            except Exception:
+                is_indexing = False
 
         if is_indexing:
             log.info("file=%s being indexed by another process, tree-sitter only", rel_file)
@@ -478,7 +485,7 @@ def _print_prefix_candidates(name: str, src_root) -> None:
                 except ValueError: continue
                 if rel in indexed: continue
                 try:
-                    store = DataflowStore(db_dir); ensure_file_indexed(str(src_root), rel, store); store.close()
+                    store = DataflowStore(db_dir, mysql_store=_get_mysql_store()); ensure_file_indexed(str(src_root), rel, store); store.close()
                     indexed.append(rel)
                 except Exception as e:
                     log.warning("prefix index failed file=%s: %s", rel, e)
@@ -496,19 +503,21 @@ def _print_prefix_candidates(name: str, src_root) -> None:
 
 
 def cmd_taints(func_name: str) -> None:
-    """查污点库: 返回函数的污点变量。"""
-    # MySQL 优先
-    rows = _mysql_query_taints(func_name)
-    if not rows:
+    """查污点库: 返回函数的污点变量。MySQL 为主, 仅 MySQL 报错回退 SQLite 只读。"""
+    rows: list[dict] = []
+    try:
+        rows = _mysql_query_taints(func_name)
+    except Exception as e:
+        log.warning("mysql taints failed, fallback sqlite read-only: %s", e)
         rows = _query("taints.db", "SELECT * FROM taints WHERE function = ?", (func_name,))
-    if not rows:
-        rows = _query("taints.db", "SELECT * FROM taints WHERE function LIKE ?", (f"%{func_name}",))
-    if not rows:
-        alt = func_name[1:] if func_name.startswith("_") else "_" + func_name
-        if alt != func_name and len(alt) >= 2:
-            rows = _query("taints.db", "SELECT * FROM taints WHERE function = ?", (alt,))
-            if rows:
-                log.info("taints underscore fallback: %s -> %s", func_name, alt)
+        if not rows:
+            rows = _query("taints.db", "SELECT * FROM taints WHERE function LIKE ?", (f"%{func_name}",))
+        if not rows:
+            alt = func_name[1:] if func_name.startswith("_") else "_" + func_name
+            if alt != func_name and len(alt) >= 2:
+                rows = _query("taints.db", "SELECT * FROM taints WHERE function = ?", (alt,))
+                if rows:
+                    log.info("taints underscore fallback: %s -> %s", func_name, alt)
     if rows:
         for r in rows:
             print(f"taint: {r['name']} (signature: {r['signature']})")
@@ -529,18 +538,23 @@ def _print_props(rows: list[dict]) -> None:
         print(f"  description: {r.get('description', '')}")
 
 def cmd_propagations(func_name: str) -> None:
-    """查传播库: 返回函数的传播路径。"""
-    # 先查 functions.db 拿 func_id, 再查 propagations.db (两库分离, 不能跨库子查询)
-    # MySQL 优先: 直接查 propagations
-    mrows = _mysql_query_propagations(func_name)
-    if mrows:
-        _print_props(mrows)
+    """查传播库: 返回函数的传播路径。MySQL 为主, 仅 MySQL 报错回退 SQLite 只读。"""
+    # MySQL 优先: 直接查 propagations (跨库 JOIN 在 MySQL 端完成)
+    try:
+        mrows = _mysql_query_propagations(func_name)
+        if mrows:
+            _print_props(mrows)
+            return
+        # MySQL 查到空 = 真没有, 不回退 SQLite
+        print(f"NOT_FOUND: 函数 '{func_name}' 在传播库中未找到。")
         return
+    except Exception as e:
+        log.warning("mysql propagations failed, fallback sqlite read-only: %s", e)
+    # SQLite 只读回退 (两库分离, 不能跨库子查询): 先查 functions 拿 func_id
     func_rows = _query("functions.db", "SELECT func_id FROM functions WHERE name = ?", (func_name,))
     if not func_rows:
         func_rows = _query("functions.db", "SELECT func_id FROM functions WHERE name LIKE ?", (f"%{func_name}",))
     if not func_rows:
-        # 前导下划线 fallback
         alt = func_name[1:] if func_name.startswith("_") else "_" + func_name
         if alt != func_name and len(alt) >= 2:
             func_rows = _query("functions.db", "SELECT func_id FROM functions WHERE name = ?", (alt,))
@@ -564,10 +578,12 @@ def cmd_propagations(func_name: str) -> None:
 
 
 def cmd_orchestration(func_name: str) -> None:
-    """查编排库: 返回调用链。"""
-    # MySQL 优先
-    rows = _mysql_query_orchestration(func_name)
-    if not rows:
+    """查编排库: 返回调用链。MySQL 为主, 仅 MySQL 报错回退 SQLite 只读。"""
+    rows: list[dict] = []
+    try:
+        rows = _mysql_query_orchestration(func_name)
+    except Exception as e:
+        log.warning("mysql orchestration failed, fallback sqlite read-only: %s", e)
         rows = _query("orchestration.db", "SELECT * FROM orchestration WHERE source_function = ? OR target_function = ?", (func_name, func_name))
     if rows:
         for r in rows:
@@ -580,15 +596,29 @@ def cmd_orchestration(func_name: str) -> None:
 
 
 def cmd_index(file_path: str) -> None:
-    """索引新文件到函数库 (tree-sitter 函数提取 + include + class)。"""
+    """索引新文件到函数库 (tree-sitter 函数提取 + include + class)。
+
+    双写 MySQL + SQLite (与 worker 的 DataflowStore 一致)。双库都失败时不报错,
+    退化为提示 (后续 lookup 仍可经 MySQL/源码 grep 查到)。
+    """
     src_root = _source_root()
     sys.path.insert(0, os.environ.get("DVS_APP_DIR", "/opt/dataflow_vuln_scan"))
     from app.dataflow_v2.function_extractor import ensure_file_indexed
     from app.dataflow_v2.store import DataflowStore
-    store = DataflowStore(_db_dir())
-    ensure_file_indexed(src_root, file_path, store)
-    store.close()
-    print(f"INDEXED: {file_path}")
+    store = None
+    try:
+        store = DataflowStore(_db_dir(), mysql_store=_get_mysql_store())
+        ensure_file_indexed(src_root, file_path, store)
+        print(f"INDEXED: {file_path}")
+    except Exception as e:
+        log.warning("index failed (dual-write) file=%s: %s", file_path, e)
+        print(f"INDEX_FAIL: {file_path} ({e})")
+    finally:
+        if store is not None:
+            try:
+                store.close()
+            except Exception:
+                pass
 
 
 def cmd_symbol(name: str) -> None:
