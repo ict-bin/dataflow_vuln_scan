@@ -116,7 +116,12 @@ def persist_finding(
     fsrc = str(item.get("source_file") or func_file)
     ffn = str(item.get("function_name") or func_name)
     fline = str(item.get("line") or "")
-    finding_id = f"vuln_{hashlib.sha1((ffn + '|' + str(item.get('vuln_type') or 'unknown') + '|' + fline).encode()).hexdigest()[:16]}"
+    # 行号归一为 ±10 行范围 (防同漏洞不同行重复, 又不漏报不同位置的同类漏洞)
+    try:
+        _line_bucket = str(int(fline) // 10 * 10)  # 每 10 行一个 bucket, 280/281/285 -> 280
+    except (ValueError, TypeError):
+        _line_bucket = fline  # 非数字行号保留原值
+    finding_id = f"vuln_{hashlib.sha1((ffn + '|' + str(item.get('vuln_type') or 'unknown') + '|' + _line_bucket).encode()).hexdigest()[:16]}"
     node = f"{fsrc}::{ffn}"
 
     fdir = vuln_root / finding_id
