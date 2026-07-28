@@ -91,10 +91,28 @@ _VALIDATION_NAME_RE = _re.compile(
 )
 
 
+def _format_line_hint(line: int | None) -> str:
+    value = int(line or 0)
+    return f"@L{value}" if value > 0 else "@L?"
+
+
+def _format_function_identity(file: str, function: str) -> str:
+    normalized_file = str(file or "").strip()
+    normalized_function = str(function or "").strip()
+    if normalized_file and normalized_function:
+        return f"{normalized_file}::{normalized_function}"
+    if normalized_function:
+        return normalized_function
+    if normalized_file:
+        return normalized_file
+    return "(unknown)"
+
+
 def _format_validation_hint(v: Validation) -> str:
+    owner = _format_function_identity(v.function_file, v.function_name)
     return (
-        f"- [{v.kind or 'other'}] {v.target or '(unknown)'}: "
-        f"{v.summary or '(no summary)'} @L{int(v.line or 0)}"
+        f"- [{v.kind or 'other'}] {owner} {_format_line_hint(v.line)}: "
+        f"{v.target or '(unknown)'} - {v.summary or '(no summary)'}"
     )
 
 
@@ -102,6 +120,7 @@ def _collect_validation_hints(
     pre_validations: list[Validation],
     props: list[PropagationRecord],
     *,
+    current_func: FunctionRecord | None = None,
     max_validations: int = 30,
     max_functions: int = 30,
 ) -> tuple[list[str], list[str]]:
@@ -111,9 +130,17 @@ def _collect_validation_hints(
         if not (v.target or v.summary):
             continue
         hint = _format_validation_hint(v)
-        if hint in seen_validation_hints:
+        key = "||".join((
+            str(v.function_file or ""),
+            str(v.function_name or ""),
+            str(int(v.line or 0)),
+            str(v.kind or ""),
+            str(v.target or ""),
+            str(v.summary or ""),
+        ))
+        if key in seen_validation_hints:
             continue
-        seen_validation_hints.add(hint)
+        seen_validation_hints.add(key)
         validation_hints.append(hint)
         if len(validation_hints) >= max_validations:
             break
@@ -123,9 +150,17 @@ def _collect_validation_hints(
                 if not (v.target or v.summary):
                     continue
                 hint = _format_validation_hint(v)
-                if hint in seen_validation_hints:
+                key = "||".join((
+                    str(v.function_file or ""),
+                    str(v.function_name or ""),
+                    str(int(v.line or 0)),
+                    str(v.kind or ""),
+                    str(v.target or ""),
+                    str(v.summary or ""),
+                ))
+                if key in seen_validation_hints:
                     continue
-                seen_validation_hints.add(hint)
+                seen_validation_hints.add(key)
                 validation_hints.append(hint)
                 if len(validation_hints) >= max_validations:
                     break
@@ -134,19 +169,33 @@ def _collect_validation_hints(
 
     function_hints: list[str] = []
     seen_function_hints: set[str] = set()
+    caller_identity = _format_function_identity(
+        getattr(current_func, "file", "") if current_func is not None else "",
+        getattr(current_func, "name", "") if current_func is not None else "",
+    )
     for p in props:
         name = str(p.target_function or "").strip()
         if not name:
             continue
-        if not (p.validations or _VALIDATION_NAME_RE.search(name)):
-            continue
         desc = str(p.description or "").strip()
-        hint = f"- {name} @L{int(getattr(p, 'call_line', 0) or 0)}"
+        if not (desc or p.validations or _VALIDATION_NAME_RE.search(name)):
+            continue
+        hint = f"- {caller_identity} {_format_line_hint(getattr(p, 'call_line', 0) or 0)} -> {name}"
+        callee_file = str(getattr(p, "target_file", "") or "").strip()
+        if callee_file:
+            hint = f"{hint} [callee: {callee_file}]"
         if desc:
             hint = f"{hint}: {desc}"
-        if hint in seen_function_hints:
+        key = "||".join((
+            caller_identity,
+            str(int(getattr(p, "call_line", 0) or 0)),
+            name,
+            callee_file,
+            desc,
+        ))
+        if key in seen_function_hints:
             continue
-        seen_function_hints.add(hint)
+        seen_function_hints.add(key)
         function_hints.append(hint)
         if len(function_hints) >= max_functions:
             break
@@ -687,7 +736,11 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                                  line=int(v.get("line") or 0),
                                  kind=str(v.get("kind") or "other"),
                                  target=str(v.get("target") or ""),
-                                 summary=str(v.get("summary") or ""))
+                                 summary=str(v.get("summary") or ""),
+                                 function_file=func.file,
+                                 function_name=func.name,
+                                 function_start_line=func.start_line,
+                                 function_end_line=func.end_line)
                              for v in (p.get("validations") or []) if isinstance(v, dict)],
                 description=str(p.get("description") or ""),
             ))
@@ -807,6 +860,10 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                                 kind=kind,
                                 target=target,
                                 summary=summary,
+                                function_file=func.file,
+                                function_name=func.name,
+                                function_start_line=func.start_line,
+                                function_end_line=func.end_line,
                             ))
                     self.on_event("v2_external_callee_inferred",
                                   function=prop.target_function,
@@ -1247,7 +1304,7 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
         taints = store.list_taints_in_function(func.func_id)
         props = store.list_propagations_from(func.func_id)
         dataflow_text = self._format_taint_context(func, taint_params, ctx, taints, props, store)
-        validation_hints, function_hints = _collect_validation_hints(ctx.pre_validations, props)
+        validation_hints, function_hints = _collect_validation_hints(ctx.pre_validations, props, current_func=func)
         validation_hint_text = "\n".join(validation_hints) or "(无)"
         function_hint_text = "\n".join(function_hints) or "(无)"
         prompt = (
@@ -1258,7 +1315,7 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
             f"污点: 位置 {taint_params.positions} 签名 {taint_params.signature} 名字 {taint_params.names}\n\n"
             "## 校验提醒（识别可能不准确，仅供参考）\n"
             f"### 可能相关的校验点（最多 30 个）\n{validation_hint_text}\n\n"
-            f"### 可能涉及校验的函数/调用点（最多 30 个）\n{function_hint_text}\n\n"
+            f"### 可能相关的调用点（最多 30 个）\n{function_hint_text}\n\n"
             "请重点核对这些校验是否真的覆盖危险参数、是否发生在危险操作之前、是否只是部分校验或可被绕过。\n\n"
             "## 本函数污点分析摘要\n"
             f"```markdown\n{_truncate_text_by_estimated_tokens(dataflow_text, max_tokens=30000)}\n```\n\n"
@@ -1516,16 +1573,16 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
             for v in ctx.pre_validations
             if v.target or v.summary
         ) or "(无)"
-        validation_hints, function_hints = _collect_validation_hints(ctx.pre_validations, props)
+        validation_hints, function_hints = _collect_validation_hints(ctx.pre_validations, props, current_func=func)
         func_body = read_function_body(self.source_root, func, max_lines=4000)
         lines = [f"## 函数: {func.file}::{func.name} (行 {func.start_line}-{func.end_line})",
                  f"功能: {func.description or '(待分析)'}",
                  f"入口污点: 位置 {tp.positions} 签名 {tp.signature} 名字 {tp.names}",
                  "校验提醒（识别可能不准确，仅供参考）:",
-                 f"前置校验摘要:\n{pre_val}",
-                 "可能相关的校验点:",
+                 f"前置校验摘要（上游链路）:\n{pre_val}",
+                 "当前函数内相关校验点:",
                  "\n".join(validation_hints) or "(无)",
-                 "可能涉及校验的函数/调用点:",
+                 "可能相关的调用点:",
                  "\n".join(function_hints) or "(无)",
                  "",
                  "## 函数体源码:",

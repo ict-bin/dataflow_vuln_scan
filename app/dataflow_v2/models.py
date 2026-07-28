@@ -114,6 +114,10 @@ class Validation:
     kind: str = ""
     target: str = ""
     summary: str = ""
+    function_file: str = ""
+    function_name: str = ""
+    function_start_line: int = 0
+    function_end_line: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -121,6 +125,10 @@ class Validation:
             "kind": self.kind,
             "target": self.target,
             "summary": self.summary,
+            "function_file": self.function_file,
+            "function_name": self.function_name,
+            "function_start_line": self.function_start_line,
+            "function_end_line": self.function_end_line,
         }
 
 

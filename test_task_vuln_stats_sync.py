@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import logging
+import sqlite3
 from pathlib import Path
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.db.models import AppDvsTask
+from app.service import session_lineage_index
 from app.service.task_paths import open_authoritative_vuln_scan_store
 from app.service.task_service import TaskService, _sync_task_vuln_stats
 from app.vuln_store import VulnScanStore
@@ -177,6 +180,59 @@ def test_get_task_refreshes_vuln_snapshot_from_authoritative_sqlite(tmp_path: Pa
     finally:
         db_session.close()
         engine.dispose()
+
+
+def test_get_task_tolerates_authoritative_sqlite_race(tmp_path: Path, monkeypatch):
+    engine = create_engine("sqlite:///:memory:")
+    AppDvsTask.metadata.create_all(engine)
+    SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
+    db_session = SessionLocal()
+    output_root = tmp_path / "output-root"
+    row = AppDvsTask(
+        task_id="dvs_task_1",
+        project_id="p1",
+        task_name="demo",
+        input_path="/tmp/input",
+        source_root_path="/tmp/source-root",
+        output_path=str(output_root),
+        prompt_content="prompt",
+        status="running",
+        vuln_total_count=7,
+        vuln_reported_count=3,
+        vuln_unreported_count=4,
+    )
+    db_session.add(row)
+    db_session.commit()
+
+    class _BrokenStore:
+        def list_task_findings(self, task_id: str):
+            raise sqlite3.OperationalError("unable to open database file")
+
+    monkeypatch.setattr(
+        "app.service.task_paths.open_authoritative_vuln_scan_store",
+        lambda task_root, prefer_live=True: _BrokenStore(),
+    )
+
+    try:
+        payload = TaskService().get_task(db_session, "dvs_task_1")
+        assert payload["vuln_total_count"] == 7
+        assert payload["vuln_reported_count"] == 3
+        assert payload["vuln_unreported_count"] == 4
+    finally:
+        db_session.close()
+        engine.dispose()
+
+
+def test_session_file_stats_missing_file_is_debug_only(tmp_path: Path, caplog):
+    run_root = tmp_path / "run"
+    run_root.mkdir(parents=True, exist_ok=True)
+
+    with caplog.at_level(logging.DEBUG, logger="dvs.session_lineage_index"):
+        mtime, line_count = session_lineage_index._session_file_stats(run_root, "sessions/missing.jsonl")
+
+    assert (mtime, line_count) == (None, None)
+    assert "session file not ready yet" in caplog.text
+    assert "file access stat failed" not in caplog.text
 
 
 def test_open_authoritative_vuln_scan_store_can_read_live_sqlite_without_wal(tmp_path: Path):

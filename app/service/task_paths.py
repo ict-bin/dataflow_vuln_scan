@@ -7,7 +7,7 @@ with a symlink to local storage (DVS_LOCAL_WORKSPACE_ENABLED).
 
 from __future__ import annotations
 
-import hashlib, logging, os, shutil
+import hashlib, logging, os, shutil, sqlite3
 from pathlib import Path
 
 from app.db.models import AppDvsTask
@@ -104,7 +104,16 @@ def authoritative_task_vuln_stats(task_root: Path | None, task_id: str, *, prefe
     store = open_authoritative_vuln_scan_store(task_root, prefer_live=prefer_live)
     if store is None:
         return None
-    findings = list(store.list_task_findings(normalized_task_id))
+    try:
+        findings = list(store.list_task_findings(normalized_task_id))
+    except sqlite3.OperationalError as exc:
+        logger.warning(
+            "authoritative_task_vuln_stats skipped: sqlite unavailable during read task_id=%s task_root=%s error=%s",
+            normalized_task_id,
+            task_root,
+            exc,
+        )
+        return None
     total = len(findings)
     reported = sum(1 for item in findings if str(item.get("report_status") or "") == "reported")
     return total, reported, max(0, total - reported)
@@ -244,7 +253,7 @@ def cleanup_task_data(row: AppDvsTask, *, reason: str = "cleanup") -> None:
     task_root = _task_root(row)
     if task_root is not None:
         try:
-            from app.service.workspace_manager import WorkspaceManager
+            from app.workspace_manager import WorkspaceManager
             WorkspaceManager.cleanup_temp_for_task(task_id)
         except Exception as e:
             logger.warning("workspace cleanup_temp_for_task failed (task=%s): %s", task_id, e, exc_info=True)

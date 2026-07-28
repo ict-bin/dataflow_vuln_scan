@@ -93,6 +93,13 @@ def _session_file_stats(run_root: Path, session_relpath: str) -> tuple[float | N
     if not normalized:
         return None, None
     target = Path(run_root) / normalized
+    if not target.exists():
+        logger.debug(
+            "session_lineage_index session file not ready yet: run_root=%s session_relpath=%s",
+            str(run_root),
+            normalized,
+        )
+        return None, None
     try:
         stat = stat_logged(target, logger=logger, purpose="session_lineage_index.session_stat")
         line_count = len(read_text_logged(target, logger=logger, purpose="session_lineage_index.session_read", encoding="utf-8", errors="replace").splitlines())

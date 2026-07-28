@@ -9,7 +9,7 @@
 当前只实现写 + 清理, 不实现读 (worker 读仍走 SQLite)。
 """
 from __future__ import annotations
-import hashlib, logging, threading
+import hashlib, logging, re, threading
 from typing import Any
 from sqlalchemy import create_engine, text as sa_text
 
@@ -288,11 +288,91 @@ class SharedMysqlStore(MysqlReadMixin):
         """
         data_dir_clause = f" DATA DIRECTORY='{self.data_dir}'" if self.data_dir else ""
 
+        def _index_exists(table_name: str, index_name: str) -> bool:
+            sql = sa_text(
+                """
+                SELECT 1
+                FROM information_schema.statistics
+                WHERE table_schema = DATABASE()
+                  AND table_name = :table_name
+                  AND index_name = :index_name
+                LIMIT 1
+                """
+            )
+            with self._engine.connect() as conn:
+                row = conn.execute(sql, {"table_name": table_name, "index_name": index_name}).fetchone()
+            return row is not None
+
+        def _column_exists(table_name: str, column_name: str) -> bool:
+            sql = sa_text(
+                """
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_schema = DATABASE()
+                  AND table_name = :table_name
+                  AND column_name = :column_name
+                LIMIT 1
+                """
+            )
+            with self._engine.connect() as conn:
+                row = conn.execute(sql, {"table_name": table_name, "column_name": column_name}).fetchone()
+            return row is not None
+
+        def _normalize_mysql_ddl(stmt: str) -> tuple[str | None, str | None]:
+            compact = " ".join(stmt.split())
+            match = re.match(r"CREATE INDEX\s+`?([A-Za-z0-9_]+)`?\s+ON\s+`?([A-Za-z0-9_]+)`?", compact, re.IGNORECASE)
+            if match:
+                index_name, table_name = match.group(1), match.group(2)
+                if _index_exists(table_name, index_name):
+                    return None, f"index {table_name}.{index_name} already exists"
+                return stmt, None
+
+            match = re.match(
+                r"ALTER TABLE\s+`?([A-Za-z0-9_]+)`?\s+ADD COLUMN IF NOT EXISTS\s+`?([A-Za-z0-9_]+)`?\s+(.*)",
+                compact,
+                re.IGNORECASE,
+            )
+            if match:
+                table_name, column_name, suffix = match.group(1), match.group(2), match.group(3)
+                if _column_exists(table_name, column_name):
+                    return None, f"column {table_name}.{column_name} already exists"
+                return f"ALTER TABLE {table_name} ADD COLUMN {column_name} {suffix}", None
+
+            match = re.match(
+                r"ALTER TABLE\s+`?([A-Za-z0-9_]+)`?\s+ADD INDEX IF NOT EXISTS\s+`?([A-Za-z0-9_]+)`?\s*(\(.*\))",
+                compact,
+                re.IGNORECASE,
+            )
+            if match:
+                table_name, index_name, index_expr = match.group(1), match.group(2), match.group(3)
+                if _index_exists(table_name, index_name):
+                    return None, f"index {table_name}.{index_name} already exists"
+                return f"ALTER TABLE {table_name} ADD INDEX {index_name} {index_expr}", None
+
+            return stmt, None
+
+        def _is_benign_ddl_error(exc: Exception) -> bool:
+            text = str(exc).lower()
+            return (
+                "duplicate key name" in text
+                or "duplicate column name" in text
+                or "already exists" in text
+            )
+
         def _exec_multi(ddl: str):
             for stmt in ddl.split(";"):
                 s = stmt.strip()
                 if not s:
                     continue
+                try:
+                    normalized_stmt, skip_reason = _normalize_mysql_ddl(s)
+                except Exception as exc:
+                    logger.debug("DDL normalize failed: %s (%s)", s[:60], exc, exc_info=True)
+                    normalized_stmt, skip_reason = s, None
+                if normalized_stmt is None:
+                    logger.debug("DDL skip benign: %s (%s)", s[:60], skip_reason)
+                    continue
+                s = normalized_stmt
                 # 在 CREATE TABLE 语句末尾插入 DATA DIRECTORY
                 if s.upper().startswith("CREATE TABLE") and data_dir_clause:
                     last_paren = s.rfind(")")
@@ -310,7 +390,10 @@ class SharedMysqlStore(MysqlReadMixin):
                         conn.execute(sa_text(s))
                         conn.commit()
                 except Exception as e:
-                    logger.warning("DDL skip: %s (%s)", s[:60], e)
+                    if _is_benign_ddl_error(e):
+                        logger.debug("DDL skip benign: %s (%s)", s[:60], e)
+                    else:
+                        logger.warning("DDL skip: %s (%s)", s[:60], e)
         _exec_multi(_DDL_NO_TASK)
         if self.mode in ("complete", "autonomous"):
             _exec_multi(_DDL_WITH_TASK_V2)

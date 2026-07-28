@@ -41,6 +41,10 @@ def _validation_from_dict(v: dict) -> Validation:
         kind=str(v.get("kind") or ""),
         target=str(v.get("target") or ""),
         summary=str(v.get("summary") or ""),
+        function_file=str(v.get("function_file") or ""),
+        function_name=str(v.get("function_name") or ""),
+        function_start_line=int(v.get("function_start_line") or 0),
+        function_end_line=int(v.get("function_end_line") or 0),
     )
 
 _DDL = {
