@@ -106,17 +106,22 @@ class TaintRecord:
 
 @dataclass
 class Validation:
-    """一条校验记录: 污点为左值, 记录校验类型(运算符)与右值(代码字面量)。
+    """一条校验点摘要。
 
-    由 LLM 据本函数代码行输出, 脚本核对 (运算符合法 + 右值为标识符/字面量) 后入链。
-    不允许重述调用链传来的前置校验 — 只报本函数内新执行的校验。"""
-    left: str = ""      # 被校验的污点符号 (左值; 当前跟踪的污点或其字段/成员)
-    op: str = ""        # 校验类型 (运算符): == != <= >= < >
-    right: str = ""     # 右值: 代码字面量 (宏/枚举/nullptr/数值/常量, 可带 ::)
-    line: int = 0       # 校验所在代码行
+    dataflow_v2 的传播阶段只记录“这里有校验、校验了谁、校验大概做了什么”，
+    不再要求 LLM 产出精确表达式。"""
+    line: int = 0
+    kind: str = ""
+    target: str = ""
+    summary: str = ""
 
     def to_dict(self) -> dict:
-        return {"left": self.left, "op": self.op, "right": self.right, "line": self.line}
+        return {
+            "line": self.line,
+            "kind": self.kind,
+            "target": self.target,
+            "summary": self.summary,
+        }
 
 
 @dataclass

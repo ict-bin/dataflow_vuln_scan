@@ -893,32 +893,18 @@ def _session_path(sessions_dir: Path, depth: int, func_name: str, taint_name: st
 
 
 def _validation_sig(validations: list[Validation]) -> str:
-    """前置校验签名: 规范化为 (left|op|right) token 集合。
-
-    校验由 LLM 据代码行输出 (left=污点, op=运算符, right=代码字面量), 脚本核对后入链。
-    同一校验逐轮稳定 (值来自代码字面量, 不再漂移)。非合规 (运算符非法/右值非字面量) 丢弃。
-    """
+    """前置校验签名: 规范化为 (kind|target|summary) token 集合。"""
     toks = sorted(set(t for t in (_canon_validation(v) for v in validations) if t))
     return "|".join(toks)
 
-
-_VALID_OPS = {"==", "!=", "<=", ">=", "<", ">"}
-
-
 def _canon_validation(v: Validation) -> str | None:
-    """Validation -> (left|op|right) 规范 token; 非合规 (运算符非法/左值或右值非字面量) 丢弃。
-
-    left/right 取代码标识符 token (允许 :: / . / -> / 下划线/数字), 丢弃中文/游离描述。
-    nullptr/null 统一为 NULL。
-    """
-    op = (v.op or "").strip()
-    if op not in _VALID_OPS:
+    """Validation -> (kind|target|summary) 规范 token。"""
+    kind = (v.kind or "other").strip().lower() or "other"
+    target = _norm_ident(v.target)
+    summary = _norm_summary(v.summary)
+    if not target and not summary:
         return None
-    left = _norm_ident(v.left)
-    right = _norm_ident(v.right)
-    if not left or not right:
-        return None
-    return f"({left}|{op}|{right})"
+    return f"({kind}|{target}|{summary})"
 
 
 _IDENT_RE = re.compile(r"^[A-Za-z_][\w:.<>\[\]*]*$")
@@ -945,6 +931,12 @@ def _norm_ident(s: str) -> str:
     return t
 
 
+def _norm_summary(s: str) -> str:
+    if s is None:
+        return ""
+    return " ".join(str(s).strip().split())[:160]
+
+
 def _norm_taint_sig(name: str) -> str:
     """污点签名归一 (#13): 去隐式 this->/self-> 限定 + 尾部 (), 让 proxyBindAddr_ / this->proxyBindAddr_
     归一为同一污点 (方法上下文隐式 this), 供 find_processed_taint 去重命中, 终止 return_taint 循环。"""
@@ -963,7 +955,7 @@ def _dedup_validations(validations: list[Validation]) -> list[Validation]:
     seen: set[str] = set()
     out: list[Validation] = []
     for v in validations:
-        k = _canon_validation(v) or f"{v.left}::{v.op}::{v.right}::{v.line}"
+        k = _canon_validation(v) or f"{v.kind}::{v.target}::{v.summary}::{v.line}"
         if k not in seen:
             seen.add(k)
             out.append(v)

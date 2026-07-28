@@ -140,9 +140,11 @@ class TestPathBuilding(unittest.TestCase):
 class TestDedupAndFeedback(unittest.TestCase):
     def test_dedup_validations(self):
         from app.dataflow_v2.orchestrator import _dedup_validations
-        vs = [Validation(left="a", op="==", right="b"),
-               Validation(left="a", op="==", right="b"),
-               Validation(left="c", op="==", right="d")]
+        vs = [
+            Validation(line=10, kind="null_check", target="buf", summary="ensures buf is not null"),
+            Validation(line=10, kind="null_check", target="buf", summary="ensures buf is not null"),
+            Validation(line=20, kind="length_check", target="len", summary="checks len before copy"),
+        ]
         out = _dedup_validations(vs)
         self.assertEqual(len(out), 2)
 

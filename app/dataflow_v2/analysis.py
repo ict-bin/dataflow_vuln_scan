@@ -85,6 +85,75 @@ def _truncate_text_by_estimated_tokens(text: str, *, max_tokens: int, chars_per_
     return text[:max_chars]
 
 
+_VALIDATION_NAME_RE = _re.compile(
+    r"(check|verify|validate|saniti[sz]e|guard|assert|filter|bound|limit)",
+    _re.IGNORECASE,
+)
+
+
+def _format_validation_hint(v: Validation) -> str:
+    return (
+        f"- [{v.kind or 'other'}] {v.target or '(unknown)'}: "
+        f"{v.summary or '(no summary)'} @L{int(v.line or 0)}"
+    )
+
+
+def _collect_validation_hints(
+    pre_validations: list[Validation],
+    props: list[PropagationRecord],
+    *,
+    max_validations: int = 30,
+    max_functions: int = 30,
+) -> tuple[list[str], list[str]]:
+    validation_hints: list[str] = []
+    seen_validation_hints: set[str] = set()
+    for v in pre_validations:
+        if not (v.target or v.summary):
+            continue
+        hint = _format_validation_hint(v)
+        if hint in seen_validation_hints:
+            continue
+        seen_validation_hints.add(hint)
+        validation_hints.append(hint)
+        if len(validation_hints) >= max_validations:
+            break
+    if len(validation_hints) < max_validations:
+        for p in props:
+            for v in p.validations:
+                if not (v.target or v.summary):
+                    continue
+                hint = _format_validation_hint(v)
+                if hint in seen_validation_hints:
+                    continue
+                seen_validation_hints.add(hint)
+                validation_hints.append(hint)
+                if len(validation_hints) >= max_validations:
+                    break
+            if len(validation_hints) >= max_validations:
+                break
+
+    function_hints: list[str] = []
+    seen_function_hints: set[str] = set()
+    for p in props:
+        name = str(p.target_function or "").strip()
+        if not name:
+            continue
+        if not (p.validations or _VALIDATION_NAME_RE.search(name)):
+            continue
+        desc = str(p.description or "").strip()
+        hint = f"- {name} @L{int(getattr(p, 'call_line', 0) or 0)}"
+        if desc:
+            hint = f"{hint}: {desc}"
+        if hint in seen_function_hints:
+            continue
+        seen_function_hints.add(hint)
+        function_hints.append(hint)
+        if len(function_hints) >= max_functions:
+            break
+
+    return validation_hints, function_hints
+
+
 def _emit_v2_llm_json_parse_event(
     on_event: Callable[..., None] | None,
     *,
@@ -615,10 +684,10 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                 escape_via=escape_via,
                 _llm_said_external=llm_said_external,
                 validations=[Validation(
-                                 left=str(v.get("left") or v.get("condition") or ""),
-                                 op=str(v.get("op") or ""),
-                                 right=str(v.get("right") or v.get("content") or ""),
-                                 line=int(v.get("line") or 0))
+                                 line=int(v.get("line") or 0),
+                                 kind=str(v.get("kind") or "other"),
+                                 target=str(v.get("target") or ""),
+                                 summary=str(v.get("summary") or ""))
                              for v in (p.get("validations") or []) if isinstance(v, dict)],
                 description=str(p.get("description") or ""),
             ))
@@ -719,10 +788,26 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                     # propagation: 参数间传播 (如 memcpy src→dst)
                     if inf.get("propagation"):
                         prop.is_external_callee = False
-                    # validation: 校验描述 (外部函数推断, 弱信号; op 留空, 不入去重签名)
+                    # validation: 外部函数推断出的校验点摘要
                     if inf.get("validation"):
+                        val = inf.get("validation")
+                        if isinstance(val, dict):
+                            kind = str(val.get("kind") or "other")
+                            target = str(val.get("target") or prop.source_taint_name)
+                            summary = str(val.get("summary") or "")
+                            line = int(val.get("line") or 0)
+                        else:
+                            kind = "other"
+                            target = prop.source_taint_name
+                            summary = str(val or "")
+                            line = 0
                         prop.validations.append(
-                            Validation(left=prop.source_taint_name, op="", right=str(inf.get("validation"))))
+                            Validation(
+                                line=line,
+                                kind=kind,
+                                target=target,
+                                summary=summary,
+                            ))
                     self.on_event("v2_external_callee_inferred",
                                   function=prop.target_function,
                                   caller=func.name,
@@ -961,9 +1046,9 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
             + "\n".join(lines) + "\n\n"
             "对每个函数输出 JSON (在一个 JSON 数组中):\n"
             '- 能推断: {"function": "strncpy", "inferable": true, '
-            '"propagation": "dst<-src", "validation": "copy length constrained"}\n'
+            '"propagation": "dst<-src", "validation": {"kind": "length_check", "target": "src", "summary": "copy length constrained", "line": 0}}\n'
             '  * propagation: 参数间传播 "dst<-src" (如 memcpy: src→dst)\n'
-            '  * validation: 校验描述 (如 "strncpy 限制拷贝长度")\n'
+            '  * validation: 校验点摘要对象 {kind, target, summary, line}\n'
             '- 不能推断: {"function": "MSG_Proc", "inferable": false}\n\n'
             '输出格式: ```json\n[{"function": "...", ...}, ...]\n```'
         )
@@ -1085,7 +1170,11 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                           f"名字 {taint_params.names}\n"
                           "注意：即使上游已经传入了污点参数，也必须在当前函数内重新判断这些参数是否真的属于外部攻击者可控制的输入；"
                           "只对可被外部攻击者控制的内容继续标注和跟踪，不能默认所有传入参数都要作为污点，所有外部攻击者无法控制的内容都不要标注和跟踪，所有污点中，那些不太可能造成安全危险的污点也不要标记和跟踪。")
-        pre_val_text = "\n".join(f"- {v.left} {v.op} {v.right} (行 {v.line})" for v in pre_validations if v.left and v.op) or "(无)"
+        pre_val_text = "\n".join(
+            _format_validation_hint(v)
+            for v in pre_validations
+            if v.target or v.summary
+        ) or "(无)"
         return (
             f"# 阶段：单函数污点传播分析 Fork\n\n"
             f"**重要**: 本 session 继承了父函数的分析历史。你只分析 **当前函数体** "
@@ -1097,7 +1186,7 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
             f"如果目标函数和传入的污点，不太可能造成安全问题，或者目标函数功能是没有危险的，也不需要跟踪，也不要输出到最终结果,只有值得接下来分析的污点和目标函数，才需要输出到最终结果中。\n\n"
             f"如果代码是二进制逆向的代码，或者识别的target_function是函数指针之类（或者是变量），需要识别所有可能的函数指针（有必要请读取原始文件），不要直接输出逆向的回调变量，需要输出的是回调变量的函数，如果有多个可能性，每一种可能性都需要输出（同样需要遵守有危险的污点才记录的标准）\n\n"
             f"入口污点: {taint_desc}\n\n"
-            f"## 前置校验链 (从根到本函数已累积)\n{pre_val_text}\n\n"
+            f"## 校验提醒（从根到本函数已累积，识别可能不准确，仅供参考）\n{pre_val_text}\n\n"
             f"## 函数体\n```c\n{body}\n```\n\n"
             f"按系统提示词要求输出 JSON (description/self_contained/taints/propagations)。"
         )
@@ -1158,12 +1247,19 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
         taints = store.list_taints_in_function(func.func_id)
         props = store.list_propagations_from(func.func_id)
         dataflow_text = self._format_taint_context(func, taint_params, ctx, taints, props, store)
+        validation_hints, function_hints = _collect_validation_hints(ctx.pre_validations, props)
+        validation_hint_text = "\n".join(validation_hints) or "(无)"
+        function_hint_text = "\n".join(function_hints) or "(无)"
         prompt = (
             f"# 阶段：漏洞挖掘 Fork\n\n以上是整条调用链的污点分析历史 (从根函数到本函数)。\n"
             f"现在请基于全链上下文, 判断**本函数** `{func.file}::{func.name}` 内是否存在漏洞。\n"
             f"目标函数: `{func.file}::{func.name}` (行 {func.start_line}-{func.end_line})\n"
             f"源码绝对根目录: `{self.source_root}`。`{func.file}` 是相对该根目录的源码路径；如果需要使用 read/find 读取源码，请基于这个绝对根目录定位文件，不要基于当前工作目录拼接路径。\n"
             f"污点: 位置 {taint_params.positions} 签名 {taint_params.signature} 名字 {taint_params.names}\n\n"
+            "## 校验提醒（识别可能不准确，仅供参考）\n"
+            f"### 可能相关的校验点（最多 30 个）\n{validation_hint_text}\n\n"
+            f"### 可能涉及校验的函数/调用点（最多 30 个）\n{function_hint_text}\n\n"
+            "请重点核对这些校验是否真的覆盖危险参数、是否发生在危险操作之前、是否只是部分校验或可被绕过。\n\n"
             "## 本函数污点分析摘要\n"
             f"```markdown\n{_truncate_text_by_estimated_tokens(dataflow_text, max_tokens=30000)}\n```\n\n"
             "结合链上 callee 的行为 (如返回借用指针/分配/不释放等), 判断本函数是否存在漏洞。输出 JSON: {\"findings\":[]}。"
@@ -1415,12 +1511,23 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                               props: list[PropagationRecord],
                               store: DataflowStore | None = None) -> str:
         from .function_extractor import read_function_body
-        pre_val = "\n".join(f"- {v.left} {v.op} {v.right} (行 {v.line})" for v in ctx.pre_validations if v.left and v.op) or "(无)"
+        pre_val = "\n".join(
+            _format_validation_hint(v)
+            for v in ctx.pre_validations
+            if v.target or v.summary
+        ) or "(无)"
+        validation_hints, function_hints = _collect_validation_hints(ctx.pre_validations, props)
         func_body = read_function_body(self.source_root, func, max_lines=4000)
         lines = [f"## 函数: {func.file}::{func.name} (行 {func.start_line}-{func.end_line})",
                  f"功能: {func.description or '(待分析)'}",
                  f"入口污点: 位置 {tp.positions} 签名 {tp.signature} 名字 {tp.names}",
-                 f"前置校验链:\n{pre_val}", "",
+                 "校验提醒（识别可能不准确，仅供参考）:",
+                 f"前置校验摘要:\n{pre_val}",
+                 "可能相关的校验点:",
+                 "\n".join(validation_hints) or "(无)",
+                 "可能涉及校验的函数/调用点:",
+                 "\n".join(function_hints) or "(无)",
+                 "",
                  "## 函数体源码:",
                  f"```c\n{func_body}\n```", "",
                  "## 污点变量:"]
