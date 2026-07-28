@@ -28,7 +28,8 @@ class DagflowOrchestrator:
                  n_workers: int = 4, task_id: str = "",
                  cancel_event: threading.Event | None = None,
                  tracker_dispatcher: Any = None,
-                 graph_recorder: Any = None) -> None:
+                 graph_recorder: Any = None,
+                 on_analyzed: Callable[[str, str, str], None] | None = None) -> None:
         self.store = store
         self.analyze_fn = analyze_fn
         self.func_lookup = func_lookup
@@ -38,6 +39,7 @@ class DagflowOrchestrator:
         self.cancel_event = cancel_event
         self.tracker_dispatcher = tracker_dispatcher  # P5: escape/indirect 调度
         self.graph_recorder = graph_recorder
+        self.on_analyzed = on_analyzed  # (func_id, taint_sig, func_name) 回调: 跟踪中触发并行挖掘
         self._wq: WorkQueue | None = None
 
     def run(self, root_func, root_taint: str) -> None:
@@ -69,6 +71,13 @@ class DagflowOrchestrator:
         dag, is_fresh, fname = self._analyze_or_replay(item.target_func, item.target_taint, item.depth)
         if dag is not None and is_fresh:
             self._emit_followups(dag, caller_func_id=item.origin_func, depth=item.depth, func_name=fname)
+            # 跟踪中触发并行挖掘: 本 (func, taint) 就绪? 调用者就绪?
+            if self.on_analyzed:
+                try:
+                    self.on_analyzed(item.target_func, item.target_taint, fname)
+                except Exception:
+                    logger.warning("on_analyzed callback failed func=%s taint=%s",
+                                   fname, item.target_taint, exc_info=True)
 
     def _analyze_or_replay(self, func_id: str, taint: str, depth: int = 0) -> tuple[TaintDAG | None, bool, str]:
         """(func, taint): 未分析 -> analyze (产 DAG+存); 已分析 -> 加载已存 DAG (重放)。返回 (dag, is_fresh, func_name)。"""

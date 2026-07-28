@@ -192,8 +192,12 @@ class DagflowPipeline:
             self._mysql_url, "dagflow", self.source_root, task_id,
             project_id=getattr(self, 'task_id', '') and getattr(self.config, 'project_id', '') or '') \
             if hasattr(self, '_mysql_url') and self._mysql_url else None
-        store = DagflowStore(nfs_run, mysql_store=mysql_store)  # dagflow.db -> run/dagflow/ (NFS, 持久)
-        # 清空旧数据 (restart 时 dagflow.db 在 NFS 持久 + MySQL 双写, 需清两处防秒过)
+        # dagflow.db 放 /tmp (本地盘) — NFS 上 SQLite 并发写会损坏 (database disk image is malformed)
+        # MySQL 双写保证持久性; pipeline 每次 restart 都清空 dagflow.db, 无需 NFS 持久
+        _local_dag = Path(f"/tmp/dagflow_{task_id}")
+        _local_dag.mkdir(parents=True, exist_ok=True)
+        store = DagflowStore(_local_dag, mysql_store=mysql_store)  # dagflow.db -> /tmp (local, no NFS corruption)
+        # 清空旧数据 (restart 时 dagflow.db 在 /tmp + MySQL 双写, 需清两处防秒过)
         store._exec("DELETE FROM dag_processed_taints")
         store._exec("DELETE FROM taint_dag_nodes")
         store._exec("DELETE FROM taint_dag_edges")
@@ -211,15 +215,17 @@ class DagflowPipeline:
                     logger.debug("[dagflow] clear MySQL %s: %s", table, str(e)[:80])
             logger.info("[dagflow] cleared stale MySQL dag tables")
         logger.info("[dagflow] cleared stale dagflow.db data")
-        sessions_dir = epoch_dir / "sessions"  # sessions -> epoch /tmp (与 V2 一致, 大文件 ephemeral)
-        functions_db = epoch_dir / "dataflow-v2" / "functions.db"  # functions.db -> epoch (重建, 与 V2 一致)
-        (epoch_dir / "dataflow-v2").mkdir(parents=True, exist_ok=True)
+        sessions_dir = epoch_dir / "sessions"  # sessions -> NFS (debugging 用, append-only 无并发写问题)
+        # functions.db 放 /tmp (本地盘) — NFS 上 SQLite 并发写会损坏
+        (_local_dag / "dataflow-v2").mkdir(parents=True, exist_ok=True)
+        functions_db = _local_dag / "dataflow-v2" / "functions.db"  # /tmp, local
         # V2 DataflowStore 用于 function_extractor 按需索引 (共享, 不用其模式逻辑)
+        # functions.db 放 /tmp (与 dagflow.db 一致, 避免 NFS SQLite 损坏)
         v2_store = None
         try:
             from ..dataflow_v2.store import DataflowStore
-            v2_store = DataflowStore(epoch_dir / "dataflow-v2", mysql_store=mysql_store)
-            logger.info("[dagflow] v2_store OK: %s", epoch_dir / "dataflow-v2")
+            v2_store = DataflowStore(_local_dag / "dataflow-v2", mysql_store=mysql_store)
+            logger.info("[dagflow] v2_store OK: %s", _local_dag / "dataflow-v2")
         except Exception as e:
             logger.warning("[dagflow] v2_store FAILED: %s", e)
         func_index = FuncIndex(self.source_root, functions_db, v2_store, mysql_store=mysql_store)
@@ -261,8 +267,10 @@ class DagflowPipeline:
                                       root_function=root_name)
             graph_rec.start_run()
 
-            # ── 阶段 1: taint 跟踪 ──
-            logger.info("[dagflow] PHASE 1 START: taint tracking, root=%s", root_name)
+            # ── 阶段 1: taint 跟踪 + 并行挖掘 (interleaved) ──
+            # 设计: 某 (func, taint) 的外传链全部已分析即立即触发挖掘 (per-function 触发)
+            # 不是"全部 tracking 完成后才挖" — 挖掘与跟踪并行, 通过 on_analyzed 回调驱动
+            logger.info("[dagflow] PHASE 1 START: taint tracking (mining interleaved), root=%s", root_name)
             analyzer = TaintAnalyzer(config=self.config, sessions_dir=sessions_dir,
                                       on_event=self.on_event, task_id=task_id,
                                       func_lookup=func_index.get_by_name,
@@ -287,7 +295,7 @@ class DagflowPipeline:
             # tracker reader_finder/function_resolver: LLM+v2_db 找读者/解析间接 (生产实现)
             from .reader_finder import ReaderFinder
             from .function_resolver import FunctionResolver
-            v2_db_dir = epoch_dir / "dataflow-v2"
+            v2_db_dir = _local_dag / "dataflow-v2"
             rf = ReaderFinder(config=self.config, source_root=self.source_root,
                               v2_db_dir=v2_db_dir, sessions_dir=sessions_dir,
                               task_id=task_id, on_event=self.on_event,
@@ -305,13 +313,65 @@ class DagflowPipeline:
                 on_enqueue=lambda fid, t: orch._wq.put(_make_callee_item(fid, t)),
                 on_event=self.on_event,
                 reader_finder=rf.find, function_resolver=fr_.resolve)
+
+            # ── 挖掘基础设施 (与跟踪并行, 通过 on_analyzed 回调驱动) ──
+            _mine_workers = max(1, int(getattr(self.config, "callee_concurrency", 4) or 4))
+            _mine_pool = ThreadPoolExecutor(max_workers=_mine_workers)
+            _mined_set: set[tuple[str, str]] = set()
+            _mine_lock = threading.Lock()
+            _mine_count = [0]
+            miner = MiningAgent(config=self.config, store=store, sessions_dir=sessions_dir,
+                                vuln_store=vuln_store, run_id=task_id,
+                                func_lookup=func_index.get_by_name,
+                                on_event=self.on_event, task_id=task_id,
+                                graph_recorder=graph_rec)
+            miner.cancel_event = self.cancel_event
+
+            def _mine_one(func, taint_sig):
+                """挖掘单个 (func, taint) — 在挖掘线程池或 fallback 中调用。"""
+                try:
+                    fs = miner.mine(func, taint_sig)
+                    with _mine_lock:
+                        _mine_count[0] += len(fs)
+                except Exception as e:
+                    logger.exception("mine %s/%s failed: %s", func.name, taint_sig, e)
+
+            def _try_mine(func_id, taint_sig):
+                """检查就绪状态; 就绪则提交到挖掘池 (不阻塞跟踪)。"""
+                with _mine_lock:
+                    if (func_id, taint_sig) in _mined_set:
+                        return
+                func = func_index.get_by_id(func_id)
+                if func is None:
+                    return
+                # 就绪 = 无传出 callee 或所有传出 callee 目标已分析
+                if not trigger.is_ready(store, func_id, taint_sig, func_index.get_by_name):
+                    return  # 未就绪 — 等 callee 分析完后 on_analyzed 重试
+                # double-check lock: 确保只提交一次
+                with _mine_lock:
+                    if (func_id, taint_sig) in _mined_set:
+                        return
+                    _mined_set.add((func_id, taint_sig))
+                logger.info("[dagflow-mine] READY → submit: func=%s taint=%s", func.name, taint_sig)
+                _mine_pool.submit(_mine_one, func, taint_sig)
+
+            def _on_analyzed(func_id, taint_sig, func_name):
+                """每次 fresh 分析后调用: 检查本 (func,taint) + 调用者是否就绪。"""
+                # 1. 本 (func, taint) 就绪? (叶子或所有 callee 已分析)
+                _try_mine(func_id, taint_sig)
+                # 2. 调用者就绪? (本 callee 分析完可能使其调用者的最后未分析传出点变就绪)
+                if func_name:
+                    for caller_fid, caller_taint in store.get_callers(func_name):
+                        _try_mine(caller_fid, caller_taint)
+
             # 暴露 orch 给 on_enqueue (run 后可用)
             orch = DagflowOrchestrator(
                 store=store, analyze_fn=analyze_fn,
                 func_lookup=func_index.get_by_name, on_event=self.on_event,
-                n_workers=max(1, int(getattr(self.config, "callee_concurrency", 4) or 4)),  # DAG 会话比 V2 轻, 并发度 >= V2
+                n_workers=max(1, int(getattr(self.config, "callee_concurrency", 4) or 4)),
                 task_id=task_id, cancel_event=self.cancel_event,
-                tracker_dispatcher=dispatcher, graph_recorder=graph_rec)
+                tracker_dispatcher=dispatcher, graph_recorder=graph_rec,
+                on_analyzed=_on_analyzed)
             orch._func_lookup_by_id = func_index.get_by_id
 
             taints = getattr(self.config, "taint_details", []) or [{"name": "auto"}]
@@ -326,40 +386,26 @@ class DagflowPipeline:
                 self._emit("v2_dagflow_phase", phase="no_root_func",
                            root=root_name, task_id=task_id)
 
-            # ── 阶段 2: 挖掘 (传出点就绪的 (func,taint)) ──
-            logger.info("[dagflow] PHASE 2 START: vuln mining, candidates=%d", len(list(store.list_analyzed())))
-            miner = MiningAgent(config=self.config, store=store, sessions_dir=sessions_dir,
-                                vuln_store=vuln_store, run_id=task_id,
-                                func_lookup=func_index.get_by_name,
-                                on_event=self.on_event, task_id=task_id,
-                                graph_recorder=graph_rec)
-            miner.cancel_event = self.cancel_event
-            total_findings = 0
-            # 多轮: 跟踪产新 DAG 后传出点就绪状态变化; 简化为单轮 (跟踪完成后挖一轮)
-            # 挖掘会话互相独立 (每个 (func,taint) 独立 agent), 可并行 (设计 §10)
-            _mine_workers = max(1, int(getattr(self.config, "callee_concurrency", 4) or 4))
-            _mine_lock = threading.Lock()
-            _candidates = []
+            # ── 阶段 2: 等待挖掘完成 + 残留补挖 ──
+            # 挖掘已在跟踪过程中通过 on_analyzed 回调并行触发 (per-function 就绪即挖)
+            logger.info("[dagflow] PHASE 2: waiting for interleaved mining to complete...")
+            _mine_pool.shutdown(wait=True)
+            # 残留补挖: 跟踪期间未就绪 (callee 失败/外部) 的 (func,taint) 现在挖
+            _remaining = 0
             for fid, ts in list(store.list_analyzed()):
-                func = func_index.get_by_id(fid)
-                if func is None:
-                    logger.warning("[dagflow-mine] SKIP (func not indexed): fid=%s taint=%s", fid[:12], ts)
-                    continue
-                if trigger.is_ready(store, fid, ts, func_index.get_by_name):
-                    _candidates.append((func, ts))
-            def _mine_one(args):
-                func, ts = args
-                try:
-                    fs = miner.mine(func, ts)
+                if (fid, ts) not in _mined_set:
+                    func = func_index.get_by_id(fid)
+                    if func is None:
+                        continue
+                    _remaining += 1
                     with _mine_lock:
-                        nonlocal_ref[0] += len(fs)
-                except Exception as e:
-                    logger.exception("mine %s/%s failed: %s", func.name, ts, e)
-            nonlocal_ref = [0]
-            with ThreadPoolExecutor(max_workers=_mine_workers) as pool:
-                list(pool.map(_mine_one, _candidates))
-            total_findings = nonlocal_ref[0]
-            logger.info("[dagflow] PHASE 2 DONE: findings=%d", total_findings)
+                        if (fid, ts) in _mined_set:
+                            continue
+                        _mined_set.add((fid, ts))
+                    _mine_one(func, ts)  # 同步挖 (pool 已关闭)
+            total_findings = _mine_count[0]
+            logger.info("[dagflow] PHASE 2 DONE: findings=%d (remaining_mined=%d, total_mined=%d)",
+                        total_findings, _remaining, len(_mined_set))
             self._emit("v2_dagflow_phase", phase="mining_done", findings=total_findings, task_id=task_id)
             self._emit("task_end", task_id=task_id)
             graph_rec.finish_run("passed")
