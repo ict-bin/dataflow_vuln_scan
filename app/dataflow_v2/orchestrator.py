@@ -138,11 +138,13 @@ class AnalysisCallbacks:
 class ChainStep:
     """路径链上一步: 待分析的 callee + 其污点参数 + 截至该步累积的校验。"""
     __slots__ = ("func", "taint_params", "validations", "call_line", "prop_id",
-                "branch_group_id", "branch_arm_id")
+                "branch_group_id", "branch_arm_id", "source_prop_ids", "source_call_lines")
 
     def __init__(self, func: FunctionRecord, taint_params: TaintParamInfo,
                 validations: list[Validation], call_line: int = 0, prop_id: str = "",
-                branch_group_id: str = "", branch_arm_id: str = "") -> None:
+                branch_group_id: str = "", branch_arm_id: str = "",
+                source_prop_ids: list[str] | None = None,
+                source_call_lines: list[int] | None = None) -> None:
         self.func = func
         self.taint_params = taint_params
         self.validations = validations
@@ -150,6 +152,8 @@ class ChainStep:
         self.prop_id = prop_id
         self.branch_group_id = branch_group_id
         self.branch_arm_id = branch_arm_id
+        self.source_prop_ids = list(source_prop_ids or ([prop_id] if prop_id else []))
+        self.source_call_lines = list(source_call_lines or ([call_line] if call_line else []))
 
 
 class DfsOrchestrator:
@@ -415,17 +419,18 @@ class DfsOrchestrator:
             bridge_edge_id = step.prop_id if step.prop_id.startswith("bridge::") else ""
             graph_store = self._graph_store()
             if graph_store is not None:
-                graph_store.update_task_graph_edge(
-                step.prop_id,
-                status="running",
-                target_node_id=self._graph_node_id(step.func),
-                target_func_id=step.func.func_id,
-                target_function_resolved=step.func.name,
-                target_file=step.func.file,
-                reason_code="",
-                reason_message="",
-                reason_source="",
-                )
+                for edge_id in self._step_edge_ids(step):
+                    graph_store.update_task_graph_edge(
+                        edge_id,
+                        status="running",
+                        target_node_id=self._graph_node_id(step.func),
+                        target_func_id=step.func.func_id,
+                        target_function_resolved=step.func.name,
+                        target_file=step.func.file,
+                        reason_code="",
+                        reason_message="",
+                        reason_source="",
+                    )
                 graph_store.update_task_graph_node(
                     self._graph_node_id(step.func),
                     status="running",
@@ -438,13 +443,14 @@ class DfsOrchestrator:
             except BaseException:
                 if graph_store is not None:
                     cancelled = self._cancel_requested()
-                    graph_store.update_task_graph_edge(
-                        step.prop_id,
-                        status="cancelled" if cancelled else "failed",
-                        reason_code="task_cancelled" if cancelled else "child_process_failed",
-                        reason_message="task cancellation interrupted child process" if cancelled else f"{step.func.name} child process failed",
-                        reason_source="cancel" if cancelled else "orchestrator",
-                    )
+                    for edge_id in self._step_edge_ids(step):
+                        graph_store.update_task_graph_edge(
+                            edge_id,
+                            status="cancelled" if cancelled else "failed",
+                            reason_code="task_cancelled" if cancelled else "child_process_failed",
+                            reason_message="task cancellation interrupted child process" if cancelled else f"{step.func.name} child process failed",
+                            reason_source="cancel" if cancelled else "orchestrator",
+                        )
                     graph_store.update_task_graph_node(
                         self._graph_node_id(step.func),
                         status="cancelled" if cancelled else "failed",
@@ -455,17 +461,18 @@ class DfsOrchestrator:
             accumulated.extend(child_fb)
             if graph_store is not None:
                 cancelled = self._cancel_requested()
-                graph_store.update_task_graph_edge(
-                    step.prop_id,
-                    status="cancelled" if cancelled else "done",
-                    target_node_id=self._graph_node_id(step.func),
-                    target_func_id=step.func.func_id,
-                    target_function_resolved=step.func.name,
-                    target_file=step.func.file,
-                    reason_code="task_cancelled" if cancelled else "",
-                    reason_message="task cancellation interrupted child completion" if cancelled else "",
-                    reason_source="cancel" if cancelled else "",
-                )
+                for edge_id in self._step_edge_ids(step):
+                    graph_store.update_task_graph_edge(
+                        edge_id,
+                        status="cancelled" if cancelled else "done",
+                        target_node_id=self._graph_node_id(step.func),
+                        target_func_id=step.func.func_id,
+                        target_function_resolved=step.func.name,
+                        target_file=step.func.file,
+                        reason_code="task_cancelled" if cancelled else "",
+                        reason_message="task cancellation interrupted child completion" if cancelled else "",
+                        reason_source="cancel" if cancelled else "",
+                    )
                 graph_store.update_task_graph_node(
                     self._graph_node_id(step.func),
                     status="cancelled" if cancelled else "done",
@@ -641,7 +648,64 @@ class DfsOrchestrator:
                         new_paths.append(base + [step])
                 if new_paths:
                     paths = new_paths
-        return [p for p in paths if p]  # 剔除空链
+        return self._merge_equivalent_paths([p for p in paths if p])  # 剔除空链并合并重复递归目标
+
+    def _step_edge_ids(self, step: ChainStep) -> list[str]:
+        edge_ids = [edge_id for edge_id in step.source_prop_ids if edge_id]
+        if edge_ids:
+            return edge_ids
+        return [step.prop_id] if step.prop_id else []
+
+    def _merge_steps(self, steps: list[ChainStep]) -> list[ChainStep]:
+        merged: list[ChainStep] = []
+        by_func_id: dict[str, ChainStep] = {}
+        for step in steps:
+            existing = by_func_id.get(step.func.func_id)
+            if existing is None:
+                clone = ChainStep(
+                    step.func,
+                    TaintParamInfo(
+                        positions=sorted(set(step.taint_params.positions)),
+                        signature=step.taint_params.signature,
+                        names=sorted(set(step.taint_params.names)),
+                    ),
+                    _dedup_validations(list(step.validations)),
+                    call_line=step.call_line,
+                    prop_id=step.prop_id,
+                    branch_group_id=step.branch_group_id,
+                    branch_arm_id=step.branch_arm_id,
+                    source_prop_ids=list(self._step_edge_ids(step)),
+                    source_call_lines=sorted({line for line in step.source_call_lines if line > 0}),
+                )
+                merged.append(clone)
+                by_func_id[step.func.func_id] = clone
+                continue
+            existing.taint_params.positions = sorted(set(existing.taint_params.positions) | set(step.taint_params.positions))
+            existing.taint_params.names = sorted(set(existing.taint_params.names) | set(step.taint_params.names))
+            existing.taint_params.signature = _merge_taint_signatures(existing.taint_params.signature, step.taint_params.signature)
+            existing.validations = _dedup_validations(list(existing.validations) + list(step.validations))
+            existing.source_prop_ids = sorted(set(existing.source_prop_ids) | set(self._step_edge_ids(step)))
+            existing.source_call_lines = sorted({line for line in [*existing.source_call_lines, *step.source_call_lines] if line > 0})
+            candidate_lines = [line for line in [existing.call_line, step.call_line] if line > 0]
+            existing.call_line = min(candidate_lines) if candidate_lines else 0
+            if not existing.prop_id and step.prop_id:
+                existing.prop_id = step.prop_id
+        return merged
+
+    def _merge_equivalent_paths(self, paths: list[list[ChainStep]]) -> list[list[ChainStep]]:
+        merged_paths: list[list[ChainStep]] = []
+        path_index: dict[tuple[str, ...], int] = {}
+        for path in paths:
+            collapsed = self._merge_steps(path)
+            key = tuple(step.func.func_id for step in collapsed)
+            idx = path_index.get(key)
+            if idx is None:
+                path_index[key] = len(merged_paths)
+                merged_paths.append(collapsed)
+                continue
+            existing_path = merged_paths[idx]
+            merged_paths[idx] = self._merge_steps(existing_path + collapsed)
+        return merged_paths
 
     def _record_propagation_edge(self, func: FunctionRecord, prop: PropagationRecord, depth: int) -> None:
         graph_store = self._graph_store()
@@ -744,8 +808,7 @@ class DfsOrchestrator:
         graph_store = self._graph_store()
         if graph_store is None:
             return
-        edge_id = step.prop_id
-        if edge_id.startswith("bridge::"):
+        for edge_id in self._step_edge_ids(step):
             graph_store.update_task_graph_edge(
                 edge_id,
                 status="scheduled",
@@ -754,15 +817,6 @@ class DfsOrchestrator:
                 target_function_resolved=step.func.name,
                 target_file=step.func.file,
             )
-            return
-        graph_store.update_task_graph_edge(
-            edge_id,
-            status="scheduled",
-            target_node_id=self._graph_node_id(step.func),
-            target_func_id=step.func.func_id,
-            target_function_resolved=step.func.name,
-            target_file=step.func.file,
-        )
 
     def _prop_to_steps(self, p: PropagationRecord) -> list[ChainStep]:
         """callee 传播 → ChainStep 列表 (唯一命中或多候选 fan-out)。
@@ -949,6 +1003,19 @@ def _norm_taint_sig(name: str) -> str:
             break
     t = t.rstrip("()")
     return t
+
+
+def _merge_taint_signatures(left: str, right: str) -> str:
+    parts = []
+    for value in (left, right):
+        normalized = _norm_taint_sig(value)
+        if normalized and normalized not in parts:
+            parts.append(normalized)
+    if not parts:
+        return ""
+    if len(parts) == 1:
+        return parts[0]
+    return "|".join(sorted(parts))
 
 
 def _dedup_validations(validations: list[Validation]) -> list[Validation]:

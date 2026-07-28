@@ -1320,7 +1320,9 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
             "## 校验提醒（识别可能不准确，仅供参考）\n"
             f"### 可能相关的校验点（最多 30 个）\n{validation_hint_text}\n\n"
             f"### 可能相关的调用点（最多 30 个）\n{function_hint_text}\n\n"
-            "请重点核对这些校验是否真的覆盖危险参数、是否发生在危险操作之前、是否只是部分校验或可被绕过。\n\n"
+            "请重点核对这些校验是否真的覆盖危险参数、是否发生在危险操作之前、是否只是部分校验或可被绕过。\n"
+            "尤其要关注路径可达性：不要把来自不同互斥分支、不同调用点、不同传播条件下的校验和危险操作简单合并。"
+            "只有当某个校验与危险操作位于同一条可达路径上，并且校验对象、时序与约束范围都真实覆盖危险参数时，才能认为该校验有效。\n\n"
             "## 本函数污点分析摘要\n"
             f"```markdown\n{_truncate_text_by_estimated_tokens(dataflow_text, max_tokens=30000)}\n```\n\n"
             "结合链上 callee 的行为 (如返回借用指针/分配/不释放等), 判断本函数是否存在漏洞。输出 JSON: {\"findings\":[]}。"
@@ -1597,8 +1599,13 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
         lines.append("\n## 传播路径:")
         for p in props:
             tgt = p.target_function or "(外部变量)" if p.is_external else p.target_function
+            branch_note = ""
+            if p.branch_group_id or p.branch_arm_id:
+                branch_note = f" [branch {p.branch_group_id or '?'} / {p.branch_arm_id or '?'}]"
             lines.append(f"- {p.source_taint_name} → {tgt}({p.target_taint_name}) @L{p.call_line} "
-                         f"[{p.condition}] {p.description}")
+                         f"[{p.condition}]{branch_note} {p.description}")
+        if any(p.branch_group_id for p in props):
+            lines.append("\n注: 同一 branch group 下不同 arm 表示互斥路径，分析漏洞时必须先判断校验和危险操作是否位于同一条可达路径。")
         # callee 分析结果 (后序 mining 时, callee 已完成分析)
         if store is not None:
             for p in props:
