@@ -1227,11 +1227,12 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                           f"名字 {taint_params.names}\n"
                           "注意：即使上游已经传入了污点参数，也必须在当前函数内重新判断这些参数是否真的属于外部攻击者可控制的输入；"
                           "只对可被外部攻击者控制的内容继续标注和跟踪，不能默认所有传入参数都要作为污点，所有外部攻击者无法控制的内容都不要标注和跟踪，所有污点中，那些不太可能造成安全危险的污点也不要标记和跟踪。")
-        pre_val_text = "\n".join(
-            _format_validation_hint(v)
-            for v in pre_validations
-            if v.target or v.summary
-        ) or "(无)"
+        upstream_validation_hints, _ = _collect_validation_hints(
+            pre_validations,
+            [],
+            current_func=func,
+        )
+        pre_val_text = "\n".join(upstream_validation_hints) or "(无)"
         return (
             f"# 阶段：单函数污点传播分析 Fork\n\n"
             f"**重要**: 本 session 继承了父函数的分析历史。你只分析 **当前函数体** "
@@ -1243,7 +1244,10 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
             f"如果目标函数和传入的污点，不太可能造成安全问题，或者目标函数功能是没有危险的，也不需要跟踪，也不要输出到最终结果,只有值得接下来分析的污点和目标函数，才需要输出到最终结果中。\n\n"
             f"如果代码是二进制逆向的代码，或者识别的target_function是函数指针之类（或者是变量），需要识别所有可能的函数指针（有必要请读取原始文件），不要直接输出逆向的回调变量，需要输出的是回调变量的函数，如果有多个可能性，每一种可能性都需要输出（同样需要遵守有危险的污点才记录的标准）\n\n"
             f"入口污点: {taint_desc}\n\n"
-            f"## 校验提醒（从根到本函数已累积，识别可能不准确，仅供参考）\n{pre_val_text}\n\n"
+            "## 校验提醒（从根到本函数已累积，识别可能不准确，仅供参考）\n"
+            f"前置校验摘要（上游链路）:\n{pre_val_text}\n"
+            "当前函数内相关校验点:\n(待分析，请在输出中体现)\n"
+            "可能相关的调用点:\n(待分析，请在输出中体现)\n\n"
             f"## 函数体\n```c\n{body}\n```\n\n"
             f"按系统提示词要求输出 JSON (description/self_contained/taints/propagations)。"
         )
