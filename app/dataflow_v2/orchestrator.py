@@ -55,6 +55,7 @@ class AnalysisResult:
     description: str = ""        # 函数功能说明 (回写函数库)
     session_path: str = ""      # 本函数 taint 分析 fork session 路径 (供子函数/mining 继承链)
     return_taints: list[TaintRecord] = field(default_factory=list)  # 本函数 return 语句返回的污点
+    callee_return_taints: list[TaintRecord] = field(default_factory=list)  # 被调函数返回到当前函数局部变量的污点
     taint_failed: bool = False  # taint 分析全失败 (retry 用尽), 跳过 mining
     # 专注模式: LLM 合并传播+挖掘后, 标记的“最可能产生漏洞的兴趣点”
     #   [{target_function, taint_param, reason, line}] — 编排器只跟入这些点 (往深挖),
@@ -547,12 +548,16 @@ class DfsOrchestrator:
         if not self_contained and not result.taint_failed:
             self._run_llm(self.cbs.mine_vulns, self.store, func, taint_params, ctx, chain_session)
 
-        # 7) return_taints 回传: 对每个 callee 返回的新污点, 在当前函数启动新分析分支
+        # 7) 当前函数内的返回值污点回传:
+        # - 子函数真正 return 给当前函数的污点
+        # - 外部 callee 语义推断出的“返回值落到当前函数局部变量”的污点
+        # 这两类都只应在当前函数内继续扩散, 不能触发 depth=-1 的 caller 回溯。
         # #11: return_taint 带 entry_line (callee 调用点行); 若该污点本函数已持有 (escape 源头)
         #    则不回传重分析 — 否则形成冗余循环 (源头早有该污点, reader 回传=重复)
         # #13: taint_sig 归一 (去 this->/尾 ()) 让 proxyBindAddr_ / this->proxyBindAddr_ 去重命中
         my_taint_sigs = {_norm_taint_sig(t.name) for t in result.taints} | {_norm_taint_sig(n) for n in taint_params.names}
-        for rt in all_callee_return_taints:
+        local_return_taints = list(all_callee_return_taints) + list(result.callee_return_taints)
+        for rt in local_return_taints:
             rt_sig = _norm_taint_sig(rt.signature or rt.name)
             if self.store.find_processed_taint(func.func_id, rt_sig, pre_val_sig):
                 continue  # 已分析过此污点, 跳过
@@ -561,7 +566,7 @@ class DfsOrchestrator:
                     function=func.name, func_id=func.func_id[:10],
                     rt_name=rt.name, rt_sig=rt_sig, rt_raw_sig=rt.signature,
                     pre_val_sig=pre_val_sig[:60] if pre_val_sig else "(empty)",
-                    n_return_taints=len(all_callee_return_taints))
+                    n_return_taints=len(local_return_taints))
             except Exception as e:
                 logger.info("emit v2_step7_find_miss_debug failed (func=%s): %s", func.name, e)
             if rt_sig in my_taint_sigs:
@@ -627,8 +632,12 @@ class DfsOrchestrator:
             )
 
         # 8) 返回 (本函数校验, 本函数的 return_taints)
-        logger.info("[V2-orch] _process DONE func=%s depth=%d paths=%d return_taints=%d",
-                    func.name, depth, len(paths) if "paths" in dir() else 0, len(all_callee_return_taints))
+        logger.info("[V2-orch] _process DONE func=%s depth=%d paths=%d local_return_taints=%d caller_return_taints=%d",
+                    func.name,
+                    depth,
+                    len(paths) if "paths" in dir() else 0,
+                    len(local_return_taints),
+                    len(result.return_taints))
         return my_discovered, result.return_taints
 
     def _run_path(self, steps: list[ChainStep], base_accumulated: list[Validation],

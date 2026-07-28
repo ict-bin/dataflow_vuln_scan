@@ -696,8 +696,9 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
             prop.target_func_id = self._resolve_target_func_id(store, prop)
             validated_props.append(prop)
 
-        # parse return_taints
+        # parse return_taints: 仅表示“当前函数通过 return 返回给调用者的污点”
         return_taints: list[TaintRecord] = []
+        callee_return_taints: list[TaintRecord] = []
         for rt in parsed.get("return_taints") or []:
             if not isinstance(rt, dict):
                 continue
@@ -716,10 +717,10 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                 inf = inferred.get(prop.target_function)
                 if inf and inf.get("inferable"):
                     prop.is_external_callee = False
-                    # return_taint: 外部函数返回值携带污点
+                    # return_taint: 外部函数返回值携带污点, 仅在当前函数内继续传播
                     if inf.get("return_taint"):
                         rt_name = str(inf["return_taint"])
-                        return_taints.append(TaintRecord(
+                        callee_return_taints.append(TaintRecord(
                             func_id=func.func_id, name=rt_name,
                             signature=rt_name, file=func.file, function=func.name,
                             description=f"外部函数 {prop.target_function} 返回值携带污点 (LLM推断)"))
@@ -742,6 +743,7 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                               self_contained=self_contained, description=description,
                               session_path=str(fork_session),
                               return_taints=return_taints,
+                              callee_return_taints=callee_return_taints,
                               taint_failed=taint_failed)
 
     def _within_source_root(self, file: str) -> bool:

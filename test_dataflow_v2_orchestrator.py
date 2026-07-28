@@ -357,6 +357,98 @@ class TestReturnFollowupGraphEdges(unittest.TestCase):
             self.assertEqual(0, int(return_edges[0]["visible_in_tree"]))
 
 
+class TestRootReturnFollowupSemantics(unittest.TestCase):
+    def test_root_callee_return_taint_does_not_trigger_caller_followup(self):
+        with tempfile.TemporaryDirectory() as td:
+            store = DataflowStore(Path(td) / "run")
+            root = _func(store, "Root", file="root.c")
+            caller = _func(store, "Caller", file="caller.c")
+            analyzed: list[tuple[str, int]] = []
+
+            class _Cbs(AnalysisCallbacks):
+                def __init__(self):
+                    self.sessions_dir = Path(td) / "sessions"
+                    self.sessions_dir.mkdir(parents=True, exist_ok=True)
+                    self.source_root = td
+                    self.on_event = lambda *args, **kwargs: None
+
+                def analyze_function(self, store, func, taint_params, pre_validations, base_session, ctx):
+                    analyzed.append((func.name, ctx.depth))
+                    if func.name == "Root":
+                        return AnalysisResult(
+                            self_contained=True,
+                            description="Root",
+                            callee_return_taints=[
+                                TaintRecord(
+                                    func_id=func.func_id,
+                                    name="v64",
+                                    signature="v64",
+                                    file=func.file,
+                                    function=func.name,
+                                )
+                            ],
+                        )
+                    return AnalysisResult(self_contained=True, description=func.name)
+
+                def mine_vulns(self, store, func, taint_params, ctx, base_session=""):
+                    return 0
+
+            orch = DfsOrchestrator(store, _Cbs(), concurrent=False, max_depth=2)
+            with patch(
+                "app.dataflow_v2.function_extractor.read_function_body",
+                side_effect=lambda source_root, f, max_lines=4000: "Root(msg);" if f.func_id == caller.func_id else "",
+            ):
+                orch.run(root, TaintParamInfo([0], "msg_t*", ["msg"]))
+
+            self.assertEqual([("Root", 0), ("Root", 0)], analyzed)
+            store.close()
+
+    def test_root_return_taint_still_triggers_caller_followup(self):
+        with tempfile.TemporaryDirectory() as td:
+            store = DataflowStore(Path(td) / "run")
+            root = _func(store, "Root", file="root.c")
+            caller = _func(store, "Caller", file="caller.c")
+            analyzed: list[tuple[str, int]] = []
+
+            class _Cbs(AnalysisCallbacks):
+                def __init__(self):
+                    self.sessions_dir = Path(td) / "sessions"
+                    self.sessions_dir.mkdir(parents=True, exist_ok=True)
+                    self.source_root = td
+                    self.on_event = lambda *args, **kwargs: None
+
+                def analyze_function(self, store, func, taint_params, pre_validations, base_session, ctx):
+                    analyzed.append((func.name, ctx.depth))
+                    if func.name == "Root":
+                        return AnalysisResult(
+                            self_contained=True,
+                            description="Root",
+                            return_taints=[
+                                TaintRecord(
+                                    func_id=func.func_id,
+                                    name="ret_msg",
+                                    signature="ret_msg",
+                                    file=func.file,
+                                    function=func.name,
+                                )
+                            ],
+                        )
+                    return AnalysisResult(self_contained=True, description=func.name)
+
+                def mine_vulns(self, store, func, taint_params, ctx, base_session=""):
+                    return 0
+
+            orch = DfsOrchestrator(store, _Cbs(), concurrent=False, max_depth=2)
+            with patch(
+                "app.dataflow_v2.function_extractor.read_function_body",
+                side_effect=lambda source_root, f, max_lines=4000: "Root(msg);" if f.func_id == caller.func_id else "",
+            ):
+                orch.run(root, TaintParamInfo([0], "msg_t*", ["msg"]))
+
+            self.assertEqual([("Root", 0), ("Caller", -1)], analyzed)
+            store.close()
+
+
 class TestGraphUnresolvedTargetKind(unittest.TestCase):
     def test_external_tracker_miss_rewrites_edge_kind_to_unresolved_target(self):
         with tempfile.TemporaryDirectory() as td:
