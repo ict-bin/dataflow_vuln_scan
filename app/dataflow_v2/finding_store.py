@@ -81,6 +81,30 @@ def _mirror_finding_to_run_root(*, finding_dir: Path, vuln_root: Path) -> Path |
         return None
 
 
+def _mirror_finding_to_output(*, finding_dir: Path, vuln_root: Path) -> Path | None:
+    """Mirror a runtime finding directory to task-root output/vulnerabilities (NFS).
+
+    output/ 在 NFS 上, 跨 pod 可读 (platform-vuln / vuln-verify-v2 / API pod 都能读)。
+    run/epochs/NNNN 是符号链接到 worker pod 本地 /tmp, 其他 pod 读不到, 故上报给下游的
+    报告路径必须指向 output/, 不能是 run/epochs。
+    """
+    try:
+        parts = vuln_root.parts
+        if "run" not in parts or "epochs" not in parts:
+            return None
+        run_idx = parts.index("run")
+        task_root = Path(*parts[:run_idx])
+        out_dir = task_root / "output" / "vulnerabilities" / finding_dir.name
+        if out_dir.exists():
+            shutil.rmtree(out_dir, ignore_errors=True)
+        out_dir.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(finding_dir, out_dir)
+        return out_dir
+    except Exception:
+        logger.warning("mirror finding to output/vulnerabilities failed for %s", finding_dir, exc_info=True)
+        return None
+
+
 def persist_finding(
     *,
     graph_store: VulnScanStore,
@@ -136,6 +160,9 @@ def persist_finding(
         logger.warning("copy context session failed, write empty (src=%s): %s", context_session_path, e)
         (fdir / "context.jsonl").write_text("", encoding="utf-8")
     mirror_dir = _mirror_finding_to_run_root(finding_dir=fdir, vuln_root=vuln_root)
+    output_mirror = _mirror_finding_to_output(finding_dir=fdir, vuln_root=vuln_root)
+    # 上报/记录路径优先用 NFS output/ (跨 pod 可读); 退回 run/vulnerabilities 镜像; 再退回 epoch 本地 fdir
+    nfs_fdir = output_mirror if output_mirror else (mirror_dir if mirror_dir else fdir)
 
     _exploit = item.get("exploitability")
     expl_str = json.dumps(_exploit, ensure_ascii=False) if isinstance(_exploit, (dict, list)) else str(_exploit or "")
@@ -149,7 +176,7 @@ def persist_finding(
         evidence=str(item.get("evidence") or ""),
         exploitability=expl_str,
         confidence=float(item.get("confidence") or 0),
-        output_dir=str(fdir),
+        output_dir=str(nfs_fdir),
         code_snippet=str(item.get("code_snippet") or ""),
         code_explanation=str(item.get("code_explanation") or ""),
         fix_suggestion=str(item.get("fix_suggestion") or ""))
@@ -168,7 +195,7 @@ def persist_finding(
         "evidence": str(item.get("evidence") or ""),
         "exploitability": expl_str,
         "confidence": float(item.get("confidence") or 0),
-        "output_dir": str(fdir),
+        "output_dir": str(nfs_fdir),
         "code_snippet": str(item.get("code_snippet") or ""),
         "code_explanation": str(item.get("code_explanation") or ""),
         "fix_suggestion": str(item.get("fix_suggestion") or ""),
@@ -246,7 +273,7 @@ def persist_finding(
             )
 
     # intake 上报 (退避: 父任务 → 自身; 失败不影响)
-    _intake_report(run_id, task_id, source_root, fdir, rec, finding_id,
+    _intake_report(run_id, task_id, source_root, nfs_fdir, rec, finding_id,
                    cfg_project_id, cfg_task_name, cfg_parent_task_name,
                    cfg_parent_task_id, cfg_parent_task_type, cfg_task_origin_type, on_event,
                    graph_store=graph_store)
@@ -256,7 +283,7 @@ def persist_finding(
     return finding_id
 
 
-def _intake_report(run_id, task_id, source_root, fdir, rec, finding_id,
+def _intake_report(run_id, task_id, source_root, report_dir, rec, finding_id,
                    cfg_project_id, cfg_task_name, cfg_parent_task_name,
                    cfg_parent_task_id, cfg_parent_task_type, cfg_task_origin_type, on_event,
                    graph_store=None):
@@ -268,8 +295,8 @@ def _intake_report(run_id, task_id, source_root, fdir, rec, finding_id,
             parent_task_type=cfg_parent_task_type,
             task_origin_type=cfg_task_origin_type,
             finding=rec, source_root=source_root,
-            report_path=str(fdir / "vulnerability-report.md"),
-            taint_path_report_path=str(fdir / "taint-path-report.md"),
+            report_path=str(report_dir / "vulnerability-report.md"),
+            taint_path_report_path=str(report_dir / "taint-path-report.md"),
             use_self_task_id=False)
         if str(res.get("status") or "") == "reported":
             _record_intake_result(graph_store=graph_store, run_id=run_id, task_id=task_id, finding_id=finding_id, rec=rec, res=res, on_event=on_event)
@@ -290,8 +317,8 @@ def _intake_report(run_id, task_id, source_root, fdir, rec, finding_id,
                 task_name=cfg_task_name, parent_task_name=cfg_parent_task_name,
                 parent_task_id=cfg_parent_task_id, parent_task_type=cfg_parent_task_type,
                 task_origin_type=cfg_task_origin_type, finding=rec, source_root=source_root,
-                report_path=str(fdir / "vulnerability-report.md"),
-                taint_path_report_path=str(fdir / "taint-path-report.md"),
+                report_path=str(report_dir / "vulnerability-report.md"),
+                taint_path_report_path=str(report_dir / "taint-path-report.md"),
                 use_self_task_id=True)
             _record_intake_result(graph_store=graph_store, run_id=run_id, task_id=task_id, finding_id=finding_id, rec=rec, res=res2, on_event=on_event)
             return
