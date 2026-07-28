@@ -40,7 +40,7 @@ from ..vuln_store import (
     VulnFindingRecord,
     VulnScanStore,
 )
-from ..service.task_vuln_stats import refresh_task_vuln_snapshot_by_task_id
+from ..service.task_vuln_stats import sync_vuln_count_from_local_store
 from ..service.session_lineage_index import (
     session_relpath_for_run_root,
     update_session_index_item,
@@ -1266,12 +1266,14 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
             if fid:
                 persisted_count += 1
         authoritative_count = persisted_count
-        # 实时同步任务快照计数: authoritative source = vuln-scan.sqlite
+        # 实时同步任务快照计数: 直接用手里 local graph_store 计数, 不开 NFS sqlite
+        # (旧 refresh_task_vuln_snapshot_by_task_id 以 WAL 写模式开 NFS
+        # run/vuln-scan.sqlite, 与周期同步 copy2 并发致库文件损坏)
         if self._graph_store_ready():
             try:
-                refresh_task_vuln_snapshot_by_task_id(self.task_id, prefer_live=True)
+                sync_vuln_count_from_local_store(self.graph_store, self.task_id)
             except Exception as e:
-                logger.warning("refresh_task_vuln_snapshot failed (task=%s): %s", self.task_id, e)
+                logger.warning("sync_vuln_count_from_local_store failed (task=%s): %s", self.task_id, e)
             try:
                 with self.graph_store.connect() as conn:
                     row = conn.execute(

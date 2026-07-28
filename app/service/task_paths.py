@@ -78,8 +78,12 @@ def open_authoritative_vuln_scan_store(
     task_root: Path | None,
     *,
     prefer_live: bool = True,
-    readonly: bool = False,
-    enable_wal: bool = True,
+    # 默认只读、无 WAL: 这是读 helper, 谁都不应以写模式开 authoritative sqlite
+    # (worker 以 WAL 写模式开 NFS run/vuln-scan.sqlite 曾导致
+    # "database disk image is malformed"). 需要写的调用方自行用本地路径
+    # 直接 new VulnScanStore(local_path).
+    readonly: bool = True,
+    enable_wal: bool = False,
 ):
     db_path = resolve_authoritative_vuln_scan_sqlite(task_root, prefer_live=prefer_live)
     if db_path is None:

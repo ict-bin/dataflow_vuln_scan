@@ -17,7 +17,7 @@ from typing import Any, Callable
 from ..vuln_intake_reporter import report_finding_to_intake
 from ..vuln_report_utils import format_vuln_report_md
 from ..vuln_store import VulnFindingRecord, VulnScanStore
-from ..service.task_vuln_stats import refresh_task_vuln_snapshot_by_task_id
+from ..service.task_vuln_stats import sync_vuln_count_from_local_store
 
 logger = logging.getLogger("dvs.dataflow_v2.finding_store")
 
@@ -373,9 +373,11 @@ def _sync_vuln_count_mysql(
     on_event: Callable[..., None] | None = None,
 ):
     try:
-        refresh_task_vuln_snapshot_by_task_id(task_id, prefer_live=True)
+        # 直接用手里 local graph_store 计数, 不开 NFS sqlite (避免与周期同步
+        # copy2 并发致 run/vuln-scan.sqlite 损坏)
+        sync_vuln_count_from_local_store(graph_store, task_id)
     except Exception as exc:
-        logger.warning("refresh_task_vuln_snapshot_by_task_id failed: %s", exc, exc_info=True)
+        logger.warning("sync_vuln_count_from_local_store failed (task=%s): %s", task_id, exc, exc_info=True)
         _emit_finding_event(
             on_event,
             "vuln_snapshot_sync_failed",

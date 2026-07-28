@@ -827,9 +827,19 @@ def _sync_task_abnormal_reason(row: AppDvsTask) -> tuple[dict | None, bool]:
     return next_payload, changed
 
 
-def _sync_task_vuln_stats(row: AppDvsTask) -> bool:
-    """Sync vuln stats from authoritative task SQLite into task snapshot."""
-    return sync_task_vuln_snapshot_row(row, prefer_live=True)
+def _sync_task_vuln_stats(
+    row: AppDvsTask,
+    *,
+    local_graph_db_path: Path | str | None = None,
+) -> bool:
+    """Sync vuln stats into task snapshot.
+
+    worker (传 local_graph_db_path = pod-local epoch vuln-scan.sqlite):
+    只读计数, 不碰 NFS、不开 WAL 写 —— 规避 run/vuln-scan.sqlite 与周期同步
+    copy2 并发致 "database disk image is malformed".
+    API (不传): 只读读 authoritative (NFS) 快照, 跨 pod 合法实时读取.
+    """
+    return sync_task_vuln_snapshot_row(row, prefer_live=True, local_graph_db_path=local_graph_db_path)
 
 
 def _record_abnormal_reason(row: AppDvsTask, reason: dict | None, *, changed: bool) -> None:
@@ -2509,7 +2519,21 @@ class TaskService:
                 refreshed = _db.query(AppDvsTask).filter_by(task_id=task_id).first()
                 if refreshed is not None:
                     reason, changed = _sync_task_abnormal_reason(refreshed)
-                    _sync_task_vuln_stats(refreshed)
+                    # worker 终态提交: 只读读 pod-local epoch vuln-scan.sqlite,
+                    # 不开 NFS sqlite; 读失败不得让终态提交崩 (降级 warning)
+                    try:
+                        _sync_task_vuln_stats(
+                            refreshed,
+                            local_graph_db_path=(
+                                Path(epoch_run_root_path) / "vuln-scan.sqlite"
+                                if epoch_run_root_path else None
+                            ),
+                        )
+                    except Exception as _vuln_stats_exc:
+                        logger.warning(
+                            "terminal _sync_task_vuln_stats failed (task=%s): %s",
+                            task_id, _vuln_stats_exc, exc_info=True,
+                        )
                     _record_abnormal_reason(refreshed, reason, changed=changed)
                     _record_abnormal_reason_timeline(_db, refreshed, reason, changed=changed)
                     terminal_status = result.status.value if result else "error"
