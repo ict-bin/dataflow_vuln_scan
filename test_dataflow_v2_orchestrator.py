@@ -269,8 +269,53 @@ class TestConcurrentDfs(unittest.TestCase):
         self.assertLessEqual(par, seq + 0.1, f"par={par} seq={seq}")
 
 
-class TestReturnFollowupGraphEdges(unittest.TestCase):
-    def test_child_return_taint_writes_return_followup_edge(self):
+class TestReturnFollowupDisabled(unittest.TestCase):
+    def test_root_return_taint_no_longer_triggers_caller_followup(self):
+        with tempfile.TemporaryDirectory() as td:
+            store = DataflowStore(Path(td) / "run")
+            root = _func(store, "Root", file="root.c")
+            caller = _func(store, "Caller", file="caller.c")
+            analyzed: list[tuple[str, int]] = []
+
+            class _Cbs(AnalysisCallbacks):
+                def __init__(self):
+                    self.sessions_dir = Path(td) / "sessions"
+                    self.sessions_dir.mkdir(parents=True, exist_ok=True)
+                    self.source_root = td
+                    self.on_event = lambda *args, **kwargs: None
+
+                def analyze_function(self, store, func, taint_params, pre_validations, base_session, ctx):
+                    analyzed.append((func.name, ctx.depth))
+                    if func.name == "Root":
+                        return AnalysisResult(
+                            self_contained=True,
+                            description="Root",
+                            return_taints=[
+                                TaintRecord(
+                                    func_id=func.func_id,
+                                    name="ret_msg",
+                                    signature="ret_msg",
+                                    file=func.file,
+                                    function=func.name,
+                                )
+                            ],
+                        )
+                    return AnalysisResult(self_contained=True, description=func.name)
+
+                def mine_vulns(self, store, func, taint_params, ctx, base_session=""):
+                    return 0
+
+            orch = DfsOrchestrator(store, _Cbs(), concurrent=False, max_depth=2)
+            with patch(
+                "app.dataflow_v2.function_extractor.read_function_body",
+                side_effect=lambda source_root, f, max_lines=4000: "Root(msg);" if f.func_id == caller.func_id else "",
+            ):
+                orch.run(root, TaintParamInfo([0], "msg_t*", ["msg"]))
+
+            self.assertEqual([("Root", 0)], analyzed)
+            store.close()
+
+    def test_child_return_taint_no_longer_creates_return_followup_edge(self):
         with tempfile.TemporaryDirectory() as td:
             run_dir = Path(td) / "run"
             graph_store = VulnScanStore(run_dir / "vuln-scan.sqlite")
@@ -279,7 +324,7 @@ class TestReturnFollowupGraphEdges(unittest.TestCase):
             child = _func(store, "Child", file="child.c")
 
             graph_store.start_task_graph_run(TaskGraphRunRecord(
-                task_id="task-return",
+                task_id="task-return-disabled",
                 epoch="run",
                 run_root=str(run_dir),
                 root_function="Root",
@@ -287,7 +332,7 @@ class TestReturnFollowupGraphEdges(unittest.TestCase):
             for func, depth in ((root, 0), (child, 1)):
                 graph_store.upsert_task_graph_node(TaskGraphNodeRecord(
                     node_id=f"node::{func.func_id}",
-                    task_id="task-return",
+                    task_id="task-return-disabled",
                     epoch="run",
                     func_id=func.func_id,
                     function_name_resolved=func.name,
@@ -298,10 +343,10 @@ class TestReturnFollowupGraphEdges(unittest.TestCase):
                     analysis_status="running",
                 ))
 
-            class _ReturnCbs(AnalysisCallbacks):
+            class _Cbs(AnalysisCallbacks):
                 def __init__(self):
                     self.graph_store = graph_store
-                    self.task_id = "task-return"
+                    self.task_id = "task-return-disabled"
                     self.graph_epoch = "run"
                     self.graph_node_id = lambda func: f"node::{func.func_id}"
                     self.cancel_event = None
@@ -345,107 +390,12 @@ class TestReturnFollowupGraphEdges(unittest.TestCase):
                 def mine_vulns(self, store, func, taint_params, ctx, base_session=""):
                     return 0
 
-            orch = DfsOrchestrator(store, _ReturnCbs(), concurrent=False, max_depth=2)
+            orch = DfsOrchestrator(store, _Cbs(), concurrent=False, max_depth=2)
             orch.run(root, TaintParamInfo([0], "msg_t*", ["msg"]))
 
-            view = graph_store.export_task_graph_view("task-return")
+            view = graph_store.export_task_graph_view("task-return-disabled")
             return_edges = [edge for edge in view["edges"] if edge["edge_kind"] == "return_followup"]
-            self.assertEqual(1, len(return_edges))
-            self.assertEqual("Child", return_edges[0]["source_function_resolved"])
-            self.assertEqual("Root", return_edges[0]["target_function_resolved"])
-            self.assertEqual("done", return_edges[0]["status"])
-            self.assertEqual(0, int(return_edges[0]["visible_in_tree"]))
-
-
-class TestRootReturnFollowupSemantics(unittest.TestCase):
-    def test_root_callee_return_taint_does_not_trigger_caller_followup(self):
-        with tempfile.TemporaryDirectory() as td:
-            store = DataflowStore(Path(td) / "run")
-            root = _func(store, "Root", file="root.c")
-            caller = _func(store, "Caller", file="caller.c")
-            analyzed: list[tuple[str, int]] = []
-
-            class _Cbs(AnalysisCallbacks):
-                def __init__(self):
-                    self.sessions_dir = Path(td) / "sessions"
-                    self.sessions_dir.mkdir(parents=True, exist_ok=True)
-                    self.source_root = td
-                    self.on_event = lambda *args, **kwargs: None
-
-                def analyze_function(self, store, func, taint_params, pre_validations, base_session, ctx):
-                    analyzed.append((func.name, ctx.depth))
-                    if func.name == "Root":
-                        return AnalysisResult(
-                            self_contained=True,
-                            description="Root",
-                            callee_return_taints=[
-                                TaintRecord(
-                                    func_id=func.func_id,
-                                    name="v64",
-                                    signature="v64",
-                                    file=func.file,
-                                    function=func.name,
-                                )
-                            ],
-                        )
-                    return AnalysisResult(self_contained=True, description=func.name)
-
-                def mine_vulns(self, store, func, taint_params, ctx, base_session=""):
-                    return 0
-
-            orch = DfsOrchestrator(store, _Cbs(), concurrent=False, max_depth=2)
-            with patch(
-                "app.dataflow_v2.function_extractor.read_function_body",
-                side_effect=lambda source_root, f, max_lines=4000: "Root(msg);" if f.func_id == caller.func_id else "",
-            ):
-                orch.run(root, TaintParamInfo([0], "msg_t*", ["msg"]))
-
-            self.assertEqual([("Root", 0), ("Root", 0)], analyzed)
-            store.close()
-
-    def test_root_return_taint_still_triggers_caller_followup(self):
-        with tempfile.TemporaryDirectory() as td:
-            store = DataflowStore(Path(td) / "run")
-            root = _func(store, "Root", file="root.c")
-            caller = _func(store, "Caller", file="caller.c")
-            analyzed: list[tuple[str, int]] = []
-
-            class _Cbs(AnalysisCallbacks):
-                def __init__(self):
-                    self.sessions_dir = Path(td) / "sessions"
-                    self.sessions_dir.mkdir(parents=True, exist_ok=True)
-                    self.source_root = td
-                    self.on_event = lambda *args, **kwargs: None
-
-                def analyze_function(self, store, func, taint_params, pre_validations, base_session, ctx):
-                    analyzed.append((func.name, ctx.depth))
-                    if func.name == "Root":
-                        return AnalysisResult(
-                            self_contained=True,
-                            description="Root",
-                            return_taints=[
-                                TaintRecord(
-                                    func_id=func.func_id,
-                                    name="ret_msg",
-                                    signature="ret_msg",
-                                    file=func.file,
-                                    function=func.name,
-                                )
-                            ],
-                        )
-                    return AnalysisResult(self_contained=True, description=func.name)
-
-                def mine_vulns(self, store, func, taint_params, ctx, base_session=""):
-                    return 0
-
-            orch = DfsOrchestrator(store, _Cbs(), concurrent=False, max_depth=2)
-            with patch(
-                "app.dataflow_v2.function_extractor.read_function_body",
-                side_effect=lambda source_root, f, max_lines=4000: "Root(msg);" if f.func_id == caller.func_id else "",
-            ):
-                orch.run(root, TaintParamInfo([0], "msg_t*", ["msg"]))
-
-            self.assertEqual([("Root", 0), ("Caller", -1)], analyzed)
+            self.assertEqual([], return_edges)
             store.close()
 
 
@@ -673,52 +623,6 @@ class TestTrackerSessionPropagation(unittest.TestCase):
 
 
 class TestBaseSessionIndexing(unittest.TestCase):
-    def test_analyze_callers_records_created_base_session_in_runtime_index(self):
-        with tempfile.TemporaryDirectory() as td:
-            run_dir = Path(td) / "run"
-            sessions_dir = run_dir / "sessions"
-            sessions_dir.mkdir(parents=True, exist_ok=True)
-            store = DataflowStore(run_dir / "dataflow-v2")
-            root = _func(store, "Root", file="root.c")
-            caller = _func(store, "Caller", file="caller.c")
-            base_session = sessions_dir / "root-base.jsonl"
-            base_session.write_text('{"type":"session","timestamp":"2026-07-27T00:00:00Z"}\n', encoding="utf-8")
-
-            class _Cbs(AnalysisCallbacks):
-                def __init__(self):
-                    self.task_id = "task-callers-base-index"
-                    self.graph_epoch = "run"
-                    self.cancel_event = None
-                    self.sessions_dir = sessions_dir
-                    self.session_lineage_run_root = run_dir
-                    self.source_root = td
-                    self.on_event = lambda *args, **kwargs: None
-
-                def analyze_function(self, store, func, taint_params, pre_validations, base_session, ctx):
-                    raise RuntimeError("stop after base session creation")
-
-            orch = DfsOrchestrator(store, _Cbs(), concurrent=False, max_depth=2)
-            return_taint = TaintRecord(
-                func_id=root.func_id,
-                name="ret",
-                signature="ret_sig",
-                file=root.file,
-                function=root.name,
-                description="return taint",
-            )
-
-            with patch("app.dataflow_v2.function_extractor.read_function_body", side_effect=lambda source_root, func, max_lines=4000: "Root(" if func.func_id == caller.func_id else ""):
-                with self.assertRaises(RuntimeError):
-                    orch._analyze_callers(root, [return_taint], str(base_session), PathContext("p0"))
-
-            payload = json.loads((run_dir / "session-index.json").read_text(encoding="utf-8"))
-            relpaths = {str(item.get("session_relpath")) for item in payload.get("items", []) if isinstance(item, dict)}
-            self.assertIn("sessions/d-1-Caller-taint-ret-00.jsonl", relpaths)
-            child = next(item for item in payload["items"] if item.get("session_relpath") == "sessions/d-1-Caller-taint-ret-00.jsonl")
-            self.assertEqual("sessions/root-base.jsonl", child.get("parent_session_relpath"))
-            self.assertEqual("fork", child.get("relation_kind"))
-            store.close()
-
     def test_register_created_base_session_writes_runtime_index(self):
         with tempfile.TemporaryDirectory() as td:
             run_dir = Path(td) / "run"

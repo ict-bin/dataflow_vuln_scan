@@ -54,8 +54,7 @@ class AnalysisResult:
     self_contained: bool = False
     description: str = ""        # 函数功能说明 (回写函数库)
     session_path: str = ""      # 本函数 taint 分析 fork session 路径 (供子函数/mining 继承链)
-    return_taints: list[TaintRecord] = field(default_factory=list)  # 本函数 return 语句返回的污点
-    callee_return_taints: list[TaintRecord] = field(default_factory=list)  # 被调函数返回到当前函数局部变量的污点
+    return_taints: list[TaintRecord] = field(default_factory=list)  # 本函数 return 语句返回的污点(仅结果表达, 不驱动调度)
     taint_failed: bool = False  # taint 分析全失败 (retry 用尽), 跳过 mining
     # 专注模式: LLM 合并传播+挖掘后, 标记的“最可能产生漏洞的兴趣点”
     #   [{target_function, taint_param, reason, line}] — 编排器只跟入这些点 (往深挖),
@@ -263,172 +262,21 @@ class DfsOrchestrator:
             ended_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         )
 
-    def _return_followup_edge_id(
-        self,
-        *,
-        source_func: FunctionRecord,
-        target_func: FunctionRecord,
-        taint_signature: str,
-        path_id: str,
-        call_line: int,
-    ) -> str:
-        key = f"return|{path_id}|{call_line}|{source_func.func_id}|{target_func.func_id}|{taint_signature}"
-        return f"return::{hashlib.sha1(key.encode()).hexdigest()[:24]}"
-
-    def _upsert_return_followup_edge(
-        self,
-        *,
-        source_func: FunctionRecord,
-        target_func: FunctionRecord,
-        taint_name: str,
-        taint_signature: str,
-        path_id: str,
-        call_line: int,
-        status: str,
-        reason_code: str = "",
-        reason_message: str = "",
-        reason_source: str = "",
-    ) -> str:
-        graph_store = self._graph_store()
-        if graph_store is None:
-            return ""
-        edge_id = self._return_followup_edge_id(
-            source_func=source_func,
-            target_func=target_func,
-            taint_signature=taint_signature,
-            path_id=path_id,
-            call_line=call_line,
-        )
-        graph_store.upsert_task_graph_edge(TaskGraphEdgeRecord(
-            edge_id=edge_id,
-            task_id=self._graph_task_id(),
-            epoch=self._graph_epoch(),
-            source_node_id=self._graph_node_id(source_func),
-            target_node_id=self._graph_node_id(target_func),
-            source_func_id=source_func.func_id,
-            target_func_id=target_func.func_id,
-            source_function_resolved=source_func.name,
-            target_function_resolved=target_func.name,
-            target_function_raw=target_func.name,
-            source_file=source_func.file,
-            target_file=target_func.file,
-            edge_kind="return_followup",
-            status=status,
-            reason_code=reason_code,
-            reason_message=reason_message,
-            reason_source=reason_source,
-            source_prop_id=edge_id,
-            call_line=call_line or None,
-            source_taint_name=taint_name,
-            target_taint_name=taint_name,
-            display_order=max(0, call_line),
-            visible_in_tree=0,
-            visible_in_all_propagations=1,
-        ))
-        return edge_id
-
     def run(self, root_func: FunctionRecord, root_taint: TaintParamInfo,
             base_session: str = "") -> None:
         """从根函数出发 DFS。"""
         ctx = PathContext(path_id=_path_id(root_func.func_id, root_taint.signature, "0"))
-        _, root_return_taints = self._process(root_func, root_taint, ctx.pre_validations, base_session, ctx, 0)
+        self._process(root_func, root_taint, ctx.pre_validations, base_session, ctx, 0)
 
-        # 向上回溯: 根函数返回了污点 → 查找调用者, 在 depth -1 分析
-        # 场景: A(入口) { msg=recv(); return msg; } → B(调用者) { msg=A(); handle(msg); }
-        # B 才是真正处理数据的地方
-        if root_return_taints:
-            self._analyze_callers(root_func, root_return_taints, base_session, ctx)
-
-    def _analyze_callers(self, func: FunctionRecord, return_taints: list,
-                         base_session: str, ctx: Any) -> None:
-        """查找 func 的调用者, 用 return_taints 在 depth -1 分析。"""
-        from .function_extractor import read_function_body
-        callers: list[FunctionRecord] = []
-        fname = func.name
-        for f in self.store.list_functions():
-            if f.func_id == func.func_id:
-                continue
-            # 快速过滤: 函数体包含 fname(
-            try:
-                body = read_function_body(self.cbs.source_root, f, max_lines=4000)
-                if body and (fname + "(" in body or fname + " (" in body):
-                    callers.append(f)
-            except Exception as e:
-                logger.warning("read caller function body failed, skip caller (func=%s): %s", f, e)
-                continue
-        if callers:
-            self.cbs.on_event("v2_caller_tracked", function=func.name,
-                              caller_count=len(callers),
-                              return_taints=[rt.name for rt in return_taints])
-        for caller in callers:
-            for rt in return_taints:
-                rt_sig = _norm_taint_sig(rt.signature or rt.name)
-                if self.store.find_processed_taint(caller.func_id, rt_sig, _validation_sig([])):
-                    continue
-                new_tp = TaintParamInfo(positions=[], signature=rt_sig, names=[rt.name])
-                new_session = str(_session_path(self.cbs.sessions_dir, -1, caller.name, rt.name, kind="taint")) if base_session else ""
-                if base_session:
-                    from ..copy_utils import safe_copyfile
-                    try:
-                        safe_copyfile(base_session, new_session)
-                        self._register_created_base_session(
-                            session_path=new_session,
-                            parent_session_path=base_session,
-                            relation_kind="fork",
-                            session_kind="taint",
-                        )
-                    except OSError as e:
-                        logger.debug("copy base_session for return-followup failed (base=%s): %s", base_session, e)
-                caller_ctx = ctx.fork(_path_id(caller.func_id, rt_sig, "-1"))
-                self._upsert_return_followup_edge(
-                    source_func=func,
-                    target_func=caller,
-                    taint_name=rt.name,
-                    taint_signature=rt_sig,
-                    path_id=caller_ctx.path_id,
-                    call_line=int(getattr(rt, "entry_line", 0) or 0),
-                    status="running",
-                )
-                try:
-                    self._process(caller, new_tp, [], new_session, caller_ctx, -1)
-                except BaseException:
-                    cancelled = self._cancel_requested()
-                    self._upsert_return_followup_edge(
-                        source_func=func,
-                        target_func=caller,
-                        taint_name=rt.name,
-                        taint_signature=rt_sig,
-                        path_id=caller_ctx.path_id,
-                        call_line=int(getattr(rt, "entry_line", 0) or 0),
-                        status="cancelled" if cancelled else "failed",
-                        reason_code="task_cancelled" if cancelled else "return_followup_failed",
-                        reason_message="task cancellation interrupted return followup" if cancelled else "return followup caller analysis failed",
-                        reason_source="cancel" if cancelled else "orchestrator",
-                    )
-                    raise
-                cancelled = self._cancel_requested()
-                self._upsert_return_followup_edge(
-                    source_func=func,
-                    target_func=caller,
-                    taint_name=rt.name,
-                    taint_signature=rt_sig,
-                    path_id=caller_ctx.path_id,
-                    call_line=int(getattr(rt, "entry_line", 0) or 0),
-                    status="cancelled" if cancelled else "done",
-                    reason_code="task_cancelled" if cancelled else "",
-                    reason_message="task cancellation interrupted return followup" if cancelled else "",
-                    reason_source="cancel" if cancelled else "",
-                )
-
-    # ── 核心: 处理一个函数 (返回 my_discovered + return_taints) ──────────────
+    # ── 核心: 处理一个函数 (返回 my_discovered) ──────────────
     def _process(self, func: FunctionRecord, taint_params: TaintParamInfo,
                  pre_validations: list[Validation], base_session: str,
-                 ctx: PathContext, depth: int) -> tuple[list[Validation], list[TaintRecord]]:
+                 ctx: PathContext, depth: int) -> list[Validation]:
         # 1) 三重去重 (子集匹配: 已有更完整 pre_val 的记录 → 当前视为已覆盖, 跳过)
         pre_val_sig = _validation_sig(pre_validations)
         _nts = _norm_taint_sig(taint_params.signature)
         if self.store.find_processed_taint(func.func_id, _nts, pre_val_sig):
-            return [], []  # 已分析过, 跳过
+            return []  # 已分析过, 跳过
         # 1b) 双检锁: analyze 前先占位 (INSERT OR IGNORE), 防并发 N 路径同 (func,taint,pre_val)
         #     同时 find-None → 全跑 LLM → N 份冗余分析。占位成功→本线程分析; 占位失败→并发 peer 在分析→跳过。
         _reserve = ProcessedTaint(
@@ -436,7 +284,7 @@ class DfsOrchestrator:
             pre_validations=[v.to_dict() for v in pre_validations],
             pre_validation_signature=pre_val_sig, sessions_path=base_session)
         if not self.store.try_reserve_processed_taint(func.func_id, _reserve):
-            return [], []  # 并发 peer 已占位, 跳过
+            return []  # 并发 peer 已占位, 跳过
 
         self.cbs.on_event("trace_start", function=func.name, source_file=func.file,
                           depth=depth, max_depth=self.max_depth)
@@ -488,8 +336,7 @@ class DfsOrchestrator:
         if depth < self.max_depth:
             # 用 LLM 报的 taints[] + 入口污点过滤
             # taints[] 包含入口污点 + 本地派生污点 (如 a=x 的 a)
-            # 不含 callee 返回值 (如 a=A(x) 的 a — LLM 不确定是否被污染)
-            # 返回值派生的 propagation 在 return_taints 重分析轮自然拾起
+            # 返回值派生的本地污点由 taint-analysis 提示词在本轮直接产出
             taint_names = set(taint_params.names) | {t.name for t in result.taints}
             paths = self._build_paths(result.propagations, func, ctx, depth,
                                       list(taint_names), chain_session)
@@ -516,7 +363,6 @@ class DfsOrchestrator:
                               resolved=True)
 
         base_accumulated = list(pre_validations) + list(my_discovered)
-        all_callee_return_taints: list[TaintRecord] = []
         if self.concurrent and len(paths) > 1:
             threads: list[threading.Thread] = []
             results_lock = threading.Lock()
@@ -524,9 +370,7 @@ class DfsOrchestrator:
             for path_steps in paths:
                 def _run_one(ps=path_steps):
                     try:
-                        fb, rts = self._run_path(ps, base_accumulated, func, chain_session, ctx, depth)
-                        with results_lock:
-                            all_callee_return_taints.extend(rts)
+                        self._run_path(ps, base_accumulated, func, chain_session, ctx, depth)
                     except BaseException as exc:
                         logger.warning("_run_path sub-thread failed (func=%s target=%s): %s", func.name, getattr(ps, "target_function", "?"), exc, exc_info=not isinstance(exc, KeyboardInterrupt))
                         with results_lock:
@@ -540,112 +384,25 @@ class DfsOrchestrator:
                 raise errs[0]
         else:
             for path_steps in paths:
-                _, rts = self._run_path(path_steps, base_accumulated, func, chain_session, ctx, depth)
-                all_callee_return_taints.extend(rts)
+                self._run_path(path_steps, base_accumulated, func, chain_session, ctx, depth)
 
         # 6) self_contained=false → 后序 mine (callee 已完成, 含 callee 分析结果)
         #    taint 分析失败时跳过 mining
         if not self_contained and not result.taint_failed:
             self._run_llm(self.cbs.mine_vulns, self.store, func, taint_params, ctx, chain_session)
 
-        # 7) 当前函数内的返回值污点回传:
-        # - 子函数真正 return 给当前函数的污点
-        # - 外部 callee 语义推断出的“返回值落到当前函数局部变量”的污点
-        # 这两类都只应在当前函数内继续扩散, 不能触发 depth=-1 的 caller 回溯。
-        # #11: return_taint 带 entry_line (callee 调用点行); 若该污点本函数已持有 (escape 源头)
-        #    则不回传重分析 — 否则形成冗余循环 (源头早有该污点, reader 回传=重复)
-        # #13: taint_sig 归一 (去 this->/尾 ()) 让 proxyBindAddr_ / this->proxyBindAddr_ 去重命中
-        my_taint_sigs = {_norm_taint_sig(t.name) for t in result.taints} | {_norm_taint_sig(n) for n in taint_params.names}
-        local_return_taints = list(all_callee_return_taints) + list(result.callee_return_taints)
-        for rt in local_return_taints:
-            rt_sig = _norm_taint_sig(rt.signature or rt.name)
-            if self.store.find_processed_taint(func.func_id, rt_sig, pre_val_sig):
-                continue  # 已分析过此污点, 跳过
-            try:
-                self.cbs.on_event("v2_step7_find_miss_debug",
-                    function=func.name, func_id=func.func_id[:10],
-                    rt_name=rt.name, rt_sig=rt_sig, rt_raw_sig=rt.signature,
-                    pre_val_sig=pre_val_sig[:60] if pre_val_sig else "(empty)",
-                    n_return_taints=len(local_return_taints))
-            except Exception as e:
-                logger.info("emit v2_step7_find_miss_debug failed (func=%s): %s", func.name, e)
-            if rt_sig in my_taint_sigs:
-                # 本函数已持有该污点 (escape 源头场景): reader 回传=冗余, 跳过, 终止循环
-                self.cbs.on_event("v2_return_taint_skipped_redundant",
-                                  function=func.name, taint=rt.name, entry_line=rt.entry_line,
-                                  reason="func already holds this taint (escape source)")
-                continue
-            # 新 fork session (从父链重新 fork, taint 不同); #10: 不覆盖, NN 自增
-            new_session = str(_session_path(self.cbs.sessions_dir, depth, func.name, rt.name)) if chain_session else ""
-            if chain_session:
-                from ..copy_utils import safe_copyfile
-                try:
-                    safe_copyfile(chain_session, new_session)
-                    self._register_created_base_session(
-                        session_path=new_session,
-                        parent_session_path=chain_session,
-                        relation_kind="fork",
-                        session_kind="taint",
-                    )
-                except OSError as e:
-                    logger.debug("copy chain_session failed (base=%s): %s", chain_session, e)
-            new_tp = TaintParamInfo(positions=[], signature=rt_sig, names=[rt.name])
-            source_func = getattr(rt, "_graph_return_source_func", func)
-            self._upsert_return_followup_edge(
-                source_func=source_func,
-                target_func=func,
-                taint_name=rt.name,
-                taint_signature=rt_sig,
-                path_id=ctx.path_id,
-                call_line=int(getattr(rt, "entry_line", 0) or 0),
-                status="running",
-            )
-            try:
-                self._process(func, new_tp, list(pre_validations), new_session, ctx, depth)
-            except BaseException:
-                cancelled = self._cancel_requested()
-                self._upsert_return_followup_edge(
-                    source_func=source_func,
-                    target_func=func,
-                    taint_name=rt.name,
-                    taint_signature=rt_sig,
-                    path_id=ctx.path_id,
-                    call_line=int(getattr(rt, "entry_line", 0) or 0),
-                    status="cancelled" if cancelled else "failed",
-                    reason_code="task_cancelled" if cancelled else "return_followup_failed",
-                    reason_message="task cancellation interrupted return followup" if cancelled else "return followup re-analysis failed",
-                    reason_source="cancel" if cancelled else "orchestrator",
-                )
-                raise
-            cancelled = self._cancel_requested()
-            self._upsert_return_followup_edge(
-                source_func=source_func,
-                target_func=func,
-                taint_name=rt.name,
-                taint_signature=rt_sig,
-                path_id=ctx.path_id,
-                call_line=int(getattr(rt, "entry_line", 0) or 0),
-                status="cancelled" if cancelled else "done",
-                reason_code="task_cancelled" if cancelled else "",
-                reason_message="task cancellation interrupted return followup" if cancelled else "",
-                reason_source="cancel" if cancelled else "",
-            )
-
-        # 8) 返回 (本函数校验, 本函数的 return_taints)
-        logger.info("[V2-orch] _process DONE func=%s depth=%d paths=%d local_return_taints=%d caller_return_taints=%d",
+        logger.info("[V2-orch] _process DONE func=%s depth=%d paths=%d result_return_taints=%d",
                     func.name,
                     depth,
                     len(paths) if "paths" in dir() else 0,
-                    len(local_return_taints),
                     len(result.return_taints))
-        return my_discovered, result.return_taints
+        return my_discovered
 
     def _run_path(self, steps: list[ChainStep], base_accumulated: list[Validation],
                   func: FunctionRecord, base_session: str, ctx: PathContext,
-                  depth: int) -> tuple[list[Validation], list[TaintRecord]]:
-        """运行一条有序链: 链内严格顺序, 校验链累加 + 子回传 + 收集 return_taints。"""
+                  depth: int) -> list[Validation]:
+        """运行一条有序链: 链内严格顺序, 校验链累加。"""
         accumulated = list(base_accumulated)
-        all_return_taints: list[TaintRecord] = []
         for step in steps:
             incoming = list(accumulated) + list(step.validations)
             orch_edge = OrchestrationEdge(
@@ -677,8 +434,7 @@ class DfsOrchestrator:
             sub_ctx = ctx.fork(_path_id(step.func.func_id, step.taint_params.signature, str(depth + 1)))
             sub_ctx.pre_validations = list(incoming)
             try:
-                child_fb, child_rts = self._process(step.func, step.taint_params, incoming,
-                                                    base_session, sub_ctx, depth + 1)
+                child_fb = self._process(step.func, step.taint_params, incoming, base_session, sub_ctx, depth + 1)
             except BaseException:
                 if graph_store is not None:
                     cancelled = self._cancel_requested()
@@ -697,10 +453,6 @@ class DfsOrchestrator:
                     )
                 raise
             accumulated.extend(child_fb)
-            for _rt in child_rts:
-                _rt.entry_line = step.call_line  # #11: return_taint 进入 caller 的行 (callee 调用点)
-                setattr(_rt, "_graph_return_source_func", step.func)
-            all_return_taints.extend(child_rts)
             if graph_store is not None:
                 cancelled = self._cancel_requested()
                 graph_store.update_task_graph_edge(
@@ -720,7 +472,7 @@ class DfsOrchestrator:
                     analysis_status="cancelled" if cancelled else "done",
                     finished_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"),
                 )
-        return accumulated, all_return_taints
+        return accumulated
 
     # ── 路径构造: 有序链 + 互斥分叉 + 外部分叉 ───────────────────────────────
     def _build_paths(self, props: list[PropagationRecord], func: FunctionRecord,

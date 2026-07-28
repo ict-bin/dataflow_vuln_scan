@@ -38,7 +38,7 @@ def _make_callbacks(tmp_path: Path) -> TaintAnalysisCallbacks:
     )
 
 
-def test_external_callee_return_taint_stays_local_to_current_function(tmp_path: Path):
+def test_external_callee_inference_no_longer_emits_return_taint(tmp_path: Path):
     callbacks = _make_callbacks(tmp_path)
     store = DataflowStore(tmp_path / "df")
     func = FunctionRecord(
@@ -54,9 +54,8 @@ def test_external_callee_return_taint_stays_local_to_current_function(tmp_path: 
     callbacks._infer_external_callees = lambda props, func, session: {  # type: ignore[method-assign]
         "MBUF_MakeMemoryContinuous_fl": {
             "inferable": True,
-            "return_taint": "v64",
-            "propagation": "",
-            "validation": "",
+            "propagation": "dst<-src",
+            "validation": "copy length constrained",
         }
     }
 
@@ -84,12 +83,13 @@ def test_external_callee_return_taint_stays_local_to_current_function(tmp_path: 
     )
 
     assert [item.name for item in result.return_taints] == []
-    assert [item.name for item in result.callee_return_taints] == ["v64"]
+    assert result.propagations[0].is_external_callee is False
+    assert result.propagations[0].validations
 
     store.close()
 
 
-def test_model_return_taint_remains_caller_followup_signal(tmp_path: Path):
+def test_model_return_taint_is_kept_as_result_only(tmp_path: Path):
     callbacks = _make_callbacks(tmp_path)
     store = DataflowStore(tmp_path / "df")
     func = FunctionRecord(
@@ -119,6 +119,5 @@ def test_model_return_taint_remains_caller_followup_signal(tmp_path: Path):
     )
 
     assert [item.name for item in result.return_taints] == ["ret_msg"]
-    assert result.callee_return_taints == []
 
     store.close()

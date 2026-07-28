@@ -696,9 +696,8 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
             prop.target_func_id = self._resolve_target_func_id(store, prop)
             validated_props.append(prop)
 
-        # parse return_taints: 仅表示“当前函数通过 return 返回给调用者的污点”
+        # parse return_taints: 仅作为当前函数分析结果表达, 不驱动额外调度
         return_taints: list[TaintRecord] = []
-        callee_return_taints: list[TaintRecord] = []
         for rt in parsed.get("return_taints") or []:
             if not isinstance(rt, dict):
                 continue
@@ -717,13 +716,6 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                 inf = inferred.get(prop.target_function)
                 if inf and inf.get("inferable"):
                     prop.is_external_callee = False
-                    # return_taint: 外部函数返回值携带污点, 仅在当前函数内继续传播
-                    if inf.get("return_taint"):
-                        rt_name = str(inf["return_taint"])
-                        callee_return_taints.append(TaintRecord(
-                            func_id=func.func_id, name=rt_name,
-                            signature=rt_name, file=func.file, function=func.name,
-                            description=f"外部函数 {prop.target_function} 返回值携带污点 (LLM推断)"))
                     # propagation: 参数间传播 (如 memcpy src→dst)
                     if inf.get("propagation"):
                         prop.is_external_callee = False
@@ -734,7 +726,6 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                     self.on_event("v2_external_callee_inferred",
                                   function=prop.target_function,
                                   caller=func.name,
-                                  return_taint=inf.get("return_taint"),
                                   propagation=inf.get("propagation"),
                                   validation=inf.get("validation"))
                 # else: inferable=false → 保持 is_external_callee=True (视为不存在)
@@ -743,7 +734,6 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                               self_contained=self_contained, description=description,
                               session_path=str(fork_session),
                               return_taints=return_taints,
-                              callee_return_taints=callee_return_taints,
                               taint_failed=taint_failed)
 
     def _within_source_root(self, file: str) -> bool:
@@ -932,7 +922,7 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                                 base_session: str = "") -> dict:
         """批量 LLM 推断外部函数语义 (一次调用)。
 
-        返回 {function_name: {inferable, return_taint, propagation, validation}}
+        返回 {function_name: {inferable, propagation, validation}}
         """
         _t0 = time.time()
         _names = [p.target_function for p in external_props]
@@ -970,9 +960,8 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
             "请根据函数名和调用上下文, 逐个判断能否推断其污点行为。\n\n"
             + "\n".join(lines) + "\n\n"
             "对每个函数输出 JSON (在一个 JSON 数组中):\n"
-            '- 能推断: {"function": "open", "inferable": true, '
-            '"return_taint": "fd", "propagation": null, "validation": null}\n'
-            '  * return_taint: 返回值携带污点的变量名 (如 open → fd)\n'
+            '- 能推断: {"function": "strncpy", "inferable": true, '
+            '"propagation": "dst<-src", "validation": "copy length constrained"}\n'
             '  * propagation: 参数间传播 "dst<-src" (如 memcpy: src→dst)\n'
             '  * validation: 校验描述 (如 "strncpy 限制拷贝长度")\n'
             '- 不能推断: {"function": "MSG_Proc", "inferable": false}\n\n'

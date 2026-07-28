@@ -163,7 +163,8 @@ target_file —— 这些由服务端 clang/脚本从 AST 精确获取 (行号/�
   1. callee 对污点的使用是**值消费**——污点被读取后转为定宽值（整数、布尔、哈希），
      或被写入有**独立长度边界**的缓冲区（长度由编译期常量、sizeof、或非污点变量约束）；
   2. 污点**不控制**任何内存操作的目标地址、长度、或索引；
-  3. callee 不返回由污点派生的指针或引用供本函数后续做不安全操作。
+  3. callee 不把由污点派生的结果返回给当前函数，且这个返回结果不会在当前函数里继续
+     作为指针、引用、缓冲区、字符串内容、结构体/节点对象等参与不安全操作。
   
   典型场景：日志输出、类型转换、带长度参数的安全拷贝、哈希计算、原子计数。
   这类操作中攻击者无法通过控制输入影响内存布局或控制流。
@@ -174,6 +175,27 @@ target_file —— 这些由服务端 clang/脚本从 AST 精确获取 (行号/�
   - 污点**作为格式化字符串** → 格式化漏洞，报告为 propagation + `self_contained=true`
   - 污点传入的函数**无独立长度约束**（如无界拷贝） → 报告为 propagation + `self_contained=true`
   - 污点被**截断后用于安全决策**（如路径/类型被截断后绕过校验） → 报告为 propagation
+
+## callee 返回值派生污点
+
+- 你必须识别当前函数内 `x = callee(tainted)`、`obj = factory(msg)`、`buf = normalize(input)` 这类
+  “callee 返回值落到本地变量”的场景。
+- 如果根据当前函数上下文可以判断返回值 `x` 仍承载外部可控内容，或它后续会影响内存地址、长度、
+  索引、格式串、对象字段、逃逸对象、返回值等安全敏感行为，则把 `x` 直接记入 `taints[]`，
+  并继续在本轮 `propagations[]` / `return_taints[]` 中表达它的后续传播。
+- 这是一种**本函数内的普通污点派生**，不是额外的跨函数控制流。不要等待系统去回传 callee 的返回值。
+- 不要求递归分析 callee 内部实现；你只基于当前函数中的调用语境、变量后续使用方式、常见 API 语义
+  和局部证据做判断。
+- 不是所有返回值都要算污点：
+  - 纯状态码、布尔值、固定枚举值、错误码，通常不要继续标记。
+  - 只有当返回值仍代表攻击者可控内容、其派生内容、或会继续驱动危险操作时，才继续跟踪。
+- 示例：
+  - `buf = decode(msg); memcpy(dst, buf, len);`：若 `buf` 仍承载 `msg` 内容，则把 `buf` 记入 `taints[]`，
+    并报告后续 `memcpy`。
+  - `node = make_node(msg); queue_push(node, &head);`：若 `node` 内含受污点影响的字段并发生逃逸，
+    则把 `node` 或其相关字段记入 `taints[]`，并报告 escape。
+  - `fd = open(path);`：不要默认把 `fd` 当作内容型污点；只有当它在当前函数里继续参与安全敏感行为时，
+    才结合上下文决定是否继续标记。
 
 ## self_contained 判定准则（设计核心）
 
@@ -201,7 +223,8 @@ target_file —— 这些由服务端 clang/脚本从 AST 精确获取 (行号/�
 - `return_taints`：本函数 `return` 语句返回的变量，如果该变量是污点（直接或派生）。
   - `return fd` → `"return_taints": [{"name": "fd", "description": "由 filename 经 open() 派生"}]`
   - `return 0` → `"return_taints": []`
-  - **不要预测 callee 的返回值**——callee 内部返回什么由 callee 自己分析后确定，不在本函数的 `taints` 或 `return_taints` 中。
+  - 如果本函数内已有 `x = callee(tainted)` 且你判断 `x` 是污点，再出现 `return x` 时，
+    应把 `x` 记入 `return_taints`。
 
 ## taints 字段
 
