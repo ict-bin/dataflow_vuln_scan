@@ -157,14 +157,28 @@ def build_intake_payload(
     if line:
         locator_parts.append(line)
     locator = ":".join([p for p in locator_parts if p]) or finding.finding_id
-    summary = (finding.summary or report_text or finding.title or finding.finding_id).strip()
+    # report_markdown: 优先完整 vulnerability-report.md; 缺失时用 finding 字段合成兜底,
+    # 确保 raw_report 永不缺失 (platform-vuln "原始上报报告" 文档 + imported_raw 文档均依赖它)
+    if report_text.strip():
+        report_markdown = report_text
+    else:
+        report_markdown = (
+            f"# {finding.title or finding.finding_id}\n\n"
+            f"- 漏洞类型: {finding.vuln_type or 'dataflow'}\n"
+            f"- 严重度: {finding.severity or 'medium'}\n"
+            f"- 位置: {locator}\n\n"
+            f"## 摘要\n\n{finding.summary or finding.title or finding.finding_id}\n\n"
+            f"## 证据\n\n{finding.evidence or '（无）'}\n"
+        )
+    # summary 用完整报告 markdown (platform-vuln case.summary <- 此字段; 其 "原始上报报告" 文档正文读 case.summary)
+    summary = (report_markdown or finding.summary or finding.title or finding.finding_id).strip()
     evidence = (finding.evidence or "").strip()
     reproduction_hint = (finding.exploitability or "").strip()
     fingerprint_raw = "|".join([project_id, source_file, function_name, line, finding.vuln_type, finding.title, evidence[:512]])
     artifacts: list[dict[str, Any]] = []
-    if report_text:
+    if report_markdown:
         artifacts.append(_artifact_item(
-            kind="report", name="vulnerability-report.md", content=report_text,
+            kind="report", name="vulnerability-report.md", content=report_markdown,
             path=report_path, media_type="text/markdown",
             metadata={"finding_id": finding.finding_id, "artifact_role": "vulnerability_report"},
         ))
@@ -218,13 +232,13 @@ def build_intake_payload(
             ],
         },
         "artifacts": artifacts,
-        **({} if not report_text.strip() else {"raw_report": {
-            "markdown": report_text,
+        "raw_report": {
+            "markdown": report_markdown,
             "title": str(finding.title or finding.finding_id),
             "report_id": report_id,
             "source": "DVS dataflow_vuln_scan",
             "reported_at": _now_iso(),
-        }}),
+        },
         "metadata": {
             "source": {
                 "service_name": SERVICE_NAME,
