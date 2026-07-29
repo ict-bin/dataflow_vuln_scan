@@ -621,68 +621,72 @@ def cmd_index(file_path: str) -> None:
                 pass
 
 
+def _on_demand_extract_call_edges(func: dict) -> None:
+    """按需提取 call edges: 重新索引函数所在文件 (extract_file_functions 会提取 call edges)。"""
+    src_root = _source_root()
+    sys.path.insert(0, os.environ.get("DVS_APP_DIR", "/opt/dataflow_vuln_scan"))
+    try:
+        from app.dataflow_v2.function_extractor import extract_file_functions
+        from app.dataflow_v2.store import DataflowStore
+        store = None
+        try:
+            store = DataflowStore(_db_dir(), mysql_store=_get_mysql_store())
+            extract_file_functions(src_root, func["file"], store)
+        finally:
+            if store: store.close()
+    except Exception as e:
+        log.warning("on-demand call_edges extract failed (file=%s): %s", func.get("file",""), e)
+
+
 def cmd_callee(func_name: str) -> None:
-    """查某函数调用了哪些函数 (callee)。"""
-    rec = _find_function_record(func_name)
-    if rec is None:
+    """查某函数调用了哪些函数 (callee)。
+    先查 call_edges_indexed 标记: 已提取直接查; 未提取则按需提取后查。"""
+    func = _find_func(func_name)
+    if func is None:
         print(f"NOT_FOUND: {func_name}")
         return
-    func_id = rec.func_id or rec.name
+    func_id = func.get("func_id", "")
+    # 检查 call_edges 是否已提取
+    indexed = _query("functions.db", "SELECT call_edges_indexed FROM functions WHERE func_id=?", (func_id,))
+    if not indexed or not indexed[0].get("call_edges_indexed"):
+        _on_demand_extract_call_edges(func)
     # 查 call_edges 表
-    try:
-        rows = _functions_conn().execute(
-            "SELECT callee_name, call_line, call_file, call_expr "
-            "FROM call_edges WHERE caller_func_id=? ORDER BY call_line", (func_id,)).fetchall()
-    except Exception:
-        # 表可能不存在 (旧库)
-        print("call_edges table not found. Run index to build call edges.")
-        return
+    rows = _query("functions.db",
+        "SELECT callee_name, call_line, call_file, call_expr "
+        "FROM call_edges WHERE caller_func_id=? ORDER BY call_line", (func_id,))
     if not rows:
-        print(f"No callees recorded for {func_name} (func_id={func_id[:12]}...).")
-        print("Call edges are extracted during indexing. Re-index the file to populate.")
+        print(f"No callees found for {func_name}.")
         return
-    print(f"Callees of {func_name} (func_id={func_id[:12]}...):")
+    print(f"Callees of {func_name} ({len(rows)} edges):")
     for r in rows:
         print(f"  L{r['call_line']} {r['callee_name']}  | {r['call_file']} | {r['call_expr'][:60]}")
 
 
 def cmd_caller(func_name: str) -> None:
-    """查哪些函数调用了某函数 (caller)。"""
-    # call_edges 按 callee_name 查 (不限文件)
-    try:
-        rows = _functions_conn().execute(
-            "SELECT caller_func_id, call_line, call_file, call_expr "
-            "FROM call_edges WHERE callee_name=? ORDER BY caller_func_id", (func_name,)).fetchall()
-    except Exception:
-        print("call_edges table not found. Run index to build call edges.")
-        return
+    """查哪些函数调用了某函数 (caller)。
+    按 callee_name 查 call_edges 表。如未找到, 提示索引调用方文件。"""
+    rows = _query("functions.db",
+        "SELECT caller_func_id, call_line, call_file, call_expr "
+        "FROM call_edges WHERE callee_name=? ORDER BY caller_func_id", (func_name,))
     if not rows:
-        # 也试短名匹配
+        # 试短名匹配
         short = func_name.split("::")[-1].split("->")[-1].strip()
         if short != func_name:
-            try:
-                rows = _functions_conn().execute(
-                    "SELECT caller_func_id, call_line, call_file, call_expr "
-                    "FROM call_edges WHERE callee_name LIKE ? ORDER BY caller_func_id",
-                    (f"%{short}%",)).fetchall()
-            except Exception:
-                pass
+            rows = _query("functions.db",
+                "SELECT caller_func_id, call_line, call_file, call_expr "
+                "FROM call_edges WHERE callee_name LIKE ? ORDER BY caller_func_id",
+                (f"%{short}%",))
     if not rows:
         print(f"No callers recorded for {func_name}.")
-        print("Call edges are extracted during indexing. Index caller files to populate.")
+        print("Tip: index the caller's file to populate call edges.")
         return
-    print(f"Callers of {func_name}:")
-    # 用 caller_func_id 查函数名
+    print(f"Callers of {func_name} ({len(rows)} edges):")
     for r in rows:
         caller_id = r['caller_func_id']
-        caller_name = caller_id[:16]  # 默认用 func_id 前 16 字符
-        try:
-            fr = _functions_conn().execute(
-                "SELECT name, file FROM functions WHERE func_id=?", (caller_id,)).fetchone()
-            if fr:
-                caller_name = f"{fr['name']} ({fr['file']})"
-        except Exception:
-            pass
+        caller_name = caller_id[:16]
+        fr = _query("functions.db", "SELECT name, file FROM functions WHERE func_id=?", (caller_id,))
+        if fr:
+            caller_name = f"{fr[0]['name']} ({fr[0]['file']})"
         print(f"  {caller_name} L{r['call_line']} | {r['call_expr'][:60]}")
 
 

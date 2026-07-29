@@ -59,7 +59,8 @@ _DDL = {
             body_path        TEXT,
             func_hash        TEXT,
             description      TEXT DEFAULT '',
-            processed_taints TEXT DEFAULT '[]'
+            processed_taints TEXT DEFAULT '[]',
+            call_edges_indexed INTEGER NOT NULL DEFAULT 0
         );
         CREATE INDEX IF NOT EXISTS idx_func_name ON functions(name);
         CREATE INDEX IF NOT EXISTS idx_func_file ON functions(file);
@@ -211,6 +212,9 @@ class DataflowStore:
         # 轻量迁移: 为旧库补新列 (CREATE TABLE IF NOT EXISTS 不会加列)
         self._migrate_columns("propagations", [
             "escape_kind", "carrier", "escape_via",
+        ])
+        self._migrate_columns("functions", [
+            "call_edges_indexed",
         ])
         # 迁移 processed_taints PK: (func_id, taint_sig, pre_val) → (func_id, taint_sig)
         self._migrate_processed_taints_pk()
@@ -410,7 +414,8 @@ class DataflowStore:
     # ── 调用关系 (call_edges) ──────────────────────────────────────────
     def save_call_edges(self, caller_func_id: str, edges: list[dict]) -> None:
         """存储函数调用边 (按需填值, INSERT OR IGNORE 幂等)。
-        edges: [{callee_name, call_line, call_file, call_expr}, ...]"""
+        edges: [{callee_name, call_line, call_file, call_expr}, ...]
+        同时标记 call_edges_indexed=1 防止重复提取。"""
         if not edges: return
         with self._locks["functions"]:
             c = self._conns["functions"]
@@ -421,7 +426,16 @@ class DataflowStore:
                     "VALUES (?,?,?,?,?)",
                     (caller_func_id, e.get("callee_name", ""),
                      e.get("call_line", 0), e.get("call_file", ""), e.get("call_expr", "")))
+            # 标记已提取
+            c.execute(
+                "UPDATE functions SET call_edges_indexed=1 WHERE func_id=?", (caller_func_id,))
             c.commit()
+
+    def is_call_edges_indexed(self, func_id: str) -> bool:
+        """查某函数的 call_edges 是否已提取 (避免重复查找)。"""
+        rows = self._q("functions",
+            "SELECT call_edges_indexed FROM functions WHERE func_id=?", (func_id,))
+        return bool(rows and rows[0]["call_edges_indexed"])
 
     def query_callees(self, caller_func_id: str) -> list[dict]:
         """查某函数调用了哪些函数 (callee)。返回 [{callee_name, call_line, call_file, call_expr}, ...]"""
