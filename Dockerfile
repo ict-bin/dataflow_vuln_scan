@@ -73,7 +73,8 @@ RUN mkdir -p /root/.pi/agent/skills \
     && ln -sf /opt/dataflow_vuln_scan/skills/write-dataflow /root/.pi/agent/skills/write-dataflow \
     && ln -sf /opt/dataflow_vuln_scan/skills/write-taint-flow /root/.pi/agent/skills/write-taint-flow \
     && ln -sf /opt/dataflow_vuln_scan/skills/write-taint-graph /root/.pi/agent/skills/write-taint-graph \
-    && ln -sf /opt/dataflow_vuln_scan/skills/mine-dataflow-vulnerability /root/.pi/agent/skills/mine-dataflow-vulnerability
+    && ln -sf /opt/dataflow_vuln_scan/skills/mine-dataflow-vulnerability /root/.pi/agent/skills/mine-dataflow-vulnerability \
+    && ln -sf /opt/dataflow_vuln_scan/skills/v2/v2-database /root/.pi/agent/skills/v2-database
 
 # ═══ 挂载点 ═══════════════════════════════════════════════════════════════════
 RUN mkdir -p /data/target /data/config /data/output /data/workspace /data/sessions
