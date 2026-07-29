@@ -36,6 +36,8 @@ python3 /opt/dataflow_vuln_scan/tools/v2_db.py <命令> <参数>
 | `orchestration <函数名>` | 查编排库→返回调用链 | `bash$ python3 /opt/dataflow_vuln_scan/tools/v2_db.py orchestration xmlC14NExecute` |
 | `index <文件路径>` | 索引新文件到函数库 | `bash$ python3 /opt/dataflow_vuln_scan/tools/v2_db.py index xpath/xpath.c` |
 | `symbol <符号名>` | 查宏定义/typedef/struct/enum (grep 全盘 .h/.c) | `bash$ python3 /opt/dataflow_vuln_scan/tools/v2_db.py symbol DNS_MAX_CNAME_LEN` |
+| `callee <函数名>` | 查某函数调用了哪些函数 (正向调用关系) | `bash$ python3 /opt/dataflow_vuln_scan/tools/v2_db.py callee IPSEC_ESP_Decryption` |
+| `caller <函数名>` | 查哪些函数调用了某函数 (反向调用关系) | `bash$ python3 /opt/dataflow_vuln_scan/tools/v2_db.py caller IPSEC_MakeDbgLibStrSetter` |
 
 ## 使用流程
 

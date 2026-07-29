@@ -124,6 +124,41 @@ def read_function_body(source_root: str, func: FunctionRecord, max_lines: int = 
         return f"// 读取失败: {e}\n// 行 {func.start_line}-{func.end_line}"
 
 
+def _extract_call_edges(func_node: Any, source: bytes, rel_file: str,
+                       caller_func_id: str, store: DataflowStore) -> None:
+    """从函数体 AST 提取 CallExpression, 存入 call_edges 表 (按需填值)。"""
+    edges: list[dict] = []
+    seen = set()  # (callee, line) 去重
+
+    def _walk_calls(node: Any) -> None:
+        # C/C++ tree-sitter: call_expression 节点
+        if node.type == "call_expression":
+            # callee 在 function 字段
+            callee_node = node.child_by_field_name("function")
+            if callee_node is not None:
+                callee_name = callee_node.text.decode("utf-8", "replace").strip()
+                # 简化: 去掉指针/成员访问前缀 (a->b() → b, Class::method() → method)
+                # 保留全名供 LLM 判断
+                call_line = int(node.start_point[0]) + 1
+                key = (callee_name, call_line)
+                if key not in seen:
+                    seen.add(key)
+                    # 提取调用表达式 (前 80 字符)
+                    expr = source[node.start_byte:node.end_byte][:80].decode("utf-8", "replace").strip()
+                    edges.append({
+                        "callee_name": callee_name,
+                        "call_line": call_line,
+                        "call_file": rel_file,
+                        "call_expr": expr,
+                    })
+        for child in node.children:
+            _walk_calls(child)
+
+    _walk_calls(func_node)
+    if edges:
+        store.save_call_edges(caller_func_id, edges)
+
+
 def extract_file_functions(source_root: str, rel_file: str, store: DataflowStore) -> list[FunctionRecord]:
     """解析单个源文件, 提取所有函数, 存入 functions.db (不写 body 文件)。"""
     if not _TS_AVAILABLE:
@@ -181,6 +216,11 @@ def extract_file_functions(source_root: str, rel_file: str, store: DataflowStore
                         _time.sleep(0.1)
                     # ON CONFLICT DO UPDATE is idempotent; if all 3 attempts fail,
                     # another process likely already wrote this function
+            # 提取调用边 (call_edges): 遍历函数体找 CallExpression
+            try:
+                _extract_call_edges(node, source, rel_file, rec.func_id, store)
+            except Exception as e:
+                logger.debug("extract_call_edges failed (func=%s): %s", rec.name, e)
         for child in node.children:
             walk(child)
 

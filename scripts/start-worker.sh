@@ -27,4 +27,8 @@ while time.time() < deadline:
 print(f"[worker] redis {host}:{port} unreachable after 10min; starting celery anyway (retry-on-startup 兜底)", flush=True)
 PYEOF
 
+# 挂载 v2-database skill 到 pi (LLM 需要看到 SKILL.md 才能正确调用 v2_db)
+mkdir -p /root/.pi/agent/skills
+ln -sf /opt/dataflow_vuln_scan/skills/v2/v2-database /root/.pi/agent/skills/v2-database
+
 exec /opt/venv/bin/celery -A app.celery_app worker -P prefork -c 1 -n dvs-worker@%h --max-tasks-per-child=10 -Q dvs -l info

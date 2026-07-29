@@ -621,6 +621,71 @@ def cmd_index(file_path: str) -> None:
                 pass
 
 
+def cmd_callee(func_name: str) -> None:
+    """查某函数调用了哪些函数 (callee)。"""
+    rec = _find_function_record(func_name)
+    if rec is None:
+        print(f"NOT_FOUND: {func_name}")
+        return
+    func_id = rec.func_id or rec.name
+    # 查 call_edges 表
+    try:
+        rows = _functions_conn().execute(
+            "SELECT callee_name, call_line, call_file, call_expr "
+            "FROM call_edges WHERE caller_func_id=? ORDER BY call_line", (func_id,)).fetchall()
+    except Exception:
+        # 表可能不存在 (旧库)
+        print("call_edges table not found. Run index to build call edges.")
+        return
+    if not rows:
+        print(f"No callees recorded for {func_name} (func_id={func_id[:12]}...).")
+        print("Call edges are extracted during indexing. Re-index the file to populate.")
+        return
+    print(f"Callees of {func_name} (func_id={func_id[:12]}...):")
+    for r in rows:
+        print(f"  L{r['call_line']} {r['callee_name']}  | {r['call_file']} | {r['call_expr'][:60]}")
+
+
+def cmd_caller(func_name: str) -> None:
+    """查哪些函数调用了某函数 (caller)。"""
+    # call_edges 按 callee_name 查 (不限文件)
+    try:
+        rows = _functions_conn().execute(
+            "SELECT caller_func_id, call_line, call_file, call_expr "
+            "FROM call_edges WHERE callee_name=? ORDER BY caller_func_id", (func_name,)).fetchall()
+    except Exception:
+        print("call_edges table not found. Run index to build call edges.")
+        return
+    if not rows:
+        # 也试短名匹配
+        short = func_name.split("::")[-1].split("->")[-1].strip()
+        if short != func_name:
+            try:
+                rows = _functions_conn().execute(
+                    "SELECT caller_func_id, call_line, call_file, call_expr "
+                    "FROM call_edges WHERE callee_name LIKE ? ORDER BY caller_func_id",
+                    (f"%{short}%",)).fetchall()
+            except Exception:
+                pass
+    if not rows:
+        print(f"No callers recorded for {func_name}.")
+        print("Call edges are extracted during indexing. Index caller files to populate.")
+        return
+    print(f"Callers of {func_name}:")
+    # 用 caller_func_id 查函数名
+    for r in rows:
+        caller_id = r['caller_func_id']
+        caller_name = caller_id[:16]  # 默认用 func_id 前 16 字符
+        try:
+            fr = _functions_conn().execute(
+                "SELECT name, file FROM functions WHERE func_id=?", (caller_id,)).fetchone()
+            if fr:
+                caller_name = f"{fr['name']} ({fr['file']})"
+        except Exception:
+            pass
+        print(f"  {caller_name} L{r['call_line']} | {r['call_expr'][:60]}")
+
+
 def cmd_symbol(name: str) -> None:
     """查符号在 C/C++ 源树中的出现位置。"""
     import subprocess
@@ -690,6 +755,12 @@ def main():
         cmd_index(sys.argv[2])
     elif cmd == "symbol" and len(sys.argv) >= 3:
         cmd_symbol(sys.argv[2])
+    elif cmd == "callee" and len(sys.argv) >= 3:
+        cmd_callee(sys.argv[2])
+    elif cmd == "caller" and len(sys.argv) >= 3:
+        cmd_caller(sys.argv[2])
+    elif cmd == "help":
+        print("Commands: lookup <name>, taints <name>, propagations <name>, orchestration <name>, index <file>, symbol <name>, callee <name> (what does it call), caller <name> (who calls it)")
     else:
         print(f"Unknown command: {cmd}")
         print("Commands: lookup, taints, propagations, orchestration, index, symbol")

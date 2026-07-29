@@ -6,10 +6,13 @@
 :## 工具约束（防 session 膨胀，必须遵守）
 
 - **函数体已在上方 prompt 提供（带行号），不要用 `read` 重读本函数**（重读会爆 session 内存）。
-- **查 callee 签名/宏定义/符号 → 走 v2_db**（返回 bounded 结果，快）:
+- **查 callee 签名/宏定义/符号/调用关系 → 走 v2_db**（返回 bounded 结果，快）:
   - `python3 /opt/dataflow_vuln_scan/tools/v2_db.py lookup <函数名>` — 返回函数体（带行号）
   - `python3 /opt/dataflow_vuln_scan/tools/v2_db.py symbol <符号名>` — 返回宏/struct/typedef 定义
+  - `python3 /opt/dataflow_vuln_scan/tools/v2_db.py callee <函数名>` — 查该函数调用了哪些函数（正向）
+  - `python3 /opt/dataflow_vuln_scan/tools/v2_db.py caller <函数名>` — 查哪些函数调用了该函数（反向）
 - **不要用 `grep`/`find` 搜源码树** — grep -rn 返回大量结果行导致 session 膨胀，后续每轮 LLM 调用 input token 越来越大，最终超时。v2_db 只返回你需要的函数体，不会有这个问题。
+- **查调用关系用 `caller`/`callee` 命令，不要用 `grep -rn` 搜函数名**。
 - **工具调用总预算: 最多 5 次**。函数体已在 prompt 中，v2_db 只用于查 callee 签名。超过 5 次说明你在过度搜索。
 
 ## callee 边规则（核心，易漏）

@@ -97,6 +97,17 @@ _DDL = {
             file_path TEXT PRIMARY KEY,
             started_at REAL DEFAULT 0
         );
+        -- 调用关系表 (按需填值): caller 调用 callee 的边
+        CREATE TABLE IF NOT EXISTS call_edges (
+            caller_func_id   TEXT NOT NULL,
+            callee_name       TEXT NOT NULL,
+            call_line         INTEGER NOT NULL DEFAULT 0,
+            call_file         TEXT DEFAULT '',
+            call_expr         TEXT DEFAULT '',
+            PRIMARY KEY (caller_func_id, callee_name, call_line)
+        );
+        CREATE INDEX IF NOT EXISTS idx_call_edges_caller ON call_edges(caller_func_id);
+        CREATE INDEX IF NOT EXISTS idx_call_edges_callee ON call_edges(callee_name);
     """,
     "taints": """
         CREATE TABLE IF NOT EXISTS taints (
@@ -395,6 +406,36 @@ class DataflowStore:
             if recs: return recs
         rows = self._q("functions", "SELECT * FROM functions WHERE file=? ORDER BY start_line", (file,))
         return [_row_to_function(r) for r in rows] if rows else []
+
+    # ── 调用关系 (call_edges) ──────────────────────────────────────────
+    def save_call_edges(self, caller_func_id: str, edges: list[dict]) -> None:
+        """存储函数调用边 (按需填值, INSERT OR IGNORE 幂等)。
+        edges: [{callee_name, call_line, call_file, call_expr}, ...]"""
+        if not edges: return
+        with self._locks["functions"]:
+            c = self._conns["functions"]
+            for e in edges:
+                c.execute(
+                    "INSERT OR IGNORE INTO call_edges "
+                    "(caller_func_id, callee_name, call_line, call_file, call_expr) "
+                    "VALUES (?,?,?,?,?)",
+                    (caller_func_id, e.get("callee_name", ""),
+                     e.get("call_line", 0), e.get("call_file", ""), e.get("call_expr", "")))
+            c.commit()
+
+    def query_callees(self, caller_func_id: str) -> list[dict]:
+        """查某函数调用了哪些函数 (callee)。返回 [{callee_name, call_line, call_file, call_expr}, ...]"""
+        rows = self._q("functions",
+            "SELECT callee_name, call_line, call_file, call_expr "
+            "FROM call_edges WHERE caller_func_id=? ORDER BY call_line", (caller_func_id,))
+        return [dict(r) for r in rows] if rows else []
+
+    def query_callers(self, callee_name: str) -> list[dict]:
+        """查哪些函数调用了某函数 (caller)。返回 [{caller_func_id, call_line, call_file, call_expr}, ...]"""
+        rows = self._q("functions",
+            "SELECT caller_func_id, call_line, call_file, call_expr "
+            "FROM call_edges WHERE callee_name=? ORDER BY caller_func_id", (callee_name,))
+        return [dict(r) for r in rows] if rows else []
 
     # ── include 索引 (C 作用域) ────────────────────────────────────────
     def add_include(self, header: str, file: str) -> None:
