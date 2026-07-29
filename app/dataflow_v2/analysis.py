@@ -1311,9 +1311,20 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
         validation_hints, function_hints = _collect_validation_hints(ctx.pre_validations, props, current_func=func)
         validation_hint_text = "\n".join(validation_hints) or "(无)"
         function_hint_text = "\n".join(function_hints) or "(无)"
-        prompt = (
-            f"# 阶段：漏洞挖掘 Fork\n\n以上是整条调用链的污点分析历史 (从根函数到本函数)。\n"
-            f"现在请基于全链上下文, 判断**本函数** `{func.file}::{func.name}` 内是否存在漏洞。\n"
+        v2_env = {"DVS_V2_DB_DIR": str(self.vuln_root.parent / "dataflow-v2"),
+                  "DVS_SOURCE_ROOT": self.source_root,
+                  "DVS_TASK_ID": self.task_id,
+                  "DVS_PROJECT_ID": getattr(self.cfg, "project_id", "") or "",
+                  "DVS_MYSQL_URL": "mysql+pymysql://root:Huawei12%23$@secflow-app-dataflow-vuln-scan-mysql.secflow-ns.svc.cluster.local:3306"}
+        _ta_ctx = _truncate_text_by_estimated_tokens(dataflow_text, max_tokens=30000)
+        _common_task_ctx = {"task_id": self.task_id, "task_root": str(self.run_dir.parent),
+                          "task_run_root": str(self.run_dir), "task_pi_dir": self.cfg.role_pi_dir("workers"),
+                          "agent_role": "workers", "fork_purpose": "vuln_mining"}
+        _thinking = getattr(self.cfg, "vuln_mining_thinking_level", "high")
+
+        # ── 第一步: 漏洞判断 (default.md, 输出 candidates, 不写完整报告字段) ──
+        step1_prompt = (
+            f"# 阶段：漏洞挖掘第一步 · 判断\n\n"
             f"目标函数: `{func.file}::{func.name}` (行 {func.start_line}-{func.end_line})\n"
             f"源码绝对根目录: `{self.source_root}`。`{func.file}` 是相对该根目录的源码路径；如果需要使用 read/find 读取源码，请基于这个绝对根目录定位文件，不要基于当前工作目录拼接路径。\n"
             f"污点: 位置 {taint_params.positions} 签名 {taint_params.signature} 名字 {taint_params.names}\n\n"
@@ -1324,81 +1335,117 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
             "尤其要关注路径可达性：不要把来自不同互斥分支、不同调用点、不同传播条件下的校验和危险操作简单合并。"
             "只有当某个校验与危险操作位于同一条可达路径上，并且校验对象、时序与约束范围都真实覆盖危险参数时，才能认为该校验有效。\n\n"
             "## 本函数污点分析摘要\n"
-            f"```markdown\n{_truncate_text_by_estimated_tokens(dataflow_text, max_tokens=30000)}\n```\n\n"
-            "结合链上 callee 的行为 (如返回借用指针/分配/不释放等), 判断本函数是否存在漏洞。输出 JSON: {\"findings\":[]}。"
+            f"```markdown\n{_ta_ctx}\n```\n\n"
+            "结合链上 callee 的行为 (如返回借用指针/分配/不释放等), 判断本函数是否存在真实可利用漏洞。"
+            "只输出候选 candidates, 不要写完整报告字段 (title/summary/entry_point/trigger_path/evidence/code_snippet/code_explanation/fix_suggestion 等在第二步生成)。"
+            ' 输出 JSON: {"candidates":[]}。无候选输出 {"candidates":[]}。'
         )
-        miner_system = (_build_v2_system_prompt(custom="vuln-mining")
-                         + "\n\n# 内嵌技能：mine-dataflow-vulnerability\n"
-                           "禁止再读取 skills/mine-dataflow-vulnerability/SKILL.md。\n\n"
-                         f"{_EMBEDDED_VULN_MINING_SKILL}\n\n{self._vuln_miner_prompt}")
-        v2_env = {"DVS_V2_DB_DIR": str(self.vuln_root.parent / "dataflow-v2"),
-                  "DVS_SOURCE_ROOT": self.source_root,
-                  "DVS_TASK_ID": self.task_id,
-                  "DVS_PROJECT_ID": getattr(self.cfg, "project_id", "") or "",
-                  "DVS_MYSQL_URL": "mysql+pymysql://root:Huawei12%23$@secflow-app-dataflow-vuln-scan-mysql.secflow-ns.svc.cluster.local:3306"}
-        logger.info("[V2-mine] CALLING run_agent (session=%s thinking=%s)",
-                    str(fork_session)[-60:], getattr(self.cfg, "vuln_mining_thinking_level", "high"))
-        output = run_agent(
-            prompt=prompt, model=acfg.model, tools=acfg.tools or self.cfg.workers.default_tools,
+        step1_system = _build_v2_system_prompt(custom="vuln-mining") + "\n\n" + self._vuln_miner_prompt
+        logger.info("[V2-mine] STEP1 judge CALLING run_agent (session=%s thinking=%s)",
+                    str(fork_session)[-60:], _thinking)
+        output1 = run_agent(
+            prompt=step1_prompt, model=acfg.model, tools=acfg.tools or self.cfg.workers.default_tools,
             cwd=str(self.vuln_root.parent), session_file=str(fork_session),
-            system_prompt=miner_system, cancel_event=self.cancel_event,
-            env=v2_env,
-            thinking_level=getattr(self.cfg, "vuln_mining_thinking_level", "high"),
-            run_timeout_seconds=self.cfg.agent_run_timeout_seconds,
+            system_prompt=step1_system, cancel_event=self.cancel_event, env=v2_env,
+            thinking_level=_thinking, run_timeout_seconds=self.cfg.agent_run_timeout_seconds,
             timeout_retry_enabled=self.cfg.agent_timeout_retry_enabled,
             timeout_max_retries=self.cfg.agent_timeout_max_retries,
             pi_max_retries=self.cfg.pi_max_retries, pi_retry_delay=self.cfg.pi_retry_delay,
-            task_context={"task_id": self.task_id, "task_root": str(self.run_dir.parent),
-                          "task_run_root": str(self.run_dir), "task_pi_dir": self.cfg.role_pi_dir("workers"),
-                          "agent_role": "workers", "fork_purpose": "vuln_mining"},
+            task_context=_common_task_ctx,
         )
-        logger.info("[V2-mine] DONE func=%s::%s duration=%.1fs error=%s output_len=%d",
+        logger.info("[V2-mine] STEP1 DONE func=%s::%s duration=%.1fs error=%s output_len=%d",
+                    func.file, func.name, time.time() - _t0, (output1.error or "")[:100], len(output1.output or ""))
+        if self.on_event:
+            emit_agent_runtime_events(self.on_event, result=output1, stage="vuln_mining_v2_step1",
+                                      role="workers", model=acfg.model, extra={"function": func.name, "step": "judge"})
+        cand_result = extract_llm_structured_output(
+            output1.output or "", required_key="candidates",
+            expected_kind="object", required_container_type=list, allow_truncated_recovery=False,
+        )
+        cand_parsed = cand_result.value if isinstance(cand_result.value, dict) else None
+        if cand_parsed is None:
+            if cand_result.error or "candidates" in (output1.output or "") or "```" in (output1.output or ""):
+                logger.warning("[V2-mine] STEP1 candidates parse failed func=%s::%s error=%s output_len=%d",
+                               func.file, func.name, cand_result.error or "failed to extract candidates json", len(output1.output or ""))
+                _emit_v2_llm_json_parse_event(self.on_event, event_type="v2_llm_json_parse_failed",
+                    stage="vuln_mining_v2_step1", func=func, error=cand_result.error,
+                    output_text=output1.output or "", required_key="candidates", expected_kind="object")
+            cand_parsed = {"candidates": []}
+        elif cand_result.repaired:
+            _emit_v2_llm_json_parse_event(self.on_event, event_type="v2_llm_json_parse_recovered",
+                stage="vuln_mining_v2_step1", func=func, error=None, output_text=output1.output or "",
+                required_key="candidates", expected_kind="object", repair_actions=cand_result.repair_actions, level="warning")
+        candidates = [c for c in (cand_parsed.get("candidates") or []) if isinstance(c, dict)]
+        node = f"{func.file}::{func.name}"
+        if not candidates:
+            # 无候选: 不走第二步, 直接收尾 (no_finding)
+            authoritative_count = 0
+            if self._graph_store_ready():
+                self.graph_store.update_task_graph_node(node_id, findings_count=0, primary_session_relpath=session_relpath)
+            session_status = "cancelled" if self._cancel_requested() else "done"
+            if self._graph_store_ready():
+                self.graph_store.update_task_graph_session(session_relpath, node_id=node_id, status=session_status, ended_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"))
+            update_session_index_item(run_root=self.session_lineage_run_root, task_id=self.task_id,
+                session_relpath=session_relpath_for_run_root(self.session_lineage_run_root, fork_session),
+                status=session_status, ended_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"), findings_count=0)
+            logger.info("[V2-mine] no candidate func=%s::%s duration=%.1fs (skip step2)", func.file, func.name, time.time() - _t0)
+            return 0
+
+        # ── 第二步: 生成漏洞报告 (SKILL, 完整字段 + 合并污点传播, 仅在有候选时执行) ──
+        import json as _json
+        step2_prompt = (
+            "# 阶段：漏洞挖掘第二步 · 生成漏洞报告\n\n"
+            "第一步已确认本函数内存在候选漏洞。请对每个候选产出**完整漏洞报告 JSON** (findings[]), 包含全部字段。\n"
+            "**必须把下方污点传播上下文合理合并进报告**: trigger_path/entry_point/evidence/code_snippet 引用上下文中的真实行号与传播边, 不得凭空编造。\n\n"
+            f"## 第一步确认的候选\n```json\n{_json.dumps(candidates, ensure_ascii=False, indent=2)}\n```\n\n"
+            "## 本函数污点传播上下文\n"
+            f"```markdown\n{_ta_ctx}\n```\n\n"
+            '输出 JSON: {"findings":[]}。'
+        )
+        step2_system = (_build_v2_system_prompt(custom="vuln-mining")
+                        + "\n\n# 内嵌技能：mine-dataflow-vulnerability\n"
+                          "禁止再读取 skills/mine-dataflow-vulnerability/SKILL.md。\n\n"
+                        + _EMBEDDED_VULN_MINING_SKILL)
+        logger.info("[V2-mine] STEP2 report CALLING run_agent (session=%s thinking=%s candidates=%d)",
+                    str(fork_session)[-60:], _thinking, len(candidates))
+        output = run_agent(
+            prompt=step2_prompt, model=acfg.model, tools=acfg.tools or self.cfg.workers.default_tools,
+            cwd=str(self.vuln_root.parent), session_file=str(fork_session),
+            system_prompt=step2_system, cancel_event=self.cancel_event, env=v2_env,
+            thinking_level=_thinking, run_timeout_seconds=self.cfg.agent_run_timeout_seconds,
+            timeout_retry_enabled=self.cfg.agent_timeout_retry_enabled,
+            timeout_max_retries=self.cfg.agent_timeout_max_retries,
+            pi_max_retries=self.cfg.pi_max_retries, pi_retry_delay=self.cfg.pi_retry_delay,
+            task_context=_common_task_ctx,
+        )
+        logger.info("[V2-mine] STEP2 DONE func=%s::%s duration=%.1fs error=%s output_len=%d",
                     func.file, func.name, time.time() - _t0, (output.error or "")[:100], len(output.output or ""))
         if self.on_event:
-            emit_agent_runtime_events(self.on_event, result=output, stage="vuln_mining_v2",
-                                      role="workers", model=acfg.model, extra={"function": func.name})
+            emit_agent_runtime_events(self.on_event, result=output, stage="vuln_mining_v2_step2",
+                                      role="workers", model=acfg.model, extra={"function": func.name, "step": "report"})
         parse_result = extract_llm_structured_output(
-            output.output or "",
-            required_key="findings",
-            expected_kind="object",
-            required_container_type=list,
-            allow_truncated_recovery=False,
+            output.output or "", required_key="findings",
+            expected_kind="object", required_container_type=list, allow_truncated_recovery=False,
         )
         parsed = parse_result.value if isinstance(parse_result.value, dict) else None
         if parsed is None:
             if parse_result.error or "findings" in (output.output or "") or "```" in (output.output or ""):
                 logger.warning(
-                    "[V2-mine] findings parse failed func=%s::%s error=%s output_len=%d",
-                    func.file,
-                    func.name,
-                    parse_result.error or "failed to extract findings json",
-                    len(output.output or ""),
+                    "[V2-mine] STEP2 findings parse failed func=%s::%s error=%s output_len=%d",
+                    func.file, func.name, parse_result.error or "failed to extract findings json", len(output.output or ""),
                 )
                 _emit_v2_llm_json_parse_event(
-                    self.on_event,
-                    event_type="v2_llm_json_parse_failed",
-                    stage="vuln_mining_v2",
-                    func=func,
-                    error=parse_result.error,
-                    output_text=output.output or "",
-                    required_key="findings",
-                    expected_kind="object",
+                    self.on_event, event_type="v2_llm_json_parse_failed",
+                    stage="vuln_mining_v2_step2", func=func, error=parse_result.error,
+                    output_text=output.output or "", required_key="findings", expected_kind="object",
                 )
             parsed = {"findings": []}
         elif parse_result.repaired:
             _emit_v2_llm_json_parse_event(
-                self.on_event,
-                event_type="v2_llm_json_parse_recovered",
-                stage="vuln_mining_v2",
-                func=func,
-                error=None,
-                output_text=output.output or "",
-                required_key="findings",
-                expected_kind="object",
-                repair_actions=parse_result.repair_actions,
-                level="warning",
+                self.on_event, event_type="v2_llm_json_parse_recovered",
+                stage="vuln_mining_v2_step2", func=func, error=None, output_text=output.output or "",
+                required_key="findings", expected_kind="object", repair_actions=parse_result.repair_actions, level="warning",
             )
-        node = f"{func.file}::{func.name}"
         persisted_count = 0
         for idx, item in enumerate(parsed.get("findings") or []):
             if not isinstance(item, dict):
@@ -1505,7 +1552,6 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                 finding=rec,
                 source_root=self.source_root,
                 report_path=str(fdir / "vulnerability-report.md"),
-                taint_path_report_path=str(fdir / "taint-path-report.md"),
                 use_self_task_id=use_self)
         except Exception as exc:  # 双保险: report_finding_to_intake 不应 raise, 但防意外
             logger.warning("v2 intake report failed for %s: %s", finding_id, exc, exc_info=True)

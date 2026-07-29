@@ -129,8 +129,7 @@ def persist_finding(
     """持久化一条 finding (与完整模式 mine_vulns 完全同格式)。
 
     - finding_id = vuln_<sha1(func|type|line)>[:16] (同完整模式)
-    - vulnerabilities/{id}/vulnerability-report.md (format_vuln_report_md 同模板)
-    - vulnerabilities/{id}/taint-path-report.md = context_text
+    - vulnerabilities/{id}/vulnerability-report.md (format_vuln_report_md, 已合并污点传播路径段)
     - vulnerabilities/{id}/context.jsonl = 复制 context_session_path
     - vuln-scan.sqlite: analysis_runs + taint_nodes (FK) + vulnerability_findings (INSERT OR REPLACE)
     - intake 上报 (退避: 父任务 → 自身 task_id)
@@ -151,8 +150,7 @@ def persist_finding(
     fdir = vuln_root / finding_id
     fdir.mkdir(parents=True, exist_ok=True)
     (fdir / "vulnerability-report.md").write_text(
-        format_vuln_report_md(item, finding_id, fsrc, ffn, fline), encoding="utf-8")
-    (fdir / "taint-path-report.md").write_text(context_text, encoding="utf-8")
+        format_vuln_report_md(item, finding_id, fsrc, ffn, fline, taint_context=context_text), encoding="utf-8")
     try:
         from ..copy_utils import safe_copyfile
         safe_copyfile(context_session_path, str(fdir / "context.jsonl"))
@@ -296,7 +294,6 @@ def _intake_report(run_id, task_id, source_root, report_dir, rec, finding_id,
             task_origin_type=cfg_task_origin_type,
             finding=rec, source_root=source_root,
             report_path=str(report_dir / "vulnerability-report.md"),
-            taint_path_report_path=str(report_dir / "taint-path-report.md"),
             use_self_task_id=False)
         if str(res.get("status") or "") == "reported":
             _record_intake_result(graph_store=graph_store, run_id=run_id, task_id=task_id, finding_id=finding_id, rec=rec, res=res, on_event=on_event)
@@ -318,7 +315,6 @@ def _intake_report(run_id, task_id, source_root, report_dir, rec, finding_id,
                 parent_task_id=cfg_parent_task_id, parent_task_type=cfg_parent_task_type,
                 task_origin_type=cfg_task_origin_type, finding=rec, source_root=source_root,
                 report_path=str(report_dir / "vulnerability-report.md"),
-                taint_path_report_path=str(report_dir / "taint-path-report.md"),
                 use_self_task_id=True)
             _record_intake_result(graph_store=graph_store, run_id=run_id, task_id=task_id, finding_id=finding_id, rec=rec, res=res2, on_event=on_event)
             return

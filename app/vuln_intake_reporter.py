@@ -129,7 +129,6 @@ def build_intake_payload(
     finding: VulnFindingRecord,
     source_root: str = "",
     report_path: str = "",
-    taint_path_report_path: str = "",
     use_self_task_id: bool = False,
 ) -> dict[str, Any]:
     """Convert a stored DVS finding into the vuln-platform intake schema.
@@ -137,6 +136,8 @@ def build_intake_payload(
     use_self_task_id=True 时强制用 DVS 自身 task_id 作为 metadata.source.task_id
     (父任务被删/不可挂载时的退避重试)。
     """
+    # 污点传播路径已合并进 vulnerability-report.md (format_vuln_report_md 的
+    # taint_context 段), 不再单独上报 taint-path-report artifact.
     # 编排器下发的任务 (task_origin_type != manual) 用 parent_task_id (编排器);
     # 手动创建或退避重试时用 DVS task_id
     if use_self_task_id:
@@ -147,7 +148,6 @@ def build_intake_payload(
         effective_task_id = task_id
     report_id = _stable_report_id(project_id=project_id, task_id=effective_task_id, finding=finding)
     report_text = _read_text(report_path) if report_path else ""
-    taint_text = _read_text(taint_path_report_path, limit=120_000) if taint_path_report_path else ""
     source_file = str(finding.source_file or "").strip()
     function_name = str(finding.function_name or "").strip()
     line = str(finding.line or "").strip()
@@ -182,12 +182,6 @@ def build_intake_payload(
             kind="report", name="vulnerability-report.md", content=report_markdown,
             path=report_path, media_type="text/markdown",
             metadata={"finding_id": finding.finding_id, "artifact_role": "vulnerability_report"},
-        ))
-    if taint_text:
-        artifacts.append(_artifact_item(
-            kind="report", name="taint-path-report.md", content=taint_text,
-            path=taint_path_report_path, media_type="text/markdown",
-            metadata={"finding_id": finding.finding_id, "artifact_role": "taint_path"},
         ))
     finding_json = json.dumps(asdict(finding), ensure_ascii=False, indent=2)
     artifacts.append(_artifact_item(
@@ -229,7 +223,6 @@ def build_intake_payload(
             "references": [
                 {"kind": "source_location", "source_file": source_file, "function_name": function_name, "line": line},
                 *([{"kind": "report", "path": report_path}] if report_path else []),
-                *([{"kind": "taint_path", "path": taint_path_report_path}] if taint_path_report_path else []),
             ],
         },
         "artifacts": artifacts,
@@ -280,7 +273,6 @@ def report_finding_to_intake(
     finding: VulnFindingRecord,
     source_root: str = "",
     report_path: str = "",
-    taint_path_report_path: str = "",
     use_self_task_id: bool = False,
 ) -> dict[str, Any]:
     """Submit a DVS finding to the vuln-platform intake endpoint.
@@ -308,7 +300,6 @@ def report_finding_to_intake(
         finding=finding,
         source_root=source_root,
         report_path=report_path,
-        taint_path_report_path=taint_path_report_path,
         use_self_task_id=use_self_task_id,
     )
     try:

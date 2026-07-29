@@ -108,8 +108,13 @@ def format_dimensions_md(value: Any) -> str:
 
 
 def format_vuln_report_md(item: dict, finding_id: str, source_file: str,
-                          function_name: str, line: str) -> str:
-    """Build the vulnerability-report.md body with standardized sections."""
+                          function_name: str, line: str,
+                          taint_context: str = "") -> str:
+    """Build vulnerability-report.md body.
+
+    - 空字段省略段 (不再印“未提供”): 只渲染 LLM 实际产出的段。
+    - 污点传播路径合并为一段 (taint_context), 不再单独写 taint-path-report.md。
+    """
     title = str(item.get("title") or finding_id)
     summary = str(item.get("summary") or "")
     entry_point = str(item.get("entry_point") or "")
@@ -121,27 +126,34 @@ def format_vuln_report_md(item: dict, finding_id: str, source_file: str,
     code_snippet = str(item.get("code_snippet") or "").strip()
     code_explanation = str(item.get("code_explanation") or "").strip()
     fix_suggestion = str(item.get("fix_suggestion") or "").strip()
-    sections = [
-        f"# {title}", "",
-        "## 漏洞最初入口", _flow(entry_point) or "（未提供）", "",
-        "## 漏洞所在文件", f"`{source_file}`", "",
-        "## 漏洞所在函数", f"`{function_name}`", "",
-        "## 漏洞所在行号", f"`{line or 'unknown'}`", "",
-        "## 漏洞源码",
-        (f"```c\n{code_snippet}\n```" if code_snippet else "（未提供）"), "",
-        "## 漏洞概述", _flow(summary), "",
-        "## 漏洞结合代码说明",
-        (_flow(code_explanation) or "（未提供）"), "",
-        "## 漏洞判断依据", _flow(evidence), "",
-        "## 漏洞触发路径", (_flow(trigger_path) or "（未提供）"), "",
-        "## 漏洞危害", format_exploitability_md(item.get("exploitability")), "",
-        "## 修复建议",
-        (_flow(fix_suggestion) or "（未提供）"), "",
-        "## 漏洞基本信息",
-        f"- **漏洞类型**: `{vuln_type}`",
-        f"- **严重程度**: `{severity}`",
-        f"- **置信度**: `{confidence}`",
-    ]
+    taint_ctx = str(taint_context or "").strip()
+    sections: list[str] = [f"# {title}", ""]
+    if _flow(entry_point):
+        sections += ["## 漏洞最初入口", _flow(entry_point), ""]
+    sections += ["## 漏洞所在文件", f"`{source_file}`", "",
+                 "## 漏洞所在函数", f"`{function_name}`", "",
+                 "## 漏洞所在行号", f"`{line or 'unknown'}`", ""]
+    if code_snippet:
+        sections += ["## 漏洞源码", f"```c\n{code_snippet}\n```", ""]
+    if _flow(summary):
+        sections += ["## 漏洞概述", _flow(summary), ""]
+    if _flow(code_explanation):
+        sections += ["## 漏洞结合代码说明", _flow(code_explanation), ""]
+    if _flow(evidence):
+        sections += ["## 漏洞判断依据", _flow(evidence), ""]
+    if _flow(trigger_path):
+        sections += ["## 漏洞触发路径", _flow(trigger_path), ""]
+    if taint_ctx:
+        sections += ["## 污点传播路径", taint_ctx, ""]
+    expl_md = format_exploitability_md(item.get("exploitability"))
+    if expl_md:
+        sections += ["## 漏洞危害", expl_md, ""]
+    if _flow(fix_suggestion):
+        sections += ["## 修复建议", _flow(fix_suggestion), ""]
+    sections += ["## 漏洞基本信息",
+                 f"- **漏洞类型**: `{vuln_type}`",
+                 f"- **严重程度**: `{severity}`",
+                 f"- **置信度**: `{confidence}`"]
     dim_md = format_dimensions_md(item.get("dimensions"))
     if dim_md:
         sections.append("")

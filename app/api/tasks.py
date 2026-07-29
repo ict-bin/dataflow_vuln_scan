@@ -1592,7 +1592,6 @@ def _do_report_finding(task_id: str, finding_id: str, db: Session):
     source_root = str(row.source_root_path or "").strip()
     output_dir = str(finding.get("output_dir") or "")
     report_path = str(Path(output_dir) / "vulnerability-report.md") if output_dir else ""
-    taint_path = str(Path(output_dir) / "taint-path-report.md") if output_dir else ""
     rec = VulnFindingRecord(
         finding_id=finding_id,
         run_id=str(finding.get("run_id") or ""),
@@ -1620,7 +1619,6 @@ def _do_report_finding(task_id: str, finding_id: str, db: Session):
         finding=rec,
         source_root=source_root,
         report_path=report_path,
-        taint_path_report_path=taint_path,
     )
     reported_ok = result.get("status") == "reported"
     # 无论上报成败都尽量同步 SQLite / MySQL 统计，并单独保证 DB commit 不被前序异常吞掉。
