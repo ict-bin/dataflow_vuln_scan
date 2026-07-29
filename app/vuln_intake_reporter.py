@@ -170,8 +170,9 @@ def build_intake_payload(
             f"## 摘要\n\n{finding.summary or finding.title or finding.finding_id}\n\n"
             f"## 证据\n\n{finding.evidence or '（无）'}\n"
         )
-    # summary 用完整报告 markdown (platform-vuln case.summary <- 此字段; 其 "原始上报报告" 文档正文读 case.summary)
-    summary = (report_markdown or finding.summary or finding.title or finding.finding_id).strip()
+    # summary 保持一句话摘要 (finding.summary); 全文报告走 raw_report/artifacts, 不要把 markdown 塞进 summary
+    # (case.summary 是平台 "漏洞摘要" 字段, 塞 markdown 会导致裸文本不渲染)
+    summary = (finding.summary or report_text or finding.title or finding.finding_id).strip()
     evidence = (finding.evidence or "").strip()
     reproduction_hint = (finding.exploitability or "").strip()
     fingerprint_raw = "|".join([project_id, source_file, function_name, line, finding.vuln_type, finding.title, evidence[:512]])
