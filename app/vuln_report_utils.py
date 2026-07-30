@@ -159,13 +159,9 @@ def format_vuln_report_md(item: dict, finding_id: str, source_file: str,
         sections.append("")
         sections.append("## 四维度判断指标")
         sections.append(dim_md.replace("## 四维度自检", "", 1).strip())
-    # 章节间插 --- (平台不渲染 markdown 时也有视觉分隔)
-    out = []
-    for i, s in enumerate(sections):
-        out.append(s)
-        if s == "" and i + 1 < len(sections) and sections[i + 1].startswith("## "):
-            out.append("---")
-    return "\n".join(out) + "\n"
+    # 不再插 --- 章节分隔符: 漏洞中心前端用 /\n*---\s*\n[\s\S]*$/ 正则剥脚注,
+    # 报告正文若含 --- 会被从首个 --- 贪婪删到结尾 (只剩元数据头+#标题), 故仅靠 ## 标题分章
+    return "\n".join(sections) + "\n"
 
 
 # 内嵌技能文本 (v1 vuln_workflow 与 v2 mine_vulns 共用)
