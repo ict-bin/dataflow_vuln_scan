@@ -147,6 +147,28 @@ def _split_taint_context(blob: str) -> tuple[str, str]:
     return func_body_code, propagation
 
 
+def _restructure_taint(blob: str) -> str:
+    """污点传播重组为 ### 污点变量 / ### 传播路径 / ### 前置校验 三小节;
+    去掉 ### 函数/功能/入口污点 (它们在 校验提醒 之前, 被排除)。"""
+    lines = (blob or "").split("\n")
+    idx_check = next((i for i, l in enumerate(lines) if "校验提醒" in l), -1)
+    idx_taints = next((i for i, l in enumerate(lines) if re.match(r'^##+ ', l) and "污点变量" in l), -1)
+    idx_props = next((i for i, l in enumerate(lines) if re.match(r'^##+ ', l) and "传播路径" in l), -1)
+    out = []
+    # 污点变量
+    if idx_taints >= 0:
+        end = idx_props if idx_props > idx_taints else len(lines)
+        out += ["### 污点变量"] + lines[idx_taints + 1:end] + [""]
+    # 传播路径 (含 callee/注, 到末尾)
+    if idx_props >= 0:
+        out += ["### 传播路径"] + lines[idx_props + 1:] + [""]
+    # 前置校验 (最后): 校验提醒 → 污点变量
+    if idx_check >= 0:
+        end = idx_taints if idx_taints > idx_check else len(lines)
+        out += ["### 前置校验"] + lines[idx_check:end]
+    return "\n".join(out).strip() if out else str(blob or "")
+
+
 def format_vuln_report_md(item: dict, finding_id: str, source_file: str,
                           function_name: str, line: str,
                           taint_context: str = "") -> str:
@@ -172,6 +194,7 @@ def format_vuln_report_md(item: dict, finding_id: str, source_file: str,
     # 污点传播上下文里的子标题降为 ### 嵌套到 ## 污点传播路径 下, 层级更清晰
     if _taint_prop_md:
         _taint_prop_md = re.sub(r'^## ', '### ', _taint_prop_md, flags=re.M)
+        _taint_prop_md = _restructure_taint(_taint_prop_md)
     sections: list[str] = [f"# {title}", ""]
     # 递进顺序: 基本信息 → 位置(表格) → 最初入口 → 可利用性及影响 → 源码 → 结合代码说明
     #           → 判断依据 → 触发路径 → 修复建议 → POC → 四维度 → 函数体源码(倒二) → 污点传播路径(最后)
