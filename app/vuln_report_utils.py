@@ -42,10 +42,10 @@ def _flow(text: Any) -> str:
         return ""
     s = str(text)
     s = s.replace("→", "\n")
-    # 把 `步骤N:` / `行 N:` 提到行首: 仅当它被粘连在非空白字符后 (如 `a步骤2`/`foo行123`) 才拆,
-    # 不破坏 `- 行 N:` 项目符号行 (行前是空格) 和已在行首 (行前是\n) 的情况。
-    s = re.sub(r'(?<=[^\n\s])(步骤\d+[:：])', r'\n\1', s)
-    s = re.sub(r'(?<=[^\n\s])(行\s*\d+[:：])', r'\n\1', s)
+    # 把 `步骤N:` / `行 N:` 提到行首: 仅当被粘连(前面是非换行非`- `的字符)才拆;
+    # 不破坏 `- 行 N:` 项目符号行(行前是 `- `) 和已在行首(行前\n)的情况。
+    s = re.sub(r'(?<!\n)(?<!- )(步骤\d+[:：])', r'\n\1', s)
+    s = re.sub(r'(?<!\n)(?<!- )(行\s*\d+[:：])', r'\n\1', s)
     s = re.sub(r'\n{3,}', '\n\n', s)
     return s.strip()
 
@@ -109,6 +109,44 @@ def format_dimensions_md(value: Any) -> str:
     return ""
 
 
+def _bulletize(text: Any) -> str:
+    """把多行文本每行变成 - 项目符号 (已带符号/空行/代码块内不动), 便于 md 渲染分点。"""
+    out: list[str] = []
+    in_fence = False
+    for ln in str(text or "").split("\n"):
+        if ln.strip().startswith("```"):
+            in_fence = not in_fence
+            out.append(ln)
+            continue
+        if in_fence:
+            out.append(ln)
+            continue
+        s = ln.rstrip()
+        if not s:
+            out.append("")
+            continue
+        st = s.lstrip()
+        if st.startswith(("-", "*")) or re.match(r'^\d+[.):]', st):
+            out.append(s)  # 已是列表项
+        else:
+            out.append(f"- {st}")
+    return "\n".join(out)
+
+
+def _split_taint_context(blob: str) -> tuple[str, str]:
+    """把污点传播上下文拆成 (函数体源码代码块, 污点传播段)。
+    函数体源码 = blob 里 '## 函数体源码' 下的 ```c 代码块; 污点传播段 = 其余
+    (函数/校验/污点变量/传播路径/callee), 供报告末尾分两段渲染。"""
+    s = str(blob or "")
+    m = re.search(r'## 函数体源码[^\n]*:\n(```[a-zA-Z]*\n.*?\n```)', s, re.S)
+    if not m:
+        return "", s.strip()
+    func_body_code = m.group(1)
+    propagation = (s[:m.start()] + "\n" + s[m.end():]).strip()
+    propagation = re.sub(r'\n{3,}', '\n\n', propagation)
+    return func_body_code, propagation
+
+
 def format_vuln_report_md(item: dict, finding_id: str, source_file: str,
                           function_name: str, line: str,
                           taint_context: str = "") -> str:
@@ -130,42 +168,47 @@ def format_vuln_report_md(item: dict, finding_id: str, source_file: str,
     fix_suggestion = str(item.get("fix_suggestion") or "").strip()
     poc = str(item.get("poc") or "").strip()
     taint_ctx = str(taint_context or "").strip()
+    _func_body_md, _taint_prop_md = _split_taint_context(taint_ctx)
+    # 污点传播上下文里的子标题降为 ### 嵌套到 ## 污点传播路径 下, 层级更清晰
+    if _taint_prop_md:
+        _taint_prop_md = re.sub(r'^## ', '### ', _taint_prop_md, flags=re.M)
     sections: list[str] = [f"# {title}", ""]
-    if _flow(entry_point):
-        sections += ["## 漏洞最初入口", _flow(entry_point), ""]
-    sections += ["## 漏洞所在文件", f"`{source_file}`", "",
-                 "## 漏洞所在函数", f"`{function_name}`", "",
-                 "## 漏洞所在行号", f"`{line or 'unknown'}`", ""]
-    if code_snippet:
-        sections += ["## 漏洞源码", f"```c\n{code_snippet}\n```", ""]
-    if _flow(summary):
-        sections += ["## 漏洞概述", _flow(summary), ""]
-    if _flow(code_explanation):
-        sections += ["## 漏洞结合代码说明", _flow(code_explanation), ""]
-    if _flow(evidence):
-        sections += ["## 漏洞判断依据", _flow(evidence), ""]
-    if _flow(trigger_path):
-        sections += ["## 漏洞触发路径", _flow(trigger_path), ""]
-    if taint_ctx:
-        sections += ["## 污点传播路径", taint_ctx, ""]
-    expl_md = format_exploitability_md(item.get("exploitability"))
-    if expl_md:
-        sections += ["## 漏洞危害", expl_md, ""]
-    if _flow(fix_suggestion):
-        sections += ["## 修复建议", _flow(fix_suggestion), ""]
-    if poc:
-        sections += ["## POC（仅供参考）",
-                     "> 以下 POC 仅为参考骨架，不可直接运行；实际可用的利用脚本由专门的 POC 生成微服务产出。",
-                     poc, ""]
+    # 递进顺序: 基本信息 → 位置(表格) → 最初入口 → 可利用性及影响 → 源码 → 结合代码说明
+    #           → 判断依据 → 触发路径 → 修复建议 → POC → 四维度 → 函数体源码(倒二) → 污点传播路径(最后)
+    # 概述与可利用性重复, 不单列概述
     sections += ["## 漏洞基本信息",
                  f"- **漏洞类型**: `{vuln_type}`",
                  f"- **严重程度**: `{severity}`",
-                 f"- **置信度**: `{confidence}`"]
+                 f"- **置信度**: `{confidence}`", "",
+                 "## 漏洞位置",
+                 "| 文件 | 函数 | 行号 |",
+                 "|------|------|------|",
+                 f"| `{source_file}` | `{function_name}` | `{line or 'unknown'}` |", ""]
+    if _flow(entry_point):
+        sections += ["## 漏洞最初入口", _flow(entry_point), ""]
+    expl_md = format_exploitability_md(item.get("exploitability"))
+    if expl_md:
+        sections += ["## 可利用性及影响", expl_md, ""]
+    if code_snippet:
+        sections += ["## 漏洞源码", f"```c\n{code_snippet}\n```", ""]
+    if _flow(code_explanation):
+        sections += ["## 漏洞结合代码说明", _flow(code_explanation), ""]
+    if _flow(evidence):
+        sections += ["## 漏洞判断依据", _bulletize(_flow(evidence)), ""]
+    if _flow(trigger_path):
+        sections += ["## 漏洞触发路径", _bulletize(_flow(trigger_path)), ""]
+    if _flow(fix_suggestion):
+        sections += ["## 修复建议", _flow(fix_suggestion), ""]
+    if poc:
+        sections += ["## POC", poc, ""]
     dim_md = format_dimensions_md(item.get("dimensions"))
     if dim_md:
-        sections.append("")
-        sections.append("## 四维度判断指标")
-        sections.append(dim_md.replace("## 四维度自检", "", 1).strip())
+        sections += ["", "## 四维度判断指标", dim_md.replace("## 四维度自检", "", 1).strip()]
+    # 函数体源码 (倒二) + 污点传播路径 (最后): 从 taint 上下文拆出
+    if _func_body_md:
+        sections += ["", "## 函数体源码", _func_body_md, ""]
+    if _taint_prop_md:
+        sections += ["", "## 污点传播路径", _taint_prop_md, ""]
     # 不再插 --- 章节分隔符: 漏洞中心前端用 /\n*---\s*\n[\s\S]*$/ 正则剥脚注,
     # 报告正文若含 --- 会被从首个 --- 贪婪删到结尾 (只剩元数据头+#标题), 故仅靠 ## 标题分章
     return "\n".join(sections) + "\n"
