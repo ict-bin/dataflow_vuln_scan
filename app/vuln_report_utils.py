@@ -42,8 +42,10 @@ def _flow(text: Any) -> str:
         return ""
     s = str(text)
     s = s.replace("→", "\n")
-    s = re.sub(r'(?<!\n)(步骤\d+[:：])', r'\n\1', s)
-    s = re.sub(r'(?<!\n)(行\s*\d+[:：])', r'\n\1', s)
+    # 把 `步骤N:` / `行 N:` 提到行首: 仅当它被粘连在非空白字符后 (如 `a步骤2`/`foo行123`) 才拆,
+    # 不破坏 `- 行 N:` 项目符号行 (行前是空格) 和已在行首 (行前是\n) 的情况。
+    s = re.sub(r'(?<=[^\n\s])(步骤\d+[:：])', r'\n\1', s)
+    s = re.sub(r'(?<=[^\n\s])(行\s*\d+[:：])', r'\n\1', s)
     s = re.sub(r'\n{3,}', '\n\n', s)
     return s.strip()
 
