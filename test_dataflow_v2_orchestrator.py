@@ -271,6 +271,81 @@ class TestConcurrentDfs(unittest.TestCase):
         self.assertLessEqual(par, seq + 0.1, f"par={par} seq={seq}")
 
 
+class TestFunctionLevelDedup(unittest.TestCase):
+    def test_same_function_reached_by_different_taints_is_analyzed_once(self):
+        with tempfile.TemporaryDirectory() as td:
+            store = DataflowStore(Path(td) / "run")
+            root = _func(store, "Root")
+            mid = _func(store, "Mid")
+            leaf = _func(store, "Leaf")
+            analyzed: list[tuple[str, str]] = []
+
+            class _Cbs(AnalysisCallbacks):
+                def __init__(self):
+                    self.on_event = lambda *args, **kwargs: None
+
+                def analyze_function(self, store, func, taint_params, pre_validations, base_session, ctx):
+                    analyzed.append((func.name, taint_params.signature))
+                    if func.func_id == root.func_id:
+                        return AnalysisResult(
+                            propagations=[
+                                PropagationRecord(
+                                    source_func_id=func.func_id,
+                                    source_taint_name="root_t",
+                                    source_taint_signature="root_t",
+                                    target_taint_name="mid_t",
+                                    target_taint_signature="mid_t",
+                                    target_function=mid.name,
+                                    target_func_id=mid.func_id,
+                                    call_line=10,
+                                ),
+                                PropagationRecord(
+                                    source_func_id=func.func_id,
+                                    source_taint_name="root_t",
+                                    source_taint_signature="root_t",
+                                    target_taint_name="direct_leaf_t",
+                                    target_taint_signature="direct_leaf_t",
+                                    target_function=leaf.name,
+                                    target_func_id=leaf.func_id,
+                                    call_line=20,
+                                ),
+                            ],
+                            self_contained=False,
+                            description="Root",
+                        )
+                    if func.func_id == mid.func_id:
+                        return AnalysisResult(
+                            propagations=[
+                                PropagationRecord(
+                                    source_func_id=func.func_id,
+                                    source_taint_name="mid_t",
+                                    source_taint_signature="mid_t",
+                                    target_taint_name="via_mid_leaf_t",
+                                    target_taint_signature="via_mid_leaf_t",
+                                    target_function=leaf.name,
+                                    target_func_id=leaf.func_id,
+                                    call_line=30,
+                                )
+                            ],
+                            self_contained=False,
+                            description="Mid",
+                        )
+                    return AnalysisResult(self_contained=True, description=func.name)
+
+                def mine_vulns(self, store, func, taint_params, ctx, base_session=""):
+                    return 0
+
+            orch = DfsOrchestrator(store, _Cbs(), concurrent=False, max_depth=3)
+            orch.run(root, TaintParamInfo([0], "root_t", ["root_t"]))
+
+            self.assertEqual(
+                [("Root", "root_t"), ("Mid", "mid_t"), ("Leaf", "via_mid_leaf_t")],
+                analyzed,
+            )
+            self.assertIsNotNone(store.find_processed_taint(leaf.func_id, "direct_leaf_t"))
+            store.close()
+
+
 class TestReturnFollowupDisabled(unittest.TestCase):
     def test_root_return_taint_no_longer_triggers_caller_followup(self):
         with tempfile.TemporaryDirectory() as td:

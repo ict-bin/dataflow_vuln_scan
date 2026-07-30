@@ -6,11 +6,11 @@
 
 ## 0. 设计原则
 
-1. **聚焦单函、单污点、独立会话**：一次分析 = 一个函数 × 一个污点签名，独立会话（不 fork 调用链上下文）。会话键 = `函数-taint`。
+1. **聚焦单函数、函数级唯一会话**：一次运行内同一 `func_id` 只开一次污点分析会话；不同路径/污点名只作为来源上下文合并，不重复分析。
 2. **校验只记录、不影响传播**：传播基于代码 def-use，不被调用链前置校验左右；校验供下游（挖掘）消费。
 3. **传播条件 ≠ 污点校验**：边上的 `condition`（路径条件，选分支）与节点上的 `check`（sanitizer，对污点本身的约束）分开。
 4. **行号为沟通桥梁**：prompt 函数体带行号 → LLM 输出行号引用 → 脚本 (tree-sitter) 从行号解析源码补全 condition/checks/param_taints/sink_ref。LLM 只输出拓扑+语义+行号，不输出结构化条件/校验对象（避免 JSON 格式错误）。行号支持跨行范围 `[start, end]`。
-5. **去重 = (func_id, 归一化污点签名)**，不含前置校验；func_id 含类/命名空间+签名 → overload 不合并。
+5. **去重 = func_id**，不含污点签名和前置校验；func_id 含文件、类/命名空间+签名 → overload 不合并。
 6. **队列驱动跨函数跟踪**：函数分析产出跟入项（callee/return/escape/indirect），去重后入分析队列，多线程并行消费。**编排器不递归遍历 DAG**。
 7. **AI 为中心，无硬编码白名单**：低价值 callee / sanitizer 语义由 LLM 判断，脚本不维护名单。
 8. **tracker 结果回填图**：escape/indirect tracker 解析出真实目标后，插入对应函数的 DAG（图被丰富）。
@@ -27,8 +27,8 @@
 | `taint_signature` | 污点的归一化签名（`_norm_taint_sig`：去 `this->`/尾 `()`/lower） |
 | `entry_line` | 污点传入时对应该文件行号（LLM 输出） |
 
-- **独立会话**：每个 (func_id, taint_signature) 一个独立会话，**不 fork 调用链**。函数内传播自洽，不依赖 caller 上下文。
-- 同函数多入口污点 → 多个独立分析项，各自去重、可并行。
+- **独立会话**：每个 `func_id` 一个独立会话，**不 fork 调用链**。函数内传播自洽，不依赖 caller 上下文。
+- 同函数多入口污点 → 合并到同一分析项，避免重复递归和重复漏洞挖掘。
 
 ## 2. 输出数据模型
 
@@ -154,9 +154,9 @@ tree-sitter 用于：
 
 ## 4. 去重
 
-- **key = (func_id, normalized_taint_signature)**。func_id 含类/命名空间限定 name + 完整参数 signature → overload 不合并。不含前置校验。
-- **机制**：`processed_taints` PK = `(func_id, taint_signature)`；analyze 前 `try_reserve`（INSERT OR IGNORE，双检锁防并发重复分析）；analyze 失败 `delete` 占位。
-- **回传污点**：return_taint 签名 ≠ 入口 → 不同 key → 不冲突，自然触发新分析（见 §6）。
+- **key = func_id**。func_id 含文件、类/命名空间限定 name + 完整参数 signature → overload 不合并。不含污点签名和前置校验。
+- **机制**：`processed_taints` PK = `func_id`；analyze 前 `try_reserve`（INSERT OR IGNORE，双检锁防并发重复分析）；analyze 失败 `delete` 占位。
+- **回传污点**：return_taint 仅在目标 `func_id` 尚未分析时触发新分析；同函数不同污点不再重复触发。
 
 ## 5. 校验只记录
 
@@ -172,12 +172,12 @@ tree-sitter 用于：
 
 ## 7. 单污点独立 + 并行
 
-- `taint_params` 单污点。同函数多入口污点 → 多个独立分析项。
-- 并行：多线程消费分析队列（见 §9），不同 (func, taint) 互不影响；同 (func, taint) 由 `try_reserve` 双检锁保证只分析一次。
+- `taint_params` 可携带入口污点上下文。同函数多入口污点 → 同一函数分析项合并处理。
+- 并行：多线程消费分析队列（见 §9）；同 `func_id` 由 `try_reserve` 双检锁保证只分析一次。
 
 ## 8. DAG 落库（独立表，旧表废弃）
 
-- **新表**（按一次分析 = (func_id, taint_signature) 归属）：
+- **新表**（按一次分析 = func_id 归属）：
   - `taint_dag_nodes`：`(func_id, taint_signature, node_id, line, taint, parents_json, checks_json, prune_json)`，PK `(func_id, taint_signature, node_id)`。
   - `taint_dag_edges`：`(func_id, taint_signature, from_node, to_node, line, condition_json, taint, kind, sink_ref)`，PK `(func_id, taint_signature, from_node, to_node, kind)`。
 - **旧表废弃**：`taints` / `propagations` 表移除（DAG 是超集）。`processed_taints` 保留（去重锚点）。

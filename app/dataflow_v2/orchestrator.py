@@ -276,12 +276,13 @@ class DfsOrchestrator:
     def _process(self, func: FunctionRecord, taint_params: TaintParamInfo,
                  pre_validations: list[Validation], base_session: str,
                  ctx: PathContext, depth: int) -> list[Validation]:
-        # 1) 三重去重 (子集匹配: 已有更完整 pre_val 的记录 → 当前视为已覆盖, 跳过)
+        # 1) 函数级去重: 任务/epoch 内同一 func_id 只分析一次。
+        #    taint_signature/pre_validations 只保留作上下文, 不再作为是否开新 LLM 会话的 key。
         pre_val_sig = _validation_sig(pre_validations)
         _nts = _norm_taint_sig(taint_params.signature)
         if self.store.find_processed_taint(func.func_id, _nts, pre_val_sig):
             return []  # 已分析过, 跳过
-        # 1b) 双检锁: analyze 前先占位 (INSERT OR IGNORE), 防并发 N 路径同 (func,taint,pre_val)
+        # 1b) 双检锁: analyze 前先占位 (INSERT OR IGNORE), 防并发 N 路径同 func_id
         #     同时 find-None → 全跑 LLM → N 份冗余分析。占位成功→本线程分析; 占位失败→并发 peer 在分析→跳过。
         _reserve = ProcessedTaint(
             taint_params=taint_params.names, taint_signature=_nts,
@@ -651,10 +652,11 @@ class DfsOrchestrator:
         return self._merge_equivalent_paths([p for p in paths if p])  # 剔除空链并合并重复递归目标
 
     def _step_edge_ids(self, step: ChainStep) -> list[str]:
-        edge_ids = [edge_id for edge_id in step.source_prop_ids if edge_id]
+        edge_ids = [edge_id for edge_id in getattr(step, "source_prop_ids", []) if edge_id]
         if edge_ids:
             return edge_ids
-        return [step.prop_id] if step.prop_id else []
+        prop_id = getattr(step, "prop_id", "")
+        return [prop_id] if prop_id else []
 
     def _merge_steps(self, steps: list[ChainStep]) -> list[ChainStep]:
         merged: list[ChainStep] = []

@@ -84,9 +84,9 @@ class TestStore(unittest.TestCase):
         # 不同前置校验在当前实现里仍视为已覆盖
         same_taint_hit = self.store.find_processed_taint(f.func_id, "msg[0]", "y<0::d")
         self.assertIsNotNone(same_taint_hit)
-        # 不同污点签名 → 不命中
+        # 不同污点签名也命中: 任务/epoch 内同一函数只分析一次
         miss2 = self.store.find_processed_taint(f.func_id, "msg[1]", "x>0::c")
-        self.assertIsNone(miss2)
+        self.assertIsNotNone(miss2)
 
 
 class TestTaskGraphStore(unittest.TestCase):

@@ -70,7 +70,7 @@ _DDL = {
             pre_validation_signature TEXT NOT NULL DEFAULT '',
             taint_params             TEXT DEFAULT '[]',
             sessions_path            TEXT DEFAULT '',
-            PRIMARY KEY (func_id, taint_signature)
+            PRIMARY KEY (func_id)
         );
         CREATE INDEX IF NOT EXISTS idx_pt_func ON processed_taints(func_id);
         CREATE TABLE IF NOT EXISTS include_index (
@@ -216,14 +216,14 @@ class DataflowStore:
         self._migrate_columns("functions", [
             "call_edges_indexed",
         ])
-        # 迁移 processed_taints PK: (func_id, taint_sig, pre_val) → (func_id, taint_sig)
+        # 迁移 processed_taints PK: historical variants → func_id only.
         self._migrate_processed_taints_pk()
 
     def _migrate_processed_taints_pk(self) -> None:
-        """迁移 processed_taints PK: (func_id, taint_sig, pre_val_sig) → (func_id, taint_sig)。
+        """迁移 processed_taints PK 到 func_id 级别。
 
-        旧表 PK 含 pre_validation_signature, 导致同 (func, taint) 不同 pre_val 产生多行。
-        新 PK 只用 (func_id, taint_signature), 保证每个 (func, taint) 只有一条记录。
+        历史表曾使用 (func_id, taint_sig, pre_val_sig) 或 (func_id, taint_sig),
+        仍会让同一函数因不同污点名被重复分析。现在任务/epoch 内同一函数只分析一次。
         SQLite 不支持 ALTER TABLE DROP CONSTRAINT, 所以重建表。
         """
         with self._locks["functions"]:
@@ -231,18 +231,19 @@ class DataflowStore:
             try:
                 cols = c.execute("PRAGMA table_info(processed_taints)").fetchall()
                 pk_cols = sorted(r["name"] for r in cols if r["pk"] > 0)
-                if pk_cols == ["func_id", "taint_signature"]:
+                if pk_cols == ["func_id"]:
                     return  # 已是新 schema
             except Exception as e:
                 logger.debug("processed_taints schema check failed: %s", e)
                 return
-            logger.info("[V2-store] migrating processed_taints PK: (func,taint,pre_val) → (func,taint)")
+            logger.info("[V2-store] migrating processed_taints PK to func_id-only")
             c.executescript("""
+                DROP TABLE IF EXISTS _pt_new;
                 CREATE TABLE IF NOT EXISTS _pt_new (
                     func_id TEXT NOT NULL, taint_signature TEXT NOT NULL,
                     pre_validation_signature TEXT NOT NULL DEFAULT '',
                     taint_params TEXT DEFAULT '[]', sessions_path TEXT DEFAULT '',
-                    PRIMARY KEY (func_id, taint_signature)
+                    PRIMARY KEY (func_id)
                 );
                 INSERT OR IGNORE INTO _pt_new
                     (func_id, taint_signature, pre_validation_signature, taint_params, sessions_path)
@@ -257,11 +258,12 @@ class DataflowStore:
 
     def _migrate_columns(self, db: str, cols: list[str]) -> None:
         """为已有表补列 (TEXT, 默认 ''), 已有则跳过。"""
-        existing = {r["name"] for r in self._q(db, "PRAGMA table_info(propagations)")}
+        table = db
+        existing = {r["name"] for r in self._q(db, f"PRAGMA table_info({table})")}
         for c in cols:
             if c not in existing:
                 try:
-                    self._exec(db, f"ALTER TABLE propagations ADD COLUMN {c} TEXT DEFAULT ''")
+                    self._exec(db, f"ALTER TABLE {table} ADD COLUMN {c} TEXT DEFAULT ''")
                 except sqlite3.OperationalError:
                     logger.warning(
                         "[V2-store] add column skipped db=%s column=%s",
@@ -595,7 +597,7 @@ class DataflowStore:
         return [r["name"] for r in rows] if rows else []
 
     def add_processed_taint(self, func_id: str, pt: ProcessedTaint) -> None:
-        """写入 processed_taint (INSERT OR IGNORE, PRIMARY KEY 去重)。"""
+        """写入 processed_taint (func_id 级 INSERT OR IGNORE 去重)。"""
         ts = _norm_sig(pt.taint_signature or "")
         pvs = pt.pre_validation_signature or ""
         self._exec("functions",
@@ -605,10 +607,10 @@ class DataflowStore:
         # per-source-dir MySQL 跨任务共享, 双写会导致新任务根函数被前任务残留记录跳过 (0 分析)。
 
     def try_reserve_processed_taint(self, func_id: str, pt: ProcessedTaint) -> bool:
-        """分析前预留占位 (MySQL 优先原子占位, SQLite 为本地缓存)。
+        """分析前预留占位。
 
-        去重键: (func_id, taint_signature)。MySQL INSERT IGNORE 是跨 worker
-        原子操作; SQLite 做本地缓存。analyze 失败时 delete 占位 (可重试)。
+        去重键: func_id。任务/epoch 内同一函数只分析一次, 即使不同调用路径给出
+        不同污点名/签名, 也视为同一函数级分析结果。analyze 失败时 delete 占位可重试。
         """
         ts = _norm_sig(pt.taint_signature or "")
         pvs = pt.pre_validation_signature or ""
@@ -617,8 +619,8 @@ class DataflowStore:
         # 不走 MySQL: per-source-dir 库跨任务共享, 会导致跨任务残留跳过根分析。
         with self._locks["functions"]:
             row = self._conns["functions"].execute(
-                "SELECT 1 FROM processed_taints WHERE func_id=? AND taint_signature=? LIMIT 1",
-                (func_id, ts)).fetchone()
+                "SELECT 1 FROM processed_taints WHERE func_id=? LIMIT 1",
+                (func_id,)).fetchone()
             if row is not None:
                 return False
             cur = self._conns["functions"].execute(
@@ -629,24 +631,22 @@ class DataflowStore:
 
     def delete_processed_taint(self, func_id: str, taint_signature: str,
                                pre_validation_signature: str = "") -> None:
-        ts = _norm_sig(taint_signature or "")
         self._exec("functions",
-            "DELETE FROM processed_taints WHERE func_id=? AND taint_signature=?",
-            (func_id, ts))
+            "DELETE FROM processed_taints WHERE func_id=?",
+            (func_id,))
         # 不双写 MySQL (见 try_reserve 注释)
 
     def find_processed_taint(self, func_id: str, taint_signature: str,
                              pre_validation_signature: str = "") -> ProcessedTaint | None:
-        """二重去重: (func_id, taint_signature) — 不依赖前置校验集。
+        """函数级去重: func_id — 不依赖污点签名或前置校验集。
 
-        只要同一函数+同一污点已被分析过, 后续任何路径到达都不重分析。
-        pre_validation_signature 参数保留兼容签名但不参与查询。
+        只要同一任务/epoch 内同一函数已被分析过, 后续任何路径到达都不重分析。
+        taint_signature / pre_validation_signature 参数保留兼容签名但不参与查询。
         """
-        ts = _norm_sig(taint_signature)
         # 仅查任务本地 SQLite (per-epoch); 不查共享 MySQL 避免跨任务残留误判"已分析"。
         rows = self._q("functions",
-            "SELECT taint_signature, pre_validation_signature, taint_params, sessions_path FROM processed_taints WHERE func_id=? AND taint_signature=? LIMIT 1",
-            (func_id, ts))
+            "SELECT taint_signature, pre_validation_signature, taint_params, sessions_path FROM processed_taints WHERE func_id=? LIMIT 1",
+            (func_id,))
         if rows:
             r = rows[0]
             return ProcessedTaint(taint_params=json.loads(r["taint_params"] or "[]"),
