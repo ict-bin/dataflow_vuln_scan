@@ -128,6 +128,7 @@ def format_vuln_report_md(item: dict, finding_id: str, source_file: str,
     code_snippet = str(item.get("code_snippet") or "").strip()
     code_explanation = str(item.get("code_explanation") or "").strip()
     fix_suggestion = str(item.get("fix_suggestion") or "").strip()
+    poc = str(item.get("poc") or "").strip()
     taint_ctx = str(taint_context or "").strip()
     sections: list[str] = [f"# {title}", ""]
     if _flow(entry_point):
@@ -152,6 +153,10 @@ def format_vuln_report_md(item: dict, finding_id: str, source_file: str,
         sections += ["## 漏洞危害", expl_md, ""]
     if _flow(fix_suggestion):
         sections += ["## 修复建议", _flow(fix_suggestion), ""]
+    if poc:
+        sections += ["## POC（仅供参考）",
+                     "> 以下 POC 仅为参考骨架，不可直接运行；实际可用的利用脚本由专门的 POC 生成微服务产出。",
+                     poc, ""]
     sections += ["## 漏洞基本信息",
                  f"- **漏洞类型**: `{vuln_type}`",
                  f"- **严重程度**: `{severity}`",
