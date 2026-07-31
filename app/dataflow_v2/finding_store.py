@@ -105,6 +105,46 @@ def _mirror_finding_to_output(*, finding_dir: Path, vuln_root: Path) -> Path | N
         return None
 
 
+def _ensure_finding_on_nfs(*, finding_dir: Path, vuln_root: Path,
+                         report_filename: str = "vulnerability-report.md") -> Path:
+    """确保 finding 目录拷到 NFS output/vulnerabilities/ 并验证报告可读。
+
+    NFS 阻塞/IO 错误时无限重试 (5s 间隔), 确保上报前报告在 NFS 上可读。
+    返回 NFS 上的 finding 目录路径 (output/vulnerabilities/{id})。
+    """
+    import time as _time
+    parts = vuln_root.parts
+    if "run" in parts and "epochs" in parts:
+        run_idx = parts.index("run")
+        task_root = Path(*parts[:run_idx])
+    else:
+        task_root = vuln_root.parent.parent
+    out_dir = task_root / "output" / "vulnerabilities" / finding_dir.name
+    src_report = finding_dir / report_filename
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            if out_dir.exists():
+                shutil.rmtree(out_dir, ignore_errors=True)
+            out_dir.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(finding_dir, out_dir)
+            dst_report = out_dir / report_filename
+            if not dst_report.exists():
+                raise OSError(f"report not found after copytree: {dst_report}")
+            src_size = src_report.stat().st_size if src_report.exists() else -1
+            dst_size = dst_report.stat().st_size
+            if dst_size == 0 or (src_size > 0 and dst_size != src_size):
+                raise OSError(f"report size mismatch: src={src_size} dst={dst_size}")
+            _ = dst_report.read_text(encoding="utf-8", errors="replace")
+            logger.info("finding on NFS verified: %s (attempt=%d size=%d)", out_dir, attempt, dst_size)
+            return out_dir
+        except Exception as exc:
+            logger.warning("ensure finding on NFS failed attempt=%d dir=%s: %s (retry in 5s)",
+                           attempt, out_dir, exc)
+            _time.sleep(5)
+
+
 def persist_finding(
     *,
     graph_store: VulnScanStore,
@@ -158,9 +198,8 @@ def persist_finding(
         logger.warning("copy context session failed, write empty (src=%s): %s", context_session_path, e)
         (fdir / "context.jsonl").write_text("", encoding="utf-8")
     mirror_dir = _mirror_finding_to_run_root(finding_dir=fdir, vuln_root=vuln_root)
-    output_mirror = _mirror_finding_to_output(finding_dir=fdir, vuln_root=vuln_root)
-    # 上报/记录路径优先用 NFS output/ (跨 pod 可读); 退回 run/vulnerabilities 镜像; 再退回 epoch 本地 fdir
-    nfs_fdir = output_mirror if output_mirror else (mirror_dir if mirror_dir else fdir)
+    # 确保 report 在 NFS output/ 上可读 (无限重试), 上报路径用 NFS
+    nfs_fdir = _ensure_finding_on_nfs(finding_dir=fdir, vuln_root=vuln_root)
 
     _exploit = item.get("exploitability")
     expl_str = json.dumps(_exploit, ensure_ascii=False) if isinstance(_exploit, (dict, list)) else str(_exploit or "")
