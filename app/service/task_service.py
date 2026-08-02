@@ -25,7 +25,7 @@ from sqlalchemy.orm.attributes import flag_modified
 from app.copy_utils import safe_copy2
 from app.config import build_task_config
 from app.db import is_retryable_db_error
-from app.db.models import AppDvsTask, AppDvsTaskEvent
+from app.db.models import AppDvsTask
 from app.event_adapter import coerce_swarm_event
 from app.logging_utils import log_event
 from app.models import SwarmEvent, TaskStatus
@@ -44,7 +44,12 @@ from app.service.execution_coordinator import (
 )
 from app.agent_process import cleanup_orphan_pi_processes, cleanup_task_agent_processes, cleanup_worker_runtime_processes
 from app.time_utils import isoformat_local, now_local
-from .task_events import _record_task_event, _task_event_dedupe_key, _build_task_event_response
+from .task_events import (
+    _record_task_event,
+    clear_task_events,
+    delete_task_event,
+    read_task_event_responses,
+)
 from .task_paths import _task_root, _task_run_root, _task_epoch_run_root, _task_result_path, _latest_epoch_run_root, _epoch_label_from_path, _resolve_run_path, _task_source_root
 from .task_session import _write_json_atomic, _safe_session_file, _parse_session_file, _build_task_session_catalog
 from .task_vuln_stats import sync_task_vuln_snapshot_row
@@ -863,13 +868,6 @@ def _record_abnormal_reason_timeline(db: Session, row: AppDvsTask, reason: dict 
         level="warning" if str(reason.get("status") or "") == "cancelled" else "error",
         status=str(reason.get("status") or row.status or ""),
         payload={"reason": reason},
-        dedupe_key=_task_event_dedupe_key(
-            row.task_id,
-            "abnormal_reason_recorded",
-            str(reason.get("status") or row.status or ""),
-            str(reason.get("message") or reason.get("title") or ""),
-            epoch=int(row.execution_epoch or 0),
-        ),
     )
 
 
@@ -1352,71 +1350,18 @@ class TaskService:
 
     def get_task_timeline(self, db: Session, task_id: str) -> dict:
         row = self._get_or_404(db, task_id)
-        # 优先从 stages_json 读事件 (完整, 不丢事件)
-        # task_events 表可能因 DB 写入异常丢事件
-        sj = row.stages_json
-        if isinstance(sj, str):
-            import json as _json
-            sj = _json.loads(sj)
-        if sj and sj.get("events"):
-            events = []
-            for ev in (sj.get("events") or []):
-                ev_type = str(ev.get("type") or "")
-                ev_data = dict(ev.get("data") or {})
-                events.append({
-                    "id": f"sj-{ev.get('ts','')}-{ev_type}",
-                    "task_id": task_id,
-                    "project_id": str(row.project_id or ""),
-                    "source": "dvs",
-                    "level": "info",
-                    "event_type": ev_type,
-                    "type": ev_type,
-                    "data": ev_data,
-                    "payload": ev_data,
-                    "function_name": str(ev_data.get("function") or ""),
-                    "source_file": str(ev_data.get("source_file") or ""),
-                    "message": "",
-                    "status": row.status,
-                    "execution_epoch": row.execution_epoch,
-                    "created_at": "",
-                })
-            # 按时间倒序 (与 task_events 一致)
-            events.sort(key=lambda e: e.get("data",{}).get("ts",0), reverse=True)
-            return {"task_id": task_id, "events": events}
-        # fallback: 从 task_events 表读 (按当前 epoch 过滤)
-        current_epoch = row.execution_epoch or 0
-        events = (
-            db.query(AppDvsTaskEvent)
-            .filter(AppDvsTaskEvent.task_id == row.task_id)
-            .filter(AppDvsTaskEvent.execution_epoch == current_epoch)
-            .order_by(AppDvsTaskEvent.created_at.desc())
-            .all()
-        )
         return {
             "task_id": row.task_id,
-            "events": [_build_task_event_response(event) for event in events],
+            "events": read_task_event_responses(row, newest_first=True),
         }
 
     def clear_task_timeline(self, db: Session, task_id: str) -> int:
         row = self._get_or_404(db, task_id)
-        deleted = (
-            db.query(AppDvsTaskEvent)
-            .filter(AppDvsTaskEvent.task_id == row.task_id)
-            .delete(synchronize_session=False)
-        )
-        return int(deleted or 0)
+        return clear_task_events(row)
 
     def delete_task_timeline_event(self, db: Session, task_id: str, event_id: str) -> int:
         row = self._get_or_404(db, task_id)
-        deleted = (
-            db.query(AppDvsTaskEvent)
-            .filter(
-                AppDvsTaskEvent.task_id == row.task_id,
-                AppDvsTaskEvent.id == event_id,
-            )
-            .delete(synchronize_session=False)
-        )
-        return int(deleted or 0)
+        return delete_task_event(row, event_id)
 
     def create_task(self, db: Session, *, project_id: str, task_name: str,
                     input_path: str, module_input_path: Optional[str] = None,
@@ -1558,18 +1503,9 @@ class TaskService:
         # 清理该任务的所有关联数据 (NFS run/+output/, MySQL 任务表, MySQL graph store)
         from app.service.task_paths import cleanup_task_data
         cleanup_task_data(row, reason="restart")
-        # 保留历史时间线事件（app_dvs_task_events）：这些事件已携带
-        # execution_epoch / control_version。显式 restart 从头重跑时会把
-        # execution_epoch 归零，由下一次 claim 从 1 重新开始；跨重启审计
-        # 依赖 control_version 与历史事件时间线区分。
-        # 注意 stages_json（/logs 的 SwarmEvent 回放缓冲）仍会被清空，那是
-        # 前端 trace 树的重建缓冲，与 DB 时间线是两回事，clean restart 需重建。
-        retained_event_count = int(
-            db.query(AppDvsTaskEvent)
-            .filter(AppDvsTaskEvent.task_id == row.task_id)
-            .count()
-            or 0
-        )
+        # 保留 output/events.jsonl 审计时间线：事件携带 execution_epoch /
+        # control_version，restart 后仍可区分不同执行代次。
+        retained_event_count = len(read_task_event_responses(row, newest_first=False))
         from sqlalchemy.orm.attributes import flag_modified
         clean_config = {k: v for k, v in (row.task_config_json or {}).items()
                         if k not in ("start_stage", "resume_workspace", "resume")} or None
@@ -1610,6 +1546,7 @@ class TaskService:
                 "retained_event_count": retained_event_count,
                 "run_dir_removed": True,
                 "output_dir_removed": True,
+                "events_jsonl_retained": True,
                 "cleanup_errors": [],
                 "preflight_cleanup_scope": "pod_all_pi",
                 "preflight_cleaned_groups": restart_cleanup_groups,

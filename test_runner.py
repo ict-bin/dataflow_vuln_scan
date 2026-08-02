@@ -500,7 +500,7 @@ class RunAgentPromptFileTests(unittest.TestCase):
 
         func = FunctionRecord(file="demo.c", name="demo", signature="void demo()", start_line=1, end_line=10)
         taint = TaintParamInfo(positions=[0], signature="arg0", names=["input"])
-        ctx = SimpleNamespace(depth=1)
+        ctx = SimpleNamespace(depth=1, pre_validations=[])
         store = SimpleNamespace(
             list_taints_in_function=lambda *_: [],
             list_propagations_from=lambda *_: [],
@@ -681,7 +681,8 @@ class RunAgentPromptFileTests(unittest.TestCase):
             self.assertFalse(legacy_target.exists())
             self.assertTrue(live_db.exists())
             self.assertEqual("sqlite\n", live_db.read_text(encoding="utf-8"))
-            self.assertFalse(result_json.exists())
+            self.assertTrue(result_json.exists())
+            self.assertEqual('{"status":"running"}\n', result_json.read_text(encoding="utf-8"))
             self.assertFalse(synced_output_report.exists())
 
     def test_legacy_dagflow_vuln_mining_is_forced_off(self):

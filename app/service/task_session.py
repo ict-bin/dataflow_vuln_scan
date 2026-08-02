@@ -52,22 +52,17 @@ def _safe_session_file(root: Path, relative_path: str) -> Path:
     if rel.is_absolute() or ".." in rel.parts:
         from fastapi import HTTPException
         raise HTTPException(400, "非法会话路径")
-    candidate_roots = [
-        resolve_path_logged(root / "output", logger=logger, purpose="task_session.output_root"),
-        resolve_path_logged(root / "run", logger=logger, purpose="task_session.run_root"),
-    ]
     if rel.suffix != ".jsonl":
         from fastapi import HTTPException
         raise HTTPException(400, "仅支持 jsonl 会话文件")
-    for base_root in candidate_roots:
-        target = resolve_path_logged(base_root / rel, logger=logger, purpose="task_session.target_path")
-        try:
-            target.relative_to(base_root)
-        except ValueError:
-            continue
-        if path_exists_logged(target, logger=logger, purpose="task_session.target.exists"):
-            return target
-    return resolve_path_logged(candidate_roots[0] / rel, logger=logger, purpose="task_session.target.default")
+    base_root = resolve_path_logged(root / "output", logger=logger, purpose="task_session.output_root")
+    target = resolve_path_logged(base_root / rel, logger=logger, purpose="task_session.target_path")
+    try:
+        target.relative_to(base_root)
+    except ValueError:
+        from fastapi import HTTPException
+        raise HTTPException(400, "非法会话路径")
+    return target
 
 
 def _path_accessible(path: Path) -> bool:

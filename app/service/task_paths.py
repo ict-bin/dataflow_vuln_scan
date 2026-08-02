@@ -22,6 +22,27 @@ _MYSQL_URL = "mysql+pymysql://root:Huawei12%23$@secflow-app-dataflow-vuln-scan-m
 _NFS_MIRROR_DIR = ".run_nfs"
 
 
+def _remove_output_preserving_task_events(task_root: Path, output_root: Path, *, reason: str) -> None:
+    """Reset output artifacts while retaining the file-backed task timeline."""
+    events_path = output_root / "events.jsonl"
+    events_lock_path = output_root / ".events.jsonl.lock"
+    preserved: list[tuple[Path, Path]] = []
+    try:
+        for source in (events_path, events_lock_path):
+            if source.exists():
+                target = task_root / f".{source.name}.{os.getpid()}.preserve"
+                shutil.move(str(source), str(target))
+                preserved.append((target, source))
+        shutil.rmtree(output_root)
+        output_root.mkdir(parents=True, exist_ok=True)
+    finally:
+        for source, target in preserved:
+            if source.exists():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(source), str(target))
+    logger.info("task output reset with events.jsonl retained: root=%s reason=%s", task_root, reason)
+
+
 def _task_root(row: AppDvsTask) -> Path | None:
     output_path = str(row.output_path or "").strip()
     if output_path:
@@ -249,7 +270,10 @@ def cleanup_task_data(row: AppDvsTask, *, reason: str = "cleanup") -> None:
     source_root = _task_source_root(row)
     project_id = str(row.project_id or "")
 
-    # 1. 删 NFS run/ + output/ 目录
+    preserve_task_events = reason in {"restart", "stale_reset"}
+
+    # 1. 删 NFS run/ + output/ 目录。restart/stale_reset 保留
+    # output/events.jsonl 审计时间线，任务物理删除仍由上层删除整个任务目录。
     task_root = _task_root(row)
     if task_root is not None:
         try:
@@ -261,8 +285,11 @@ def cleanup_task_data(row: AppDvsTask, *, reason: str = "cleanup") -> None:
             child = task_root / child_name
             if child.exists():
                 try:
-                    shutil.rmtree(child)
-                    logger.info("cleanup_task_data: removed %s/ (%s)", child_name, reason)
+                    if child_name == "output" and preserve_task_events:
+                        _remove_output_preserving_task_events(task_root, child, reason=reason)
+                    else:
+                        shutil.rmtree(child)
+                        logger.info("cleanup_task_data: removed %s/ (%s)", child_name, reason)
                 except Exception as exc:
                     logger.warning("cleanup_task_data: remove %s/ failed: %s", child_name, exc)
 
@@ -288,4 +315,4 @@ def cleanup_task_data(row: AppDvsTask, *, reason: str = "cleanup") -> None:
     except Exception as e:
         logger.warning("cleanup_task_data: MySQL graph store cleanup failed: %s", e)
 
-    logger.info("cleanup_task_data: task=%s reason=%s (run/+output/ removed, MySQL cleared)", task_id, reason)
+    logger.info("cleanup_task_data: task=%s reason=%s (run/output reset, MySQL cleared)", task_id, reason)

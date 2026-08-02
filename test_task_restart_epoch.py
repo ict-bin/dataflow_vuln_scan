@@ -6,7 +6,7 @@ from unittest.mock import patch
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.db.models import AppDvsTask, AppDvsTaskEvent, Base
+from app.db.models import AppDvsTask, Base
 from app.service.execution_coordinator import claim_one_runnable_task
 from app.service.task_service import TaskService
 class TaskRestartEpochTests(unittest.TestCase):
@@ -71,7 +71,8 @@ class TaskRestartEpochTests(unittest.TestCase):
                 self.assertEqual("pending", refreshed.dispatch_status)
                 self.assertEqual({"keep": "yes"}, refreshed.task_config_json)
                 self.assertFalse(run_dir.exists())
-                self.assertFalse(output_dir.exists())
+                self.assertTrue(output_dir.exists())
+                self.assertTrue((output_dir / "events.jsonl").exists())
 
                 claimed = claim_one_runnable_task(db, "pod-new")
                 self.assertIsNotNone(claimed)
@@ -139,11 +140,7 @@ class TaskRestartEpochTests(unittest.TestCase):
             timeline = self.service.get_task_timeline(db, "dvs_cancel_keep_input")
             event_types = [str(item.get("event_type") or "") for item in timeline.get("events", [])]
             self.assertIn("abnormal_reason_recorded", event_types)
-            db_event_types = [
-                str(item.event_type or "")
-                for item in db.query(AppDvsTaskEvent).filter_by(task_id="dvs_cancel_keep_input").all()
-            ]
-            self.assertIn("task_cancelled", db_event_types)
+            self.assertIn("task_cancelled", event_types)
         finally:
             db.close()
 

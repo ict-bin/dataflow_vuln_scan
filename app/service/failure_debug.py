@@ -29,7 +29,8 @@ from typing import Any
 
 from app.config import OUTPUT_DIR
 import app.db as _dbmod
-from app.db.models import AppDvsFailureDebug, AppDvsTask, AppDvsTaskEvent
+from app.db.models import AppDvsFailureDebug, AppDvsTask
+from app.service.task_events import read_task_events_tail
 
 logger = logging.getLogger("dvs.failure_debug")
 
@@ -235,8 +236,7 @@ class FailureDebugService:
 
     # ── 收集错误上下文 ────────────────────────────────────────────────────
     def _collect_context(self, db, task: AppDvsTask) -> dict[str, Any]:
-        # DVS 事件存 DB（secflow_app_dvs_task_events），不是 events.jsonl
-        events = self._load_events_tail(db, task.task_id, MAX_EVENT_CONTEXT)
+        events = self._load_events_tail(task, MAX_EVENT_CONTEXT)
 
         # 推断失败阶段 + error_kind
         failing_stage = None
@@ -280,39 +280,24 @@ class FailureDebugService:
             "events_total": len(events),
         }
 
-    def _load_events_tail(self, db, task_id: str, limit: int) -> list[dict]:
-        """从 DB 读取任务时间线事件（最后 limit 条）。"""
+    def _load_events_tail(self, task: AppDvsTask, limit: int) -> list[dict]:
+        """从任务 output/events.jsonl 读取末尾事件（时间正序）。"""
         try:
-            rows = (
-                db.query(AppDvsTaskEvent)
-                .filter(AppDvsTaskEvent.task_id == task_id)
-                .order_by(AppDvsTaskEvent.created_at.desc())
-                .limit(limit)
-                .all()
-            )
-            rows = list(reversed(rows))  # 恢复时间正序
-            out: list[dict] = []
-            for r in rows:
-                payload = {}
-                if r.payload_json:
-                    try:
-                        loaded = json.loads(r.payload_json)
-                        if isinstance(loaded, dict):
-                            payload = loaded
-                    except Exception as e:
-                        logger.warning("parse failure_debug payload json failed: %s", e, exc_info=True)
-                out.append({
-                    "ts": r.created_at.isoformat() if r.created_at else "",
-                    "event_type": r.event_type,
-                    "level": r.level,
-                    "stage": payload.get("stage") or payload.get("stage_name"),
-                    "function_name": r.function_name,
-                    "message": r.message,
-                    "payload": payload,
-                })
-            return out
+            rows = read_task_events_tail(task, limit)
+            return [
+                {
+                    "ts": str(event.get("created_at") or ""),
+                    "event_type": str(event.get("event_type") or ""),
+                    "level": str(event.get("level") or ""),
+                    "stage": (event.get("payload") or {}).get("stage") or (event.get("payload") or {}).get("stage_name"),
+                    "function_name": event.get("function_name"),
+                    "message": str(event.get("message") or ""),
+                    "payload": event.get("payload") if isinstance(event.get("payload"), dict) else {},
+                }
+                for event in rows
+            ]
         except Exception:
-            logger.exception("load events tail failed for %s", task_id)
+            logger.exception("load events tail failed for %s", task.task_id)
             return []
 
     # ── 错误分类（从错误消息模式匹配）────────────────────────────────────

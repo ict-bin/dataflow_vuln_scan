@@ -35,8 +35,8 @@ def test_persist_finding_writes_authoritative_sqlite_and_emits_events(tmp_path: 
         lambda **kwargs: {"status": "reported", "case_id": "CASE-1"},
     )
     monkeypatch.setattr(
-        "app.dataflow_v2.finding_store.refresh_task_vuln_snapshot_by_task_id",
-        lambda task_id, prefer_live=True: True,
+        "app.dataflow_v2.finding_store._sync_vuln_count_mysql",
+        lambda *args, **kwargs: True,
     )
 
     finding_id = persist_finding(
@@ -66,8 +66,9 @@ def test_persist_finding_writes_authoritative_sqlite_and_emits_events(tmp_path: 
     mirror_dir = tmp_path / "run" / "vulnerabilities" / finding_id
     assert mirror_dir.exists()
     assert (mirror_dir / "vulnerability-report.md").exists()
-    assert (mirror_dir / "taint-path-report.md").read_text(encoding="utf-8") == "context"
     assert (mirror_dir / "context.jsonl").exists()
+    assert (mirror_dir / "context.jsonl").read_text(encoding="utf-8") == '{"type":"session"}\n'
+    assert "context" in (mirror_dir / "vulnerability-report.md").read_text(encoding="utf-8")
     assert persisted_payload["title"] == "demo finding"
     assert persisted_payload["summary"] == "summary"
     assert persisted_payload["summary_preview"] == "summary"
@@ -104,12 +105,12 @@ def test_persist_finding_returns_none_when_authoritative_insert_fails(tmp_path: 
         called["intake"] = True
         return {"status": "reported", "case_id": "CASE-1"}
 
-    def _sync(task_id: str, prefer_live: bool = True):
+    def _sync(*args, **kwargs):
         called["sync"] = True
         return True
 
     monkeypatch.setattr("app.dataflow_v2.finding_store.report_finding_to_intake", _intake)
-    monkeypatch.setattr("app.dataflow_v2.finding_store.refresh_task_vuln_snapshot_by_task_id", _sync)
+    monkeypatch.setattr("app.dataflow_v2.finding_store._sync_vuln_count_mysql", _sync)
 
     finding_id = persist_finding(
         graph_store=_BrokenGraphStore(),
