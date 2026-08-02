@@ -17,6 +17,7 @@ from app.service.task_events import (
     read_task_event_responses,
     read_task_events,
     read_task_events_tail,
+    task_events_lock_path,
 )
 
 
@@ -67,6 +68,8 @@ class TaskEventsJsonlTests(unittest.TestCase):
         lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line]
         self.assertEqual(count, len(lines))
         self.assertEqual(count, len({json.loads(line)["id"] for line in lines}))
+        self.assertTrue(task_events_lock_path(_task_events_path(self.row).parent.parent).exists())
+        self.assertFalse((_task_events_path(self.row).parent / ".events.jsonl.lock").exists())
 
     def test_reader_skips_malformed_line_and_tail_is_in_time_order(self) -> None:
         append_task_event(self.row, {"id": "first", "created_at": "2026-08-02T00:00:01", "event_type": "one"})

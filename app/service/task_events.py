@@ -9,6 +9,7 @@ import os
 import socket
 import uuid
 from collections import deque
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -22,7 +23,8 @@ logger = logging.getLogger("dvs.task_events")
 
 TASK_EVENT_SOURCE_DVS = "dvs"
 TASK_EVENTS_JSONL_NAME = "events.jsonl"
-TASK_EVENTS_LOCK_NAME = ".events.jsonl.lock"
+TASK_EVENTS_LOCK_DIR_NAME = ".locks"
+TASK_EVENTS_LOCK_NAME = "events.lock"
 TASK_EVENTS_TAIL_SCAN_BYTES = max(1024 * 1024, int(os.environ.get("DVS_TASK_EVENTS_TAIL_SCAN_BYTES", str(8 * 1024 * 1024))))
 POD_NAME = (
     os.environ.get("DVS_POD_NAME")
@@ -144,7 +146,7 @@ _REVERSE_EVENT_TYPE_MAP = {
 }
 
 
-def _task_events_path(row: AppDvsTask) -> Path:
+def _task_root(row: AppDvsTask) -> Path:
     output_path = str(row.output_path or "").strip()
     if output_path:
         task_root = Path(output_path).expanduser() / row.task_id
@@ -154,11 +156,29 @@ def _task_events_path(row: AppDvsTask) -> Path:
             task_root = Path(os.environ.get("FILESERVER_ROOT", "/data/files")) / project_id / "app" / "secflow-app-dataflow-vuln-scan" / row.task_id
         else:
             task_root = Path(OUTPUT_DIR) / row.task_id
-    return task_root / "output" / TASK_EVENTS_JSONL_NAME
+    return task_root
 
 
-def _task_events_lock_path(events_path: Path) -> Path:
-    return events_path.with_name(TASK_EVENTS_LOCK_NAME)
+def _task_events_path(row: AppDvsTask) -> Path:
+    return _task_root(row) / "output" / TASK_EVENTS_JSONL_NAME
+
+
+def task_events_lock_path(task_root: Path) -> Path:
+    """Return the stable task-level lock path outside resettable output/."""
+    return task_root / TASK_EVENTS_LOCK_DIR_NAME / TASK_EVENTS_LOCK_NAME
+
+
+@contextmanager
+def task_events_file_lock(task_root: Path):
+    lock_path = task_events_lock_path(task_root)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.touch(exist_ok=True)
+    with lock_path.open("r+", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield lock_path
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def _json_safe(value: Any, _seen: set[int] | None = None) -> Any:
@@ -245,18 +265,12 @@ def _build_task_event_response(event: dict[str, object]) -> dict[str, object]:
 def append_task_event(row: AppDvsTask, event: dict[str, object]) -> Path:
     events_path = _task_events_path(row)
     events_path.parent.mkdir(parents=True, exist_ok=True)
-    lock_path = _task_events_lock_path(events_path)
-    lock_path.touch(exist_ok=True)
     line = json.dumps(_json_safe(event), ensure_ascii=False, separators=(",", ":")) + "\n"
-    with lock_path.open("r+", encoding="utf-8") as lock_file:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-        try:
-            with events_path.open("a", encoding="utf-8") as event_file:
-                event_file.write(line)
-                event_file.flush()
-                os.fsync(event_file.fileno())
-        finally:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+    with task_events_file_lock(_task_root(row)):
+        with events_path.open("a", encoding="utf-8") as event_file:
+            event_file.write(line)
+            event_file.flush()
+            os.fsync(event_file.fileno())
     return events_path
 
 
@@ -327,21 +341,14 @@ def clear_task_events(row: AppDvsTask) -> int:
     events_path = _task_events_path(row)
     if not events_path.exists():
         return 0
-    lock_path = _task_events_lock_path(events_path)
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    lock_path.touch(exist_ok=True)
-    with lock_path.open("r+", encoding="utf-8") as lock_file:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-        try:
-            current_count = 0
-            with events_path.open("r", encoding="utf-8") as source:
-                current_count = sum(1 for line in source if line.strip())
-            with events_path.open("w", encoding="utf-8") as event_file:
-                event_file.truncate(0)
-                event_file.flush()
-                os.fsync(event_file.fileno())
-        finally:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+    with task_events_file_lock(_task_root(row)):
+        current_count = 0
+        with events_path.open("r", encoding="utf-8") as source:
+            current_count = sum(1 for line in source if line.strip())
+        with events_path.open("w", encoding="utf-8") as event_file:
+            event_file.truncate(0)
+            event_file.flush()
+            os.fsync(event_file.fileno())
     return current_count
 
 
@@ -352,42 +359,35 @@ def delete_task_event(row: AppDvsTask, event_id: str) -> int:
     events_path = _task_events_path(row)
     if not events_path.exists():
         return 0
-    lock_path = _task_events_lock_path(events_path)
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    lock_path.touch(exist_ok=True)
     deleted = 0
-    with lock_path.open("r+", encoding="utf-8") as lock_file:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-        try:
-            events: list[dict[str, object]] = []
-            with events_path.open("r", encoding="utf-8") as source:
-                for line_number, raw_line in enumerate(source, start=1):
-                    line = raw_line.strip()
-                    if not line:
-                        continue
-                    try:
-                        loaded = json.loads(line)
-                        if isinstance(loaded, dict):
-                            events.append(loaded)
-                    except Exception:
-                        logger.exception("parse task event JSONL during delete failed: path=%s line=%s", events_path, line_number)
-            kept: list[dict[str, object]] = []
-            for event in events:
-                if str(event.get("id") or "") == normalized_event_id:
-                    deleted += 1
+    with task_events_file_lock(_task_root(row)):
+        events: list[dict[str, object]] = []
+        with events_path.open("r", encoding="utf-8") as source:
+            for line_number, raw_line in enumerate(source, start=1):
+                line = raw_line.strip()
+                if not line:
                     continue
-                kept.append(event)
-            if deleted <= 0:
-                return 0
-            tmp_path = events_path.with_suffix(events_path.suffix + f".{uuid.uuid4().hex}.tmp")
-            with tmp_path.open("w", encoding="utf-8") as tmp_file:
-                for event in kept:
-                    tmp_file.write(json.dumps(_json_safe(event), ensure_ascii=False, separators=(",", ":")) + "\n")
-                tmp_file.flush()
-                os.fsync(tmp_file.fileno())
-            os.replace(tmp_path, events_path)
-        finally:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                try:
+                    loaded = json.loads(line)
+                    if isinstance(loaded, dict):
+                        events.append(loaded)
+                except Exception:
+                    logger.exception("parse task event JSONL during delete failed: path=%s line=%s", events_path, line_number)
+        kept: list[dict[str, object]] = []
+        for event in events:
+            if str(event.get("id") or "") == normalized_event_id:
+                deleted += 1
+                continue
+            kept.append(event)
+        if deleted <= 0:
+            return 0
+        tmp_path = events_path.with_suffix(events_path.suffix + f".{uuid.uuid4().hex}.tmp")
+        with tmp_path.open("w", encoding="utf-8") as tmp_file:
+            for event in kept:
+                tmp_file.write(json.dumps(_json_safe(event), ensure_ascii=False, separators=(",", ":")) + "\n")
+            tmp_file.flush()
+            os.fsync(tmp_file.fileno())
+        os.replace(tmp_path, events_path)
     return deleted
 
 

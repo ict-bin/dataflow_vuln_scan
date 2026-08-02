@@ -24,22 +24,23 @@ _NFS_MIRROR_DIR = ".run_nfs"
 
 def _remove_output_preserving_task_events(task_root: Path, output_root: Path, *, reason: str) -> None:
     """Reset output artifacts while retaining the file-backed task timeline."""
+    from app.service.task_events import task_events_file_lock
+
     events_path = output_root / "events.jsonl"
-    events_lock_path = output_root / ".events.jsonl.lock"
     preserved: list[tuple[Path, Path]] = []
-    try:
-        for source in (events_path, events_lock_path):
-            if source.exists():
-                target = task_root / f".{source.name}.{os.getpid()}.preserve"
-                shutil.move(str(source), str(target))
-                preserved.append((target, source))
-        shutil.rmtree(output_root)
-        output_root.mkdir(parents=True, exist_ok=True)
-    finally:
-        for source, target in preserved:
-            if source.exists():
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(source), str(target))
+    with task_events_file_lock(task_root):
+        try:
+            if events_path.exists():
+                target = task_root / f".{events_path.name}.{os.getpid()}.preserve"
+                shutil.move(str(events_path), str(target))
+                preserved.append((target, events_path))
+            shutil.rmtree(output_root)
+            output_root.mkdir(parents=True, exist_ok=True)
+        finally:
+            for source, target in preserved:
+                if source.exists():
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(source), str(target))
     logger.info("task output reset with events.jsonl retained: root=%s reason=%s", task_root, reason)
 
 

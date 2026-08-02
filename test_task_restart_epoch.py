@@ -73,6 +73,8 @@ class TaskRestartEpochTests(unittest.TestCase):
                 self.assertFalse(run_dir.exists())
                 self.assertTrue(output_dir.exists())
                 self.assertTrue((output_dir / "events.jsonl").exists())
+                self.assertTrue((task_root / ".locks" / "events.lock").exists())
+                self.assertFalse((output_dir / ".events.jsonl.lock").exists())
 
                 claimed = claim_one_runnable_task(db, "pod-new")
                 self.assertIsNotNone(claimed)
