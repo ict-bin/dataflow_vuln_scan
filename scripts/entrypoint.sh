@@ -16,8 +16,15 @@ PI_DIR="${PI_CODING_AGENT_DIR:-/root/.pi/agent}"
 mkdir -p "$PI_DIR"
 
 if [ -f /data/config/models.json ]; then
-    ln -sf /data/config/models.json "$PI_DIR/models.json"
-    echo "[entrypoint] linked /data/config/models.json -> $PI_DIR/models.json"
+    MODELS_PATH="$PI_DIR/models.json"
+    if [ -e "$MODELS_PATH" ] && [ ! -L "$MODELS_PATH" ]; then
+        # debugger deployment mounts models.json as a single NFS file. It
+        # cannot be replaced with a symlink, so use the mounted configuration.
+        echo "[entrypoint] using existing models.json at $MODELS_PATH"
+    else
+        ln -sf /data/config/models.json "$MODELS_PATH"
+        echo "[entrypoint] linked /data/config/models.json -> $MODELS_PATH"
+    fi
 fi
 
 if [ -d /data/config/prompts ]; then
