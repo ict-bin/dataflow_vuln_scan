@@ -102,6 +102,7 @@ def _clean_task_artifacts(task_id: str) -> None:
     from app.db import get_db
     from app.db.models import AppDvsTask
     from app.config import OUTPUT_DIR
+    from app.service.task_events import TaskEventLockTimeout
     try:
         db_gen = get_db()
         db = next(db_gen)
@@ -131,6 +132,9 @@ def _clean_task_artifacts(task_id: str) -> None:
                             else:
                                 shutil.rmtree(child)
                                 logger.info("cleaned task artifacts: %s/%s", task_id, child_name)
+                        except TaskEventLockTimeout:
+                            logger.exception("clean task artifact %s lock timeout task=%s", child_name, task_id)
+                            raise
                         except Exception as exc:
                             logger.warning("clean task artifact %s failed: %s", child_name, exc)
         finally:
@@ -138,6 +142,9 @@ def _clean_task_artifacts(task_id: str) -> None:
                 next(db_gen)
             except StopIteration as e:
                 logger.debug("db_gen exhausted: %s", e)
+    except TaskEventLockTimeout:
+        logger.exception("_clean_task_artifacts failed after event lock timeout task=%s", task_id)
+        raise
     except Exception:
         logger.warning("_clean_task_artifacts failed task=%s", task_id, exc_info=True)
 

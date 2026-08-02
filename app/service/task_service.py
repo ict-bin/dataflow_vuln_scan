@@ -45,6 +45,7 @@ from app.service.execution_coordinator import (
 from app.agent_process import cleanup_orphan_pi_processes, cleanup_task_agent_processes, cleanup_worker_runtime_processes
 from app.time_utils import isoformat_local, now_local
 from .task_events import (
+    TaskEventLockTimeout,
     _record_task_event,
     clear_task_events,
     delete_task_event,
@@ -1356,12 +1357,22 @@ class TaskService:
         }
 
     def clear_task_timeline(self, db: Session, task_id: str) -> int:
+        from fastapi import HTTPException
         row = self._get_or_404(db, task_id)
-        return clear_task_events(row)
+        try:
+            return clear_task_events(row)
+        except TaskEventLockTimeout as exc:
+            logger.exception("clear task timeline failed after event lock timeout: task_id=%s", task_id)
+            raise HTTPException(status_code=409, detail="任务时间线正在写入，请稍后重试") from exc
 
     def delete_task_timeline_event(self, db: Session, task_id: str, event_id: str) -> int:
+        from fastapi import HTTPException
         row = self._get_or_404(db, task_id)
-        return delete_task_event(row, event_id)
+        try:
+            return delete_task_event(row, event_id)
+        except TaskEventLockTimeout as exc:
+            logger.exception("delete task timeline event failed after event lock timeout: task_id=%s event_id=%s", task_id, event_id)
+            raise HTTPException(status_code=409, detail="任务时间线正在写入，请稍后重试") from exc
 
     def create_task(self, db: Session, *, project_id: str, task_name: str,
                     input_path: str, module_input_path: Optional[str] = None,
@@ -1492,6 +1503,8 @@ class TaskService:
 
     def restart_task(self, db: Session, task_id: str) -> dict:
         """在原任务ID上重置并重新执行（SA 模式：in-place restart）。"""
+        from fastapi import HTTPException
+
         row = self._get_or_404(db, task_id)
         # Celery: 先 revoke 杀 worker pod 上的 prefork 子进程 + pi 全树
         _revoke_celery_task(row)
@@ -1502,7 +1515,11 @@ class TaskService:
         restart_cleanup_groups = self._cleanup_worker_runtime(label=f"task_restart:{task_id}", task_id=task_id, reason="restart_requested_before_pending")
         # 清理该任务的所有关联数据 (NFS run/+output/, MySQL 任务表, MySQL graph store)
         from app.service.task_paths import cleanup_task_data
-        cleanup_task_data(row, reason="restart")
+        try:
+            cleanup_task_data(row, reason="restart")
+        except TaskEventLockTimeout as exc:
+            logger.exception("restart task cleanup failed after event lock timeout: task_id=%s", task_id)
+            raise HTTPException(status_code=409, detail="任务时间线正在写入，重启清理未完成，请稍后重试") from exc
         # 保留 output/events.jsonl 审计时间线：事件携带 execution_epoch /
         # control_version，restart 后仍可区分不同执行代次。
         retained_event_count = len(read_task_event_responses(row, newest_first=False))

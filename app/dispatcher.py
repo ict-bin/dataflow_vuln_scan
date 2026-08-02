@@ -164,6 +164,7 @@ class Dispatcher:
         from app.time_utils import now_local
         from app.celery_app import app as celery_app
         from app.service.task_paths import cleanup_task_data
+        from app.service.task_events import TaskEventLockTimeout
         # 1. 取所有活 worker 已知的 celery_id
         # DB lease 为死亡判定真相源 (不查 celery inspect, 避免 inspect 超时/worker 不可达误判):
         # running + 心跳超时(lease 过期) = worker 死了 → revoke 兜底 + 清理 + 回 pending (pump 重发)
@@ -193,6 +194,9 @@ class Dispatcher:
                 # 清理该任务的所有关联数据 (NFS run/+output/, MySQL 任务表, MySQL graph store)
                 try:
                     cleanup_task_data(row, reason="stale_reset")
+                except TaskEventLockTimeout:
+                    logger.exception("stale cleanup_task_data lock timeout; keep task running for next recovery pass: task=%s", row.task_id)
+                    continue
                 except Exception as exc:
                     logger.warning("stale cleanup_task_data failed: task=%s err=%s", row.task_id, exc)
                 row.status = "pending"

@@ -4,6 +4,7 @@ import json
 import tempfile
 import threading
 import unittest
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -17,6 +18,7 @@ from app.service.task_events import (
     read_task_event_responses,
     read_task_events,
     read_task_events_tail,
+    task_events_file_lock,
     task_events_lock_path,
 )
 
@@ -95,6 +97,30 @@ class TaskEventsJsonlTests(unittest.TestCase):
     def test_write_failure_is_nonfatal(self) -> None:
         with patch("app.service.task_events.append_task_event", side_effect=OSError("nfs unavailable")):
             self.assertIsNone(_record_task_event(None, row=self.row, event_type="write_failed", message="event"))
+
+    def test_append_lock_timeout_is_nonfatal(self) -> None:
+        task_root = _task_events_path(self.row).parent.parent
+        with task_events_file_lock(task_root), \
+             patch("app.service.task_events.TASK_EVENTS_LOCK_TIMEOUT_SECONDS", 0.01), \
+             patch("app.service.task_events.TASK_EVENTS_LOCK_RETRIES", 1), \
+             patch("app.service.task_events.TASK_EVENTS_LOCK_POLL_SECONDS", 0.005):
+            started_at = time.monotonic()
+            path = append_task_event(self.row, {"id": "blocked", "created_at": "2026-08-02T00:00:01", "event_type": "blocked"})
+            elapsed = time.monotonic() - started_at
+        self.assertEqual(_task_events_path(self.row), path)
+        self.assertLess(elapsed, 1)
+        self.assertEqual([], read_task_events(self.row))
+
+    def test_clear_lock_timeout_is_retryable(self) -> None:
+        append_task_event(self.row, {"id": "keep", "created_at": "2026-08-02T00:00:01", "event_type": "one"})
+        task_root = _task_events_path(self.row).parent.parent
+        with task_events_file_lock(task_root), \
+             patch("app.service.task_events.TASK_EVENTS_LOCK_TIMEOUT_SECONDS", 0.01), \
+             patch("app.service.task_events.TASK_EVENTS_LOCK_RETRIES", 1), \
+             patch("app.service.task_events.TASK_EVENTS_LOCK_POLL_SECONDS", 0.005):
+            with self.assertRaises(TimeoutError):
+                clear_task_events(self.row)
+        self.assertEqual(["keep"], [item["id"] for item in read_task_events(self.row)])
 
 
 if __name__ == "__main__":

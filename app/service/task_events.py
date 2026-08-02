@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import socket
+import time
 import uuid
 from collections import deque
 from contextlib import contextmanager
@@ -25,6 +26,9 @@ TASK_EVENT_SOURCE_DVS = "dvs"
 TASK_EVENTS_JSONL_NAME = "events.jsonl"
 TASK_EVENTS_LOCK_DIR_NAME = ".locks"
 TASK_EVENTS_LOCK_NAME = "events.lock"
+TASK_EVENTS_LOCK_TIMEOUT_SECONDS = max(0.1, float(os.environ.get("DVS_TASK_EVENTS_LOCK_TIMEOUT_SECONDS", "5")))
+TASK_EVENTS_LOCK_RETRIES = max(0, int(os.environ.get("DVS_TASK_EVENTS_LOCK_RETRIES", "1")))
+TASK_EVENTS_LOCK_POLL_SECONDS = max(0.01, float(os.environ.get("DVS_TASK_EVENTS_LOCK_POLL_SECONDS", "0.1")))
 TASK_EVENTS_TAIL_SCAN_BYTES = max(1024 * 1024, int(os.environ.get("DVS_TASK_EVENTS_TAIL_SCAN_BYTES", str(8 * 1024 * 1024))))
 POD_NAME = (
     os.environ.get("DVS_POD_NAME")
@@ -43,6 +47,10 @@ NODE_NAME = (
     or os.environ.get("NODE_NAME")
     or ""
 )
+
+
+class TaskEventLockTimeout(TimeoutError):
+    """Raised when the task event file lock cannot be acquired in bounded time."""
 
 
 def _task_event_runtime_role() -> str:
@@ -174,11 +182,39 @@ def task_events_file_lock(task_root: Path):
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     lock_path.touch(exist_ok=True)
     with lock_path.open("r+", encoding="utf-8") as lock_file:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        acquired = False
+        total_attempts = TASK_EVENTS_LOCK_RETRIES + 1
+        for attempt in range(1, total_attempts + 1):
+            deadline = time.monotonic() + TASK_EVENTS_LOCK_TIMEOUT_SECONDS
+            while True:
+                try:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    acquired = True
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        break
+                    time.sleep(min(TASK_EVENTS_LOCK_POLL_SECONDS, max(0.0, deadline - time.monotonic())))
+            if acquired:
+                break
+            if attempt < total_attempts:
+                logger.warning(
+                    "task event lock acquisition timed out; retrying: lock_path=%s attempt=%s/%s timeout_seconds=%s",
+                    lock_path,
+                    attempt,
+                    total_attempts,
+                    TASK_EVENTS_LOCK_TIMEOUT_SECONDS,
+                )
+        if not acquired:
+            raise TaskEventLockTimeout(
+                f"task event lock acquisition timed out: lock_path={lock_path} "
+                f"attempts={total_attempts} timeout_seconds={TASK_EVENTS_LOCK_TIMEOUT_SECONDS}"
+            )
         try:
             yield lock_path
         finally:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            if acquired:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def _json_safe(value: Any, _seen: set[int] | None = None) -> Any:
@@ -266,11 +302,14 @@ def append_task_event(row: AppDvsTask, event: dict[str, object]) -> Path:
     events_path = _task_events_path(row)
     events_path.parent.mkdir(parents=True, exist_ok=True)
     line = json.dumps(_json_safe(event), ensure_ascii=False, separators=(",", ":")) + "\n"
-    with task_events_file_lock(_task_root(row)):
-        with events_path.open("a", encoding="utf-8") as event_file:
-            event_file.write(line)
-            event_file.flush()
-            os.fsync(event_file.fileno())
+    try:
+        with task_events_file_lock(_task_root(row)):
+            with events_path.open("a", encoding="utf-8") as event_file:
+                event_file.write(line)
+                event_file.flush()
+                os.fsync(event_file.fileno())
+    except TaskEventLockTimeout:
+        logger.exception("append task event skipped after lock timeout: task_id=%s path=%s", row.task_id, events_path)
     return events_path
 
 
