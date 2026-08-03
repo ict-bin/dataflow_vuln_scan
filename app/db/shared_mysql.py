@@ -557,7 +557,8 @@ class SharedMysqlStore(MysqlReadMixin):
                     "SELECT :sid, :fid, :ts, :tid, :tp, :sp "
                     "WHERE NOT EXISTS ("
                     "  SELECT 1 FROM processed_taints "
-                    "  WHERE source_dir_id=:sid AND func_id=:fid AND task_id=:tid"),
+                    "  WHERE source_dir_id=:sid AND func_id=:fid AND task_id=:tid"
+                    ")"),
                     {"sid": self.source_dir_id, "fid": func_id, "ts": taint_sig,
                      "tid": self.task_id, "tp": taint_params, "sp": sessions_path})
                 conn.commit()
