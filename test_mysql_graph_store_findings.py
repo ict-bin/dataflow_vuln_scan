@@ -10,6 +10,7 @@ class _FakeConn:
         self.commits = 0
         self.fetchall_results: list[list] = []
         self.fetchone_results: list[object] = []
+        self.rowcounts: list[int] = []
 
     def __enter__(self):
         return self
@@ -23,8 +24,9 @@ class _FakeConn:
             return _FakeResult(
                 fetchone_result=self.fetchone_results.pop(0) if self.fetchone_results else None,
                 fetchall_result=self.fetchall_results.pop(0) if self.fetchall_results else [],
+                rowcount=self.rowcounts.pop(0) if self.rowcounts else 1,
             )
-        return _FakeResult()
+        return _FakeResult(rowcount=self.rowcounts.pop(0) if self.rowcounts else 1)
 
     def commit(self):
         self.commits += 1
@@ -44,9 +46,10 @@ class _FakeRow:
 
 
 class _FakeResult:
-    def __init__(self, fetchone_result=None, fetchall_result=None) -> None:
+    def __init__(self, fetchone_result=None, fetchall_result=None, rowcount=1) -> None:
         self._fetchone_result = fetchone_result
         self._fetchall_result = fetchall_result or []
+        self.rowcount = rowcount
 
     def fetchone(self):
         return self._fetchone_result
@@ -106,6 +109,51 @@ def test_update_finding_report_status_scopes_by_task_when_provided():
         "fid": "finding-1",
     }
     assert conn.commits == 1
+
+
+def test_update_finding_report_status_repairs_legacy_empty_task_id_row():
+    conn = _FakeConn()
+    conn.rowcounts = [0, 1]
+    store = _build_store(conn)
+
+    updated = store.update_finding_report_status(
+        "finding-1",
+        status="reported",
+        case_id="case-legacy",
+        task_id="task-a",
+        run_id="run-a",
+    )
+
+    assert updated is True
+    assert len(conn.calls) == 2
+    sql, params = conn.calls[1]
+    assert "SET task_id=:tid" in sql
+    assert "WHERE task_id='' AND run_id=:rid AND finding_id=:fid" in sql
+    assert params == {
+        "tid": "task-a",
+        "st": "reported",
+        "cid": "case-legacy",
+        "rid": "run-a",
+        "fid": "finding-1",
+    }
+    assert conn.commits == 1
+
+
+def test_update_finding_report_status_does_not_use_unscoped_legacy_fallback():
+    conn = _FakeConn()
+    conn.rowcounts = [0, 0]
+    store = _build_store(conn)
+
+    updated = store.update_finding_report_status(
+        "finding-1",
+        status="reported",
+        task_id="task-a",
+        run_id="run-a",
+    )
+
+    assert updated is False
+    assert len(conn.calls) == 2
+    assert "run_id=:rid" in conn.calls[1][0]
 
 
 def test_update_finding_report_status_keeps_legacy_fallback_without_task():
@@ -173,6 +221,23 @@ def test_get_task_finding_stats_uses_task_scoped_mysql_rows():
     assert "WHERE ar.task_id=:tid" in sql
     assert params == {"tid": "task-a"}
     assert stats == {"total": 4, "reported": 1, "unreported": 3}
+
+
+def test_get_finding_report_state_checks_task_before_legacy_row():
+    conn = _FakeConn()
+    conn.fetchone_results = [None, _FakeRow({"report_status": "reported", "report_case_id": "case-1"})]
+    store = _build_store(conn)
+
+    state = store.get_finding_report_state(
+        "finding-1",
+        task_id="task-a",
+        run_id="run-a",
+    )
+
+    assert state == {"report_status": "reported", "report_case_id": "case-1"}
+    assert len(conn.calls) == 2
+    assert "WHERE task_id=:tid AND finding_id=:fid" in conn.calls[0][0]
+    assert "WHERE task_id='' AND run_id=:rid AND finding_id=:fid" in conn.calls[1][0]
 
 
 def test_get_engine_is_scoped_by_final_mysql_url(monkeypatch):

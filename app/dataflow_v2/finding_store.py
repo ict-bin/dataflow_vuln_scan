@@ -221,6 +221,7 @@ def persist_finding(
     data = {
         "finding_id": finding_id,
         "run_id": run_id,
+        "task_id": task_id,
         "node_id": node,
         "source_file": fsrc,
         "function_name": ffn,
@@ -289,11 +290,32 @@ def persist_finding(
         },
     )
 
-    # intake 上报 (退避: 父任务 → 自身; 失败不影响)
-    _intake_report(run_id, task_id, source_root, nfs_fdir, rec, finding_id,
-                   cfg_project_id, cfg_task_name, cfg_parent_task_name,
-                   cfg_parent_task_id, cfg_parent_task_type, cfg_task_origin_type, on_event,
-                   graph_store=graph_store)
+    report_state = None
+    try:
+        report_state = graph_store.get_finding_report_state(
+            finding_id,
+            task_id=task_id,
+            run_id=run_id,
+        )
+    except Exception:
+        logger.warning("load finding report state failed for %s", finding_id, exc_info=True)
+    if str((report_state or {}).get("report_status") or "") == "reported":
+        _emit_finding_event(
+            on_event,
+            "vuln_intake_report_skipped_already_reported",
+            level="info",
+            message=f"漏洞已上报，跳过重复提交: {finding_id}",
+            finding_id=finding_id,
+            function_name=ffn,
+            task_id=task_id,
+            extra={"case_id": str((report_state or {}).get("report_case_id") or "")},
+        )
+    else:
+        # intake 上报 (退避: 父任务 → 自身; 失败不影响)
+        _intake_report(run_id, task_id, source_root, nfs_fdir, rec, finding_id,
+                       cfg_project_id, cfg_task_name, cfg_parent_task_name,
+                       cfg_parent_task_id, cfg_parent_task_type, cfg_task_origin_type, on_event,
+                       graph_store=graph_store)
 
     # MySQL 漏洞计数同步
     _sync_vuln_count_mysql(graph_store, run_id, task_id, finding_id=finding_id, function_name=ffn, on_event=on_event)
@@ -368,7 +390,12 @@ def _record_intake_result(*, graph_store, run_id, task_id, finding_id, rec, res,
     if graph_store is not None:
         try:
             graph_store.update_finding_report_status(
-                finding_id, status=status, case_id=case_id, task_id=task_id)
+                finding_id,
+                status=status,
+                case_id=case_id,
+                task_id=task_id,
+                run_id=run_id,
+            )
         except Exception:
             logger.debug("finding_store update_finding_report_status failed for %s", finding_id, exc_info=True)
     try:

@@ -1583,6 +1583,7 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                     status=status,
                     case_id=case_id,
                     task_id=str(self.task_id or ""),
+                    run_id=str(rec.run_id or self.run_id or self.task_id or ""),
                 )
             except Exception:
                 logger.debug("v2 update_finding_report_status failed for %s", finding_id, exc_info=True)

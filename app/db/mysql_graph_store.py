@@ -405,6 +405,42 @@ class MysqlGraphStore:
             "unreported": max(0, total - reported),
         }
 
+    def get_finding_report_state(
+        self,
+        finding_id: str,
+        *,
+        task_id: str = "",
+        run_id: str = "",
+    ) -> dict[str, str] | None:
+        """Return one task-scoped finding's report state.
+
+        The legacy branch is deliberately constrained to an empty task ID plus
+        the exact run ID, so it cannot suppress reporting for another task that
+        happens to use the same finding ID.
+        """
+        with self._engine.connect() as conn:
+            if str(task_id or "").strip():
+                row = conn.execute(
+                    sa_text(
+                        "SELECT report_status,report_case_id FROM dvs_vuln_findings "
+                        "WHERE task_id=:tid AND finding_id=:fid"
+                    ),
+                    {"tid": task_id, "fid": finding_id},
+                ).fetchone()
+                if row is not None:
+                    return dict(row._mapping)
+            if str(run_id or "").strip():
+                row = conn.execute(
+                    sa_text(
+                        "SELECT report_status,report_case_id FROM dvs_vuln_findings "
+                        "WHERE task_id='' AND run_id=:rid AND finding_id=:fid"
+                    ),
+                    {"rid": run_id, "fid": finding_id},
+                ).fetchone()
+                if row is not None:
+                    return dict(row._mapping)
+        return None
+
     # ── 双写方法 (worker 调, 与 VulnStore 同名同签名) ──────────────
 
     def upsert_task_graph_node(self, rec) -> None:
@@ -575,25 +611,55 @@ class MysqlGraphStore:
         case_id: str = "",
         *,
         task_id: str = "",
-    ) -> None:
+        run_id: str = "",
+    ) -> bool:
+        """Persist intake status and report whether a finding row was updated.
+
+        Rows written before task-scoped MySQL persistence was introduced have an
+        empty ``task_id``.  When the task is known, repair only that legacy row
+        by matching both its run and finding IDs, then backfill ``task_id``.
+        This keeps the compatibility path task-scoped and prevents a finding ID
+        collision across tasks from updating the wrong row.
+        """
         with self._engine.connect() as conn:
             if str(task_id or "").strip():
-                conn.execute(
+                result = conn.execute(
                     sa_text(
                         "UPDATE dvs_vuln_findings SET report_status=:st,"
                         "report_case_id=:cid WHERE task_id=:tid AND finding_id=:fid"
                     ),
                     {"st": status, "cid": case_id, "tid": task_id, "fid": finding_id},
                 )
+                updated = int(getattr(result, "rowcount", 0) or 0) > 0
+                if not updated:
+                    legacy_run_id = str(run_id or task_id).strip()
+                    if legacy_run_id:
+                        result = conn.execute(
+                            sa_text(
+                                "UPDATE dvs_vuln_findings SET task_id=:tid,"
+                                "report_status=:st,report_case_id=:cid "
+                                "WHERE task_id='' AND run_id=:rid AND finding_id=:fid"
+                            ),
+                            {
+                                "tid": task_id,
+                                "st": status,
+                                "cid": case_id,
+                                "rid": legacy_run_id,
+                                "fid": finding_id,
+                            },
+                        )
+                        updated = int(getattr(result, "rowcount", 0) or 0) > 0
             else:
-                conn.execute(
+                result = conn.execute(
                     sa_text(
                         "UPDATE dvs_vuln_findings SET report_status=:st,"
                         "report_case_id=:cid WHERE finding_id=:fid"
                     ),
                     {"st": status, "cid": case_id, "fid": finding_id},
                 )
+                updated = int(getattr(result, "rowcount", 0) or 0) > 0
             conn.commit()
+        return updated
 
     def insert_finding(self, **kw) -> None:
         """插入漏洞 finding 到 MySQL。"""

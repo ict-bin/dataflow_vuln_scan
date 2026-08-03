@@ -331,12 +331,30 @@ class VulnScanStore:
         status: str = "reported",
         case_id: str = "",
         task_id: str = "",
-    ) -> None:
+        run_id: str = "",
+    ) -> bool:
         if not finding_id:
-            return
+            return False
         if self._mysql:
-            self._mysql.update_finding_report_status(finding_id, status, case_id, task_id=task_id)
+            return bool(self._mysql.update_finding_report_status(
+                finding_id, status, case_id, task_id=task_id, run_id=run_id))
         # SQLite 废弃
+        return False
+
+    def get_finding_report_state(
+        self,
+        finding_id: str,
+        *,
+        task_id: str = "",
+        run_id: str = "",
+    ) -> dict[str, str] | None:
+        if not finding_id or not self._mysql:
+            return None
+        return self._mysql.get_finding_report_state(
+            finding_id,
+            task_id=task_id,
+            run_id=run_id,
+        )
 
     def add_finding(self, rec: VulnFindingRecord) -> None:
         if self._mysql:
@@ -406,4 +424,3 @@ class VulnScanStore:
 
     def export_json(self) -> dict[str, Any]:
         return {}  # v1 遗留
-

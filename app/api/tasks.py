@@ -1580,6 +1580,17 @@ def _do_report_finding(task_id: str, finding_id: str, db: Session):
     finding = next((f for f in findings if f.get("finding_id") == finding_id), None)
     if not finding:
         return None
+    if str(finding.get("report_status") or "") == "reported":
+        return {
+            "task_id": task_id,
+            "finding_id": finding_id,
+            "report_id": None,
+            "case_id": finding.get("report_case_id") or None,
+            "status": "reported",
+            "duplicate": True,
+            "already_reported": True,
+            "error": None,
+        }
     project_id = str(row.project_id or "").strip()
     task_name = str(row.task_name or "").strip()
     parent_task_id = str(row.parent_task_id or "").strip()
@@ -1629,6 +1640,7 @@ def _do_report_finding(task_id: str, finding_id: str, db: Session):
                 status="reported",
                 case_id=str(result.get("case_id") or ""),
                 task_id=task_id,
+                run_id=str(finding.get("run_id") or task_id),
             )
     except Exception:
         logger.warning("update finding report status failed: task_id=%s finding_id=%s", task_id, finding_id, exc_info=True)
