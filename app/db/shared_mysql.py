@@ -9,11 +9,12 @@
 当前只实现写 + 清理, 不实现读 (worker 读仍走 SQLite)。
 """
 from __future__ import annotations
-import hashlib, logging, re, threading
+import hashlib, json, logging, re, threading
 from typing import Any
 from sqlalchemy import create_engine, text as sa_text
 
 from .mysql_read import MysqlReadMixin
+from ..dataflow_v2.models import ProcessedTaint
 
 logger = logging.getLogger("dvs.db.shared_mysql")
 
@@ -515,6 +516,103 @@ class SharedMysqlStore(MysqlReadMixin):
                 "DELETE FROM processed_taints WHERE source_dir_id=:sid AND func_id=:fid AND taint_signature=:ts AND task_id=:tid"),
                 {"sid": self.source_dir_id, "fid": func_id, "ts": taint_sig, "tid": self.task_id})
             conn.commit()
+
+    # ── V2 模式专用: func_id 级去重 (per-task 隔离) ──────────────────
+    def v2_find_processed_taint(self, func_id: str) -> ProcessedTaint | None:
+        """V2 func_id 级去重: 同一任务内同一函数只分析一次。
+        per-task 隔离: 查询带 task_id, 不会跨任务误判。
+        """
+        try:
+            with self._engine.connect() as conn:
+                row = conn.execute(sa_text(
+                    "SELECT taint_signature, taint_params, sessions_path "
+                    "FROM processed_taints "
+                    "WHERE source_dir_id=:sid AND func_id=:fid AND task_id=:tid LIMIT 1"),
+                    {"sid": self.source_dir_id, "fid": func_id, "tid": self.task_id}).fetchone()
+                if row is None:
+                    return None
+                m = row._mapping
+                return ProcessedTaint(
+                    taint_params=json.loads(m.get("taint_params") or "[]"),
+                    taint_signature=m.get("taint_signature") or "",
+                    pre_validations=[],
+                    pre_validation_signature="",
+                    sessions_path=m.get("sessions_path") or "")
+        except Exception:
+            logger.warning("v2_find_processed_taint failed func_id=%s", func_id, exc_info=True)
+            return None
+
+    def v2_try_reserve_processed_taint(self, func_id: str, taint_sig: str,
+                                       taint_params: str = "[]", sessions_path: str = "") -> bool:
+        """V2 原子占位: INSERT ... WHERE NOT EXISTS (func_id 级, per-task)。
+
+        单语句原子执行: 如果 (source_dir_id, func_id, task_id) 已有任何行,
+        INSERT 被跳过 (rowcount=0), 返回 False。
+        """
+        try:
+            with self._engine.connect() as conn:
+                result = conn.execute(sa_text(
+                    "INSERT INTO processed_taints "
+                    "(source_dir_id, func_id, taint_signature, task_id, taint_params, sessions_path) "
+                    "SELECT :sid, :fid, :ts, :tid, :tp, :sp "
+                    "WHERE NOT EXISTS ("
+                    "  SELECT 1 FROM processed_taints "
+                    "  WHERE source_dir_id=:sid AND func_id=:fid AND task_id=:tid"),
+                    {"sid": self.source_dir_id, "fid": func_id, "ts": taint_sig,
+                     "tid": self.task_id, "tp": taint_params, "sp": sessions_path})
+                conn.commit()
+                return result.rowcount == 1
+        except Exception:
+            logger.warning("v2_try_reserve_processed_taint failed func_id=%s", func_id, exc_info=True)
+            return False
+
+    def v2_delete_processed_taint(self, func_id: str) -> None:
+        """V2 删除占位 (func_id 级, per-task)。"""
+        with self._engine.connect() as conn:
+            conn.execute(sa_text(
+                "DELETE FROM processed_taints "
+                "WHERE source_dir_id=:sid AND func_id=:fid AND task_id=:tid"),
+                {"sid": self.source_dir_id, "fid": func_id, "tid": self.task_id})
+            conn.commit()
+
+    def v2_add_processed_taint(self, func_id: str, taint_sig: str,
+                               taint_params: str = "[]", sessions_path: str = "") -> None:
+        """V2 写入 processed_taint (func_id 级, per-task)。"""
+        self.v2_try_reserve_processed_taint(func_id, taint_sig, taint_params, sessions_path)
+
+    # ── V2 计数方法 (诊断用) ────────────────────────────────────────
+    def v2_count_orchestration(self) -> int:
+        try:
+            with self._engine.connect() as conn:
+                row = conn.execute(sa_text(
+                    "SELECT COUNT(*) FROM orchestration "
+                    "WHERE source_dir_id=:sid AND task_id=:tid"),
+                    {"sid": self.source_dir_id, "tid": self.task_id}).fetchone()
+                return int(row[0]) if row else 0
+        except Exception:
+            return 0
+
+    def v2_count_propagations(self) -> int:
+        try:
+            with self._engine.connect() as conn:
+                row = conn.execute(sa_text(
+                    "SELECT COUNT(*) FROM propagations "
+                    "WHERE source_dir_id=:sid AND task_id=:tid"),
+                    {"sid": self.source_dir_id, "tid": self.task_id}).fetchone()
+                return int(row[0]) if row else 0
+        except Exception:
+            return 0
+
+    def v2_count_taints(self) -> int:
+        try:
+            with self._engine.connect() as conn:
+                row = conn.execute(sa_text(
+                    "SELECT COUNT(*) FROM taints "
+                    "WHERE source_dir_id=:sid AND task_id=:tid"),
+                    {"sid": self.source_dir_id, "tid": self.task_id}).fetchone()
+                return int(row[0]) if row else 0
+        except Exception:
+            return 0
 
     def upsert_taint(self, *, taint_id: str, func_id: str, name: str, signature: str,
                      file: str, function: str, next_propagations: str = "[]", description: str = ""):

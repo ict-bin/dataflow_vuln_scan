@@ -238,33 +238,31 @@ def persist_finding(
         "fix_suggestion": str(item.get("fix_suggestion") or ""),
     }
 
-    # FK 满足 + INSERT (同一 connection, 避免 FK 跨连接不可见)
-    try:
-        cols = list(data)
-        with graph_store.connect() as conn:
-            conn.execute("INSERT OR IGNORE INTO analysis_runs (run_id,task_id,root_file,root_function,source_root,status,started_at) VALUES (?,?,?,?,?,?,?)",
-                         (run_id, task_id, fsrc, ffn, source_root, "completed", time.time()))
-            conn.execute("INSERT OR IGNORE INTO taint_nodes (node_id,source_file,function_name,taint_kind,symbol,line,call_expr,description,parent_node_id,depth,context_session,run_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                         (node, fsrc, ffn, "vuln_site", fline, str(fline), "", func_description or "", "", 0, "", run_id))
-            conn.execute(f"INSERT OR REPLACE INTO vulnerability_findings ({','.join(cols)}) VALUES ({','.join('?' for _ in cols)})",
-                         [data[c] for c in cols])
-    except Exception as exc:
-        logger.warning("persist_finding authoritative sqlite insert failed: %s", exc, exc_info=True)
-        _emit_finding_event(
-            on_event,
-            "vuln_finding_persist_failed",
-            level="error",
-            message=f"漏洞持久化失败: {finding_id}",
-            finding_id=finding_id,
-            function_name=ffn,
-            task_id=task_id,
-            extra={
-                "error": str(exc),
-                "stage": "authoritative_sqlite",
-                "line": fline,
-                "source_file": fsrc,
-            },
-        )
+    # MySQL ONLY: analysis_runs 已由 start_run() 写入, 这里只写 finding
+    _mysql = getattr(graph_store, "_mysql", None)
+    if _mysql is not None:
+        try:
+            _mysql.insert_finding(**data)
+        except Exception as exc:
+            logger.warning("persist_finding mysql insert_finding failed: %s", exc, exc_info=True)
+            _emit_finding_event(
+                on_event,
+                "vuln_finding_persist_failed",
+                level="error",
+                message=f"漏洞持久化失败: {finding_id}",
+                finding_id=finding_id,
+                function_name=ffn,
+                task_id=task_id,
+                extra={
+                    "error": str(exc),
+                    "stage": "mysql_insert",
+                    "line": fline,
+                    "source_file": fsrc,
+                },
+            )
+            return None
+    else:
+        logger.warning("persist_finding: no mysql_store, finding not saved: %s", finding_id)
         return None
 
     _emit_finding_event(
@@ -290,24 +288,6 @@ def persist_finding(
             "mirror_dir": str(mirror_dir) if mirror_dir else "",
         },
     )
-
-    # MySQL 双写 finding 行: graph-view 优先读 MySQL dvs_vuln_findings, 缺此则前端漏洞图谱 0 findings
-    _mysql = getattr(graph_store, "_mysql", None)
-    if _mysql is not None:
-        try:
-            _mysql.insert_finding(**data)
-        except Exception as exc:
-            logger.warning("persist_finding mysql insert_finding failed: %s", exc, exc_info=True)
-            _emit_finding_event(
-                on_event,
-                "vuln_finding_mirror_failed",
-                level="warning",
-                message=f"漏洞镜像写入 MySQL 失败: {finding_id}",
-                finding_id=finding_id,
-                function_name=ffn,
-                task_id=task_id,
-                extra={"error": str(exc), "stage": "mysql_mirror"},
-            )
 
     # intake 上报 (退避: 父任务 → 自身; 失败不影响)
     _intake_report(run_id, task_id, source_root, nfs_fdir, rec, finding_id,

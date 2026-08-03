@@ -234,33 +234,17 @@ def ensure_file_indexed(source_root: str, rel_file: str, store: DataflowStore) -
       "indexing"  - 另一进程正在索引此文件 (部分函数可能已入库, 但不完整)
     """
     existing = store.functions_by_file(rel_file)
-    # 检查是否正在被另一进程索引
-    # MySQL 优先: 查 indexing 状态
-    if store._mysql:
-        is_indexing = [{}] if store._mysql.read_is_indexing(rel_file) else []
-    else:
-        is_indexing = store._q("functions", "SELECT 1 FROM indexing_files WHERE file_path=?", (rel_file,))
-    if is_indexing:
-        # 另一进程正在索引: 不重复索引, 但告知调用方状态
+    # 检查是否正在被另一进程索引 (MySQL ONLY)
+    if store._mysql and store._mysql.read_is_indexing(rel_file):
         return "indexing"
-    if existing and not is_indexing:
+    if existing:
         return "indexed"  # 已完整索引
-    # MySQL 优先: 查是否已索引
-    if store._mysql and store._mysql.read_is_indexed(rel_file) and not existing:
+    # 查是否已索引 (MySQL ONLY)
+    if store._mysql and store._mysql.read_is_indexed(rel_file):
         return "indexed"
-    if not existing and store._mysql and store._mysql.read_is_indexed(rel_file):
-        return "indexed"
-    # 标记为正在索引 (MySQL-first: 有 MySQL 不写 SQLite, 避免 v2_db 子进程并发写)
-    import time
+    # 标记为正在索引 (MySQL ONLY)
     if store._mysql:
-        try:
-            store._mysql.add_indexing_file(rel_file)
-        except Exception:
-            store._exec("functions", "INSERT OR REPLACE INTO indexing_files (file_path, started_at) VALUES (?, ?)",
-                        (rel_file, time.time()))
-    else:
-        store._exec("functions", "INSERT OR REPLACE INTO indexing_files (file_path, started_at) VALUES (?, ?)",
-                    (rel_file, time.time()))
+        store._mysql.add_indexing_file(rel_file)
     try:
         # 1) tree-sitter 函数提取
         extract_file_functions(source_root, rel_file, store)
@@ -273,14 +257,9 @@ def ensure_file_indexed(source_root: str, rel_file: str, store: DataflowStore) -
         if _TS_AVAILABLE:
             _extract_class_info_for_file(source_root, rel_file, store)
     finally:
-        # 完成后删除标记 (MySQL-first)
+        # 完成后删除标记 (MySQL ONLY)
         if store._mysql:
-            try:
-                store._mysql.finish_indexing_file(rel_file)
-            except Exception:
-                store._exec("functions", "DELETE FROM indexing_files WHERE file_path=?", (rel_file,))
-        else:
-            store._exec("functions", "DELETE FROM indexing_files WHERE file_path=?", (rel_file,))
+            store._mysql.finish_indexing_file(rel_file)
     return "indexed"
 
 
@@ -426,8 +405,7 @@ def _build_include_index(source_root: str, store: DataflowStore) -> int:
             store.add_include(header, rel_file)
         count += 1
 
-    logger.info("include index: %d files, %d entries", count,
-                len(store._q("functions", "SELECT COUNT(*) as c FROM include_index")))
+    logger.info("include index: %d files indexed", count)
     return count
 
 

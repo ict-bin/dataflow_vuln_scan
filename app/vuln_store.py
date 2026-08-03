@@ -198,6 +198,13 @@ class VulnFindingRecord:
 
 
 class VulnScanStore:
+    """V2 漏洞扫描存储 (MySQL ONLY, 无 SQLite)。
+
+    数据全部存 MySQL (MysqlGraphStore):
+      dvs_task_graph_runs / nodes / edges / sessions
+      dvs_vuln_findings / dvs_analysis_runs
+    """
+
     def __init__(
         self,
         db_path: str | Path,
@@ -207,204 +214,25 @@ class VulnScanStore:
         enable_wal: bool = True,
     ):
         self.db_path = Path(db_path)
-        self.readonly = bool(readonly)
-        self.enable_wal = bool(enable_wal)
-        if not self.readonly:
-            self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._mysql = mysql_store
-        if not self.readonly:
-            self.init_schema()
+        self._mysql = mysql_store  # MysqlGraphStore
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
-        if self.readonly:
-            conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True, timeout=30)
-        else:
-            conn = sqlite3.connect(str(self.db_path), timeout=30)
-        conn.row_factory = sqlite3.Row
+        """废弃: V2 数据全部在 MySQL, 不再读写 SQLite。保留空壳兼容旧调用方。"""
+        import sqlite3
+        conn = sqlite3.connect(":memory:")
         try:
-            if self.enable_wal:
-                conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA foreign_keys=ON")
-            if self.readonly:
-                conn.execute("PRAGMA query_only=ON")
             yield conn
-            if not self.readonly:
-                conn.commit()
         finally:
             conn.close()
 
     def init_schema(self) -> None:
-        with self.connect() as conn:
-            conn.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS meta (
-                  key TEXT PRIMARY KEY,
-                  value TEXT NOT NULL
-                );
-                INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', '1');
-
-                CREATE TABLE IF NOT EXISTS analysis_runs (
-                  run_id TEXT PRIMARY KEY,
-                  task_id TEXT NOT NULL,
-                  root_file TEXT NOT NULL,
-                  root_function TEXT NOT NULL,
-                  source_root TEXT NOT NULL,
-                  status TEXT NOT NULL DEFAULT 'running',
-                  started_at REAL NOT NULL,
-                  finished_at REAL,
-                  config_json TEXT NOT NULL DEFAULT '{}'
-                );
-
-                CREATE TABLE IF NOT EXISTS vulnerability_findings (
-                  finding_id TEXT PRIMARY KEY,
-                  run_id TEXT NOT NULL,
-                  node_id TEXT NOT NULL,
-                  edge_id TEXT NOT NULL DEFAULT '',
-                  source_file TEXT NOT NULL DEFAULT '',
-                  function_name TEXT NOT NULL DEFAULT '',
-                  line TEXT NOT NULL DEFAULT '',
-                  vuln_type TEXT NOT NULL DEFAULT 'unknown',
-                  severity TEXT NOT NULL DEFAULT 'unknown',
-                  title TEXT NOT NULL DEFAULT '',
-                  summary TEXT NOT NULL DEFAULT '',
-                  evidence TEXT NOT NULL DEFAULT '',
-                  exploitability TEXT NOT NULL DEFAULT '',
-                  confidence REAL NOT NULL DEFAULT 0,
-                  output_dir TEXT NOT NULL DEFAULT '',
-                  report_status TEXT NOT NULL DEFAULT '',
-                  report_case_id TEXT NOT NULL DEFAULT '',
-                  code_snippet TEXT NOT NULL DEFAULT '',
-                  code_explanation TEXT NOT NULL DEFAULT '',
-                  fix_suggestion TEXT NOT NULL DEFAULT '',
-                  created_at REAL NOT NULL DEFAULT (strftime('%s','now')),
-                  FOREIGN KEY(run_id) REFERENCES analysis_runs(run_id)
-                );
-
-                CREATE INDEX IF NOT EXISTS ix_findings_run ON vulnerability_findings(run_id);
-
-                CREATE TABLE IF NOT EXISTS task_graph_runs (
-                  task_id TEXT PRIMARY KEY,
-                  epoch TEXT NOT NULL,
-                  run_root TEXT NOT NULL,
-                  graph_version INTEGER NOT NULL DEFAULT 1,
-                  root_function TEXT NOT NULL DEFAULT '',
-                  generated_at REAL NOT NULL DEFAULT (strftime('%s','now'))
-                );
-
-                CREATE TABLE IF NOT EXISTS task_graph_nodes (
-                  node_id TEXT PRIMARY KEY,
-                  task_id TEXT NOT NULL,
-                  epoch TEXT NOT NULL,
-                  func_id TEXT NOT NULL DEFAULT '',
-                  function_name_resolved TEXT NOT NULL DEFAULT '',
-                  function_name_raw TEXT NOT NULL DEFAULT '',
-                  source_file TEXT NOT NULL DEFAULT '',
-                  depth INTEGER NOT NULL DEFAULT 0,
-                  status TEXT NOT NULL DEFAULT 'discovered',
-                  analysis_status TEXT NOT NULL DEFAULT 'pending',
-                  findings_count INTEGER NOT NULL DEFAULT 0,
-                  started_at TEXT,
-                  finished_at TEXT,
-                  primary_session_relpath TEXT NOT NULL DEFAULT '',
-                  session_group_key TEXT NOT NULL DEFAULT '',
-                  visible_in_tree INTEGER NOT NULL DEFAULT 1,
-                  visible_in_all_propagations INTEGER NOT NULL DEFAULT 1,
-                  extra_json TEXT NOT NULL DEFAULT '{}'
-                );
-
-                CREATE TABLE IF NOT EXISTS task_graph_edges (
-                  edge_id TEXT PRIMARY KEY,
-                  task_id TEXT NOT NULL,
-                  epoch TEXT NOT NULL,
-                  source_node_id TEXT NOT NULL,
-                  target_node_id TEXT NOT NULL DEFAULT '',
-                  source_func_id TEXT NOT NULL DEFAULT '',
-                  target_func_id TEXT NOT NULL DEFAULT '',
-                  source_function_resolved TEXT NOT NULL DEFAULT '',
-                  target_function_resolved TEXT NOT NULL DEFAULT '',
-                  target_function_raw TEXT NOT NULL DEFAULT '',
-                  source_file TEXT NOT NULL DEFAULT '',
-                  target_file TEXT NOT NULL DEFAULT '',
-                  edge_kind TEXT NOT NULL DEFAULT 'direct_call',
-                  status TEXT NOT NULL DEFAULT 'discovered',
-                  reason_code TEXT NOT NULL DEFAULT '',
-                  reason_message TEXT NOT NULL DEFAULT '',
-                  reason_source TEXT NOT NULL DEFAULT '',
-                  source_prop_id TEXT NOT NULL DEFAULT '',
-                  source_orchestration_edge_id TEXT NOT NULL DEFAULT '',
-                  call_line INTEGER,
-                  source_taint_name TEXT NOT NULL DEFAULT '',
-                  target_taint_name TEXT NOT NULL DEFAULT '',
-                  validations_json TEXT NOT NULL DEFAULT '[]',
-                  actual_args_json TEXT NOT NULL DEFAULT '[]',
-                  tracker_type TEXT NOT NULL DEFAULT '',
-                  tracker_result_json TEXT NOT NULL DEFAULT '{}',
-                  display_order INTEGER NOT NULL DEFAULT 0,
-                  visible_in_tree INTEGER NOT NULL DEFAULT 1,
-                  visible_in_all_propagations INTEGER NOT NULL DEFAULT 1,
-                  created_at TEXT,
-                  updated_at TEXT
-                );
-
-                CREATE TABLE IF NOT EXISTS task_graph_sessions (
-                  session_relpath TEXT PRIMARY KEY,
-                  task_id TEXT NOT NULL,
-                  epoch TEXT NOT NULL,
-                  node_id TEXT NOT NULL DEFAULT '',
-                  edge_id TEXT NOT NULL DEFAULT '',
-                  session_role TEXT NOT NULL DEFAULT '',
-                  session_kind TEXT NOT NULL DEFAULT '',
-                  display_name TEXT NOT NULL DEFAULT '',
-                  status TEXT NOT NULL DEFAULT 'unknown',
-                  started_at TEXT,
-                  ended_at TEXT,
-                  mtime REAL,
-                  event_count INTEGER NOT NULL DEFAULT 0,
-                  extra_json TEXT NOT NULL DEFAULT '{}'
-                );
-
-                CREATE INDEX IF NOT EXISTS ix_task_graph_nodes_task ON task_graph_nodes(task_id, depth);
-                CREATE INDEX IF NOT EXISTS ix_task_graph_edges_task ON task_graph_edges(task_id, display_order);
-                CREATE INDEX IF NOT EXISTS ix_task_graph_sessions_task ON task_graph_sessions(task_id, session_relpath);
-                """
-            )
-            for table, column, ddl in [
-                ("vulnerability_findings", "source_file", "ALTER TABLE vulnerability_findings ADD COLUMN source_file TEXT NOT NULL DEFAULT ''"),
-                ("vulnerability_findings", "function_name", "ALTER TABLE vulnerability_findings ADD COLUMN function_name TEXT NOT NULL DEFAULT ''"),
-                ("vulnerability_findings", "line", "ALTER TABLE vulnerability_findings ADD COLUMN line TEXT NOT NULL DEFAULT ''"),
-                ("vulnerability_findings", "report_status", "ALTER TABLE vulnerability_findings ADD COLUMN report_status TEXT NOT NULL DEFAULT ''"),
-                ("vulnerability_findings", "report_case_id", "ALTER TABLE vulnerability_findings ADD COLUMN report_case_id TEXT NOT NULL DEFAULT ''"),
-                ("vulnerability_findings", "code_snippet", "ALTER TABLE vulnerability_findings ADD COLUMN code_snippet TEXT NOT NULL DEFAULT ''"),
-                ("vulnerability_findings", "code_explanation", "ALTER TABLE vulnerability_findings ADD COLUMN code_explanation TEXT NOT NULL DEFAULT ''"),
-                ("vulnerability_findings", "fix_suggestion", "ALTER TABLE vulnerability_findings ADD COLUMN fix_suggestion TEXT NOT NULL DEFAULT ''"),
-                ("taint_edges", "validation_facts_json", "ALTER TABLE taint_edges ADD COLUMN validation_facts_json TEXT NOT NULL DEFAULT '[]'"),
-                ("taint_edges", "validation_signature", "ALTER TABLE taint_edges ADD COLUMN validation_signature TEXT NOT NULL DEFAULT 'none'"),
-                ("taint_edges", "validation_risk_rank", "ALTER TABLE taint_edges ADD COLUMN validation_risk_rank INTEGER NOT NULL DEFAULT 100"),
-                ("analysis_contexts", "validation_facts_json", "ALTER TABLE analysis_contexts ADD COLUMN validation_facts_json TEXT NOT NULL DEFAULT '[]'"),
-                ("followups", "dispatch_kind", "ALTER TABLE followups ADD COLUMN dispatch_kind TEXT NOT NULL DEFAULT 'direct_call'"),
-                ("followups", "tainted_nonlocal_json", "ALTER TABLE followups ADD COLUMN tainted_nonlocal_json TEXT NOT NULL DEFAULT '[]'"),
-                ("followups", "tracker_type", "ALTER TABLE followups ADD COLUMN tracker_type TEXT NOT NULL DEFAULT ''"),
-                ("followups", "tracker_status", "ALTER TABLE followups ADD COLUMN tracker_status TEXT NOT NULL DEFAULT ''"),
-                ("followups", "tracker_result_json", "ALTER TABLE followups ADD COLUMN tracker_result_json TEXT NOT NULL DEFAULT '{}'"),
-                ("analysis_contexts", "validations_json", "ALTER TABLE analysis_contexts ADD COLUMN validations_json TEXT NOT NULL DEFAULT '[]'"),
-                ("analysis_contexts", "func_hash", "ALTER TABLE analysis_contexts ADD COLUMN func_hash TEXT NOT NULL DEFAULT ''"),
-                ("taint_nodes", "run_id", "ALTER TABLE taint_nodes ADD COLUMN run_id TEXT NOT NULL DEFAULT ''"),
-            ]:
-                try:
-                    conn.execute(ddl)
-                except Exception as e:
-                    logger.warning("execute ddl failed: %s", e, exc_info=True)
+        """废弃: V2 数据全部在 MySQL, SQLite 不再建表。"""
+        pass
 
     def _upsert_rows(self, table: str, rows: list[dict[str, Any]]) -> None:
-        if not rows:
-            return
-        cols = list(rows[0])
-        with self.connect() as conn:
-            conn.executemany(
-                f"INSERT OR REPLACE INTO {table} ({','.join(cols)}) VALUES ({','.join('?' for _ in cols)})",
-                [[row[c] for c in cols] for row in rows],
-            )
+        """废弃: 不再被调用。"""
+        pass
 
     def start_task_graph_run(self, rec: TaskGraphRunRecord) -> None:
         data = asdict(rec)

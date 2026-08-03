@@ -200,14 +200,12 @@ class DataflowV2Runner:
                 # self_contained=True 的函数不需要跟入 callee, 有 vuln mining 就是正常完成
                 # propagations.db 有记录但 target_func_id 为空 (callee 找不到) 也是正常分析
                 try:
-                    _edge_count = store._q("orchestration", "SELECT count(*) FROM orchestration")
-                    _edge_count = int(_edge_count[0][0]) if _edge_count else 0
+                    _edge_count = store._mysql.v2_count_orchestration() if store._mysql else 0
                 except Exception as e:
                     logger.warning("count orchestration edges failed: %s", e)
                     _edge_count = 0
                 try:
-                    _prop_count = store._q("propagations", "SELECT count(*) FROM propagations")
-                    _prop_count = int(_prop_count[0][0]) if _prop_count else 0
+                    _prop_count = store._mysql.v2_count_propagations() if store._mysql else 0
                 except Exception as e:
                     logger.warning("count propagations failed: %s", e)
                     _prop_count = 0
@@ -216,8 +214,7 @@ class DataflowV2Runner:
                     # taints > 0 说明 LLM 成功分析了函数, 识别了污点, 但未报告任何传播路径
                     # taints == 0 说明 LLM 解析失败或未识别污点 (真失败)
                     try:
-                        _taint_count = store._q("taints", "SELECT count(*) FROM taints")
-                        _taint_count = int(_taint_count[0][0]) if _taint_count else 0
+                        _taint_count = store._mysql.v2_count_taints() if store._mysql else 0
                     except Exception as e:
                         logger.warning("count taints failed: %s", e)
                         _taint_count = 0

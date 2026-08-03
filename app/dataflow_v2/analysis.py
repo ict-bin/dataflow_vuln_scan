@@ -1472,12 +1472,16 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
             except Exception as e:
                 logger.warning("sync_vuln_count_from_local_store failed (task=%s): %s", self.task_id, e)
             try:
-                with self.graph_store.connect() as conn:
-                    row = conn.execute(
-                        "SELECT COUNT(*) FROM vulnerability_findings WHERE node_id=?",
-                        (node,),
-                    ).fetchone()
-                authoritative_count = int(row[0] or 0) if row else 0
+                _mysql = getattr(self.graph_store, "_mysql", None)
+                if _mysql is not None:
+                    from sqlalchemy import text as _sa_text
+                    with _mysql._engine.connect() as _conn:
+                        _row = _conn.execute(_sa_text(
+                            "SELECT COUNT(*) FROM dvs_vuln_findings WHERE task_id=:tid AND node_id=:nid"),
+                            {"tid": self.task_id, "nid": node}).fetchone()
+                    authoritative_count = int(_row[0] or 0) if _row else 0
+                else:
+                    authoritative_count = persisted_count
             except Exception as e:
                 logger.warning("count node findings failed (node=%s), fallback to persisted_count: %s", node, e)
                 authoritative_count = persisted_count
