@@ -47,7 +47,7 @@ CREATE TABLE IF NOT EXISTS functions (
     start_line     INTEGER NOT NULL,
     end_line       INTEGER NOT NULL,
     func_hash      VARCHAR(128),
-    description    VARCHAR(128),
+    description    TEXT,
     PRIMARY KEY (source_dir_id, func_id)
 );
 CREATE INDEX idx_func_name ON functions(source_dir_id, name);
@@ -108,7 +108,7 @@ CREATE TABLE IF NOT EXISTS taints (
     file                VARCHAR(512) NOT NULL,
     `function`          VARCHAR(512) NOT NULL,
     next_propagations   TEXT,
-    description         VARCHAR(128),
+    description         TEXT,
     task_id             VARCHAR(64) NOT NULL,
     PRIMARY KEY (source_dir_id, taint_id, task_id)
 );
@@ -144,7 +144,7 @@ ALTER TABLE propagations ADD COLUMN IF NOT EXISTS branch_group_id VARCHAR(128) N
 ALTER TABLE propagations ADD COLUMN IF NOT EXISTS branch_arm_id VARCHAR(128) NOT NULL DEFAULT '';
 ALTER TABLE propagations ADD COLUMN IF NOT EXISTS branch_path TEXT;
 ALTER TABLE propagations ADD COLUMN IF NOT EXISTS mutex_siblings TEXT;
-ALTER TABLE propagations ADD COLUMN IF NOT EXISTS description VARCHAR(128);
+ALTER TABLE propagations ADD COLUMN IF NOT EXISTS description TEXT;
 CREATE TABLE IF NOT EXISTS orchestration (
     source_dir_id   VARCHAR(64) NOT NULL,
     edge_id          VARCHAR(128) NOT NULL,
@@ -215,7 +215,7 @@ CREATE TABLE IF NOT EXISTS dag_meta (
     func_id         VARCHAR(128) NOT NULL,
     taint_signature VARCHAR(512) NOT NULL,
     self_contained  INTEGER NOT NULL DEFAULT 0,
-    description     VARCHAR(128),
+    description     TEXT,
     taint_failed    INTEGER NOT NULL DEFAULT 0,
     task_id         VARCHAR(64) NOT NULL,
     PRIMARY KEY (source_dir_id, func_id, taint_signature, task_id)
