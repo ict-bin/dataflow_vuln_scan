@@ -31,43 +31,28 @@ def _count_from_conn(conn, task_id: str) -> tuple[int, int, int]:
 
 
 def count_findings_from_local_store(graph_store: Any, task_id: str) -> tuple[int, int, int] | None:
-    """Worker 执行期: 直接用手里已有的 local graph_store (pod-local vuln-scan.sqlite)
-    计数。不开第二个 sqlite 文件、不碰 NFS、不开 WAL 写连接——复用 writer 自己的
-    graph_store.connect()。
+    """Worker 执行期: 优先用 graph_store 的 MySQL 连接计数。
 
-    这是 1c211f5 之前 analysis.py / finding_store.py 用的安全写法，被那次 "统一
-    authoritative 读取" 重构废弃后引入了 worker 开 NFS sqlite 的问题，现恢复。
+    MySQL ONLY: vulnerability_findings 只写 MySQL, SQLite 表已无数据。
+    保留 SQLite fallback 仅为无 MySQL 场景 (DAG mode)。
     """
     if graph_store is None:
         return None
     try:
-        with graph_store.connect() as conn:
-            return _count_from_conn(conn, task_id)
+        mysql = getattr(graph_store, "_mysql", None)
+        if mysql is not None:
+            stats = mysql.get_task_finding_stats(task_id)
+            return (stats["total"], stats["reported"], stats["unreported"])
     except Exception:
-        logger.debug("count_findings_from_local_store failed (task=%s)", task_id, exc_info=True)
-        return None
+        logger.debug("count_findings_from_local_store mysql failed (task=%s)", task_id, exc_info=True)
+    return None  # SQLite 废弃
 
 
 def count_findings_readonly(db_path: Path | str | None, task_id: str) -> tuple[int, int, int] | None:
-    """对给定 sqlite 路径以只读、无 WAL 方式计数。
-
-    用于 worker 终态提交: 路径是 pod-local epoch vuln-scan.sqlite (经 workspace
-    软链 → /tmp)。只读 + 关 WAL, 避免与周期同步 copy2 同一文件时互相撕裂/
-    丢 -wal 页导致 "database disk image is malformed"。
+    """废棄: vulnerability_findings 已改 MySQL ONLY, SQLite 表无数据。
+    请用 count_findings_from_local_store(graph_store, task_id) 替代。
     """
-    if not db_path:
-        return None
-    path = Path(db_path)
-    if not path.exists():
-        return None
-    from app.vuln_store import VulnScanStore
-    try:
-        store = VulnScanStore(path, readonly=True, enable_wal=False)
-        with store.connect() as conn:
-            return _count_from_conn(conn, task_id)
-    except Exception:
-        logger.debug("count_findings_readonly failed (path=%s task=%s)", path, task_id, exc_info=True)
-        return None
+    return None  # SQLite 废弃
 
 
 def _apply_stats_to_row(row: AppDvsTask, stats: tuple[int, int, int]) -> bool:
@@ -94,6 +79,26 @@ def _apply_stats_to_row(row: AppDvsTask, stats: tuple[int, int, int]) -> bool:
     return changed
 
 
+def _create_mysql_graph_store_from_row(row: AppDvsTask):
+    """从 AppDvsTask 行创建 MysqlGraphStore (用于 API 侧计数)。"""
+    try:
+        from app.db.mysql_graph_store import create_mysql_graph_store
+        source_root = str(row.source_root_path or "")
+        if not source_root:
+            return None
+        import hashlib
+        sid = hashlib.sha1(source_root.encode("utf-8")).hexdigest()[:16]
+        return create_mysql_graph_store(
+            "mysql+pymysql://root:Huawei12%23$@secflow-app-dataflow-vuln-scan-mysql.secflow-ns.svc.cluster.local:3306",
+            project_id=str(row.project_id or ""),
+            source_dir_id=sid,
+            source_root=source_root,
+        )
+    except Exception as e:
+        logger.debug("create mysql graph store from row failed: %s", e)
+        return None
+
+
 def sync_task_vuln_snapshot_row(
     row: AppDvsTask,
     *,
@@ -112,7 +117,16 @@ def sync_task_vuln_snapshot_row(
     """
     task_id = str(row.task_id or "").strip()
     stats: tuple[int, int, int] | None = None
-    if local_graph_db_path is not None:
+    # MySQL ONLY: 优先用 MySQL 计数 (vulnerability_findings 只写 MySQL)
+    mysql_store = _create_mysql_graph_store_from_row(row)
+    if mysql_store is not None:
+        try:
+            st = mysql_store.get_task_finding_stats(task_id)
+            stats = (st["total"], st["reported"], st["unreported"])
+        except Exception:
+            logger.debug("mysql get_task_finding_stats failed (task=%s)", task_id, exc_info=True)
+    # SQLite 废弃: 无 MySQL 时 fallback 到 authoritative_task_vuln_stats (会读空表)
+    if stats is None and local_graph_db_path is not None:
         stats = count_findings_readonly(local_graph_db_path, task_id)
     if stats is None:
         task_root = _task_root(row)

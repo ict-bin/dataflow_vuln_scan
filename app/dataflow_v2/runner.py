@@ -262,7 +262,7 @@ class DataflowV2Runner:
         except Exception as exc:
             logger.exception("dataflow-v2 runner failed task=%s", tid)
             try:
-                VulnScanStore(graph_db_path).finish_run(
+                VulnScanStore(graph_db_path, mysql_store=self._create_mysql_graph_store()).finish_run(
                     tid,
                     "cancelled" if (self._cancel_event is not None and self._cancel_event.is_set()) else "error",
                 )
@@ -364,7 +364,7 @@ class DataflowV2Runner:
         findings = []
         if graph_db_path.exists():
             try:
-                findings = VulnScanStore(graph_db_path).list_all_findings()
+                findings = VulnScanStore(graph_db_path, mysql_store=self._create_mysql_graph_store()).list_all_findings()
             except Exception as e:
                 logger.warning("list all findings for report failed (db=%s): %s", graph_db_path, e)
                 findings = []
@@ -406,7 +406,7 @@ class DataflowV2Runner:
         if not graph_db_path.exists():
             return 0
         try:
-            return len(VulnScanStore(graph_db_path).list_all_findings())
+            return len(VulnScanStore(graph_db_path, mysql_store=self._create_mysql_graph_store()).list_all_findings())
         except Exception as e:
             logger.warning("count findings failed (db=%s): %s", graph_db_path, e)
             return 0
