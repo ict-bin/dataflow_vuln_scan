@@ -2021,31 +2021,42 @@ def _graph_store_for_run_root(
     task_root: Path | None = None,
     readonly: bool = True,
 ):
-    """图谱详情固定从 task_root 下的 authoritative SQLite 读取。"""
+    """图谱详情从 MySQL 读取 (VulnScanStore + MysqlGraphStore)。"""
+    # 先尝试带 mysql_store 创建 (需要 source_root + project_id)
+    if task_root is not None:
+        from app.db.models import AppDvsTask
+        from app.db import get_db
+        try:
+            db = next(get_db())
+            row = db.query(AppDvsTask).filter_by(task_id=task_id).first()
+            if row is not None:
+                source_root = str(row.source_root_path or row.input_path or "")
+                project_id = str(row.project_id or "")
+                if source_root:
+                    import hashlib
+                    sid = hashlib.sha1(source_root.encode("utf-8")).hexdigest()[:16]
+                    from app.db.mysql_graph_store import create_mysql_graph_store
+                    _MYSQL_URL = "mysql+pymysql://root:Huawei12%23$@secflow-app-dataflow-vuln-scan-mysql.secflow-ns.svc.cluster.local:3306"
+                    mgs = create_mysql_graph_store(_MYSQL_URL, project_id=project_id,
+                                                   source_dir_id=sid, source_root=source_root)
+                    if mgs is not None:
+                        # 用 VulnScanStore 包装 (兼容旧 API)
+                        db_path = task_root / "output" / "vuln-scan.sqlite"
+                        from app.vuln_store import VulnScanStore
+                        store = VulnScanStore(str(db_path), mysql_store=mgs, readonly=True, enable_wal=False)
+                        db.close()
+                        return store
+            db.close()
+        except Exception:
+            logger.debug("_graph_store_for_run_root mysql creation failed: task_id=%s", task_id, exc_info=True)
+    # fallback: 无 MySQL 时从 SQLite 读取 (旧路径)
     store = open_authoritative_vuln_scan_store(
         task_root,
         prefer_live=True,
         readonly=readonly,
         enable_wal=not readonly,
     )
-    if store is not None:
-        return store
-    if task_root is None:
-        logger.warning(
-            "graph view task_root missing: task_id=%s run_root=%s",
-            task_id,
-            run_root,
-        )
-        return None
-    logger.warning(
-        "graph view authoritative sqlite missing: task_id=%s run_root=%s task_root=%s run_db_path=%s output_db_path=%s",
-        task_id,
-        run_root,
-        task_root,
-        task_root / "run" / "vuln-scan.sqlite",
-        task_root / "output" / "vuln-scan.sqlite",
-    )
-    return None
+    return store
 
 
 def _load_task_graph_view(run_root: Path, task_id: str, *, task_root: Path | None = None) -> dict[str, Any]:
