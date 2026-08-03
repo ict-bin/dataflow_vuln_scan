@@ -92,12 +92,13 @@ CREATE TABLE IF NOT EXISTS processed_taints (
     taint_signature  VARCHAR(128) NOT NULL,
     task_id          VARCHAR(64) NOT NULL,
     taint_params     TEXT,
-    sessions_path    VARCHAR(128),
+    sessions_path    VARCHAR(512),
     analyzed_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (source_dir_id, func_id, taint_signature, task_id)
 );
 CREATE INDEX idx_pt_dir_func ON processed_taints(source_dir_id, func_id, taint_signature);
 CREATE INDEX idx_pt_task ON processed_taints(task_id);
+ALTER TABLE processed_taints MODIFY COLUMN IF NOT EXISTS sessions_path VARCHAR(512);
 CREATE TABLE IF NOT EXISTS taints (
     source_dir_id       VARCHAR(64) NOT NULL,
     taint_id            VARCHAR(128) NOT NULL,
