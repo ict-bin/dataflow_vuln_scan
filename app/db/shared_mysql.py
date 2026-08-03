@@ -98,7 +98,7 @@ CREATE TABLE IF NOT EXISTS processed_taints (
 );
 CREATE INDEX idx_pt_dir_func ON processed_taints(source_dir_id, func_id, taint_signature);
 CREATE INDEX idx_pt_task ON processed_taints(task_id);
-ALTER TABLE processed_taints MODIFY COLUMN IF NOT EXISTS sessions_path VARCHAR(512);
+ALTER TABLE processed_taints MODIFY COLUMN sessions_path VARCHAR(512);
 CREATE TABLE IF NOT EXISTS taints (
     source_dir_id       VARCHAR(64) NOT NULL,
     taint_id            VARCHAR(128) NOT NULL,
