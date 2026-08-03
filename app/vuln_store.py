@@ -413,41 +413,21 @@ class VulnScanStore:
         if self._mysql:
             self._mysql.start_task_graph_run(rec)
         # SQLite 废弃
-            try:
-                self._mysql.start_task_graph_run(rec)
-            except Exception:
-                logger.warning("mysql start_task_graph_run failed: task_id=%s", rec.task_id, exc_info=True)
 
     def upsert_task_graph_node(self, rec: TaskGraphNodeRecord) -> None:
         if self._mysql:
             self._mysql.upsert_task_graph_node(rec)
         # SQLite 废弃
-            try:
-                self._mysql.upsert_task_graph_node(rec)
-            except Exception:
-                logger.warning("mysql upsert_task_graph_node failed: node_id=%s", rec.node_id, exc_info=True)
 
     def upsert_task_graph_edge(self, rec: TaskGraphEdgeRecord) -> None:
         if self._mysql:
             self._mysql.upsert_task_graph_edge(rec)
         # SQLite 废弃
-            try:
-                self._mysql.upsert_task_graph_edge(rec)
-            except Exception:
-                logger.warning("mysql upsert_task_graph_edge failed: edge_id=%s", rec.edge_id, exc_info=True)
 
     def upsert_task_graph_session(self, rec: TaskGraphSessionRecord) -> None:
         if self._mysql:
             self._mysql.upsert_task_graph_session(rec)
         # SQLite 废弃
-            try:
-                self._mysql.upsert_task_graph_session(rec)
-            except Exception:
-                logger.warning(
-                    "mysql upsert_task_graph_session failed: session_relpath=%s",
-                    rec.session_relpath,
-                    exc_info=True,
-                )
 
     def update_task_graph_node(
         self,
@@ -464,10 +444,6 @@ class VulnScanStore:
         if self._mysql:
             self._mysql.update_task_graph_node(node_id, **{k: v for k, v in [("status", status), ("analysis_status", analysis_status), ("findings_count", findings_count), ("finished_at", finished_at), ("primary_session_relpath", primary_session_relpath)] if v is not None})
         # SQLite 废弃
-            try:
-                self._mysql.update_task_graph_node(node_id, **{k: v for k, v in [("status", status), ("analysis_status", analysis_status), ("findings_count", findings_count), ("finished_at", finished_at), ("primary_session_relpath", primary_session_relpath)] if v is not None})
-            except Exception:
-                logger.warning("mysql update_task_graph_node failed: node_id=%s", node_id, exc_info=True)
 
     def update_task_graph_edge(
         self,
@@ -492,10 +468,6 @@ class VulnScanStore:
         if self._mysql:
             self._mysql.update_task_graph_edge(edge_id, **{k: v for k, v in [("edge_kind", edge_kind), ("status", status), ("target_node_id", target_node_id), ("target_func_id", target_func_id), ("target_function_resolved", target_function_resolved), ("target_file", target_file), ("reason_code", reason_code), ("reason_message", reason_message), ("reason_source", reason_source), ("tracker_type", tracker_type), ("tracker_result_json", tracker_result_json), ("visible_in_tree", visible_in_tree), ("visible_in_all_propagations", visible_in_all_propagations)] if v is not None})
         # SQLite 废弃
-            try:
-                self._mysql.update_task_graph_edge(edge_id, **{k: v for k, v in [("edge_kind", edge_kind), ("status", status), ("target_node_id", target_node_id), ("target_func_id", target_func_id), ("target_function_resolved", target_function_resolved), ("target_file", target_file), ("reason_code", reason_code), ("reason_message", reason_message), ("reason_source", reason_source), ("tracker_type", tracker_type), ("tracker_result_json", tracker_result_json), ("visible_in_tree", visible_in_tree), ("visible_in_all_propagations", visible_in_all_propagations)] if v is not None})
-            except Exception:
-                logger.warning("mysql update_task_graph_edge failed: edge_id=%s", edge_id, exc_info=True)
 
     def update_task_graph_session(
         self,
@@ -512,34 +484,52 @@ class VulnScanStore:
         if self._mysql:
             self._mysql.update_task_graph_session(session_relpath, **{k: v for k, v in [("node_id", node_id), ("edge_id", edge_id), ("status", status), ("ended_at", ended_at), ("event_count", event_count)] if v is not None})
         # SQLite 废弃
-            try:
-                self._mysql.update_task_graph_session(session_relpath, **{k: v for k, v in [("node_id", node_id), ("edge_id", edge_id), ("status", status), ("ended_at", ended_at), ("event_count", event_count)] if v is not None})
-            except Exception:
-                logger.warning(
-                    "mysql update_task_graph_session failed: session_relpath=%s",
-                    session_relpath,
-                    exc_info=True,
-                )
 
     def start_run(self, run_id: str, task_id: str, root_file: str, root_function: str, source_root: str, config: dict[str, Any] | None = None) -> None:
         if self._mysql:
             self._mysql.start_run(run_id, task_id, root_file, root_function, source_root, config or {})
         # SQLite 废弃
-            try:
-                self._mysql.start_run(run_id, task_id, root_file, root_function, source_root, config or {})
-            except Exception:
-                logger.warning("mysql start_run failed: run_id=%s task_id=%s", run_id, task_id, exc_info=True)
 
 
     def finish_run(self, run_id: str, status: str) -> None:
         if self._mysql:
             self._mysql.finish_run(run_id, status)
         # SQLite 废弃
-            try:
-                self._mysql.finish_run(run_id, status)
-            except Exception:
-                logger.warning("mysql finish_run failed: run_id=%s status=%s", run_id, status, exc_info=True)
 
+    def update_finding_report_status(
+        self,
+        finding_id: str,
+        *,
+        status: str = "reported",
+        case_id: str = "",
+        task_id: str = "",
+    ) -> None:
+        if not finding_id:
+            return
+        if self._mysql:
+            self._mysql.update_finding_report_status(finding_id, status, case_id, task_id=task_id)
+        # SQLite 废弃
+
+    def add_finding(self, rec: VulnFindingRecord) -> None:
+        if self._mysql:
+            data = asdict(rec)
+            self._mysql.insert_finding(**data)
+        # SQLite 废弃: vulnerability_findings 只写 MySQL
+
+    def list_task_findings(self, task_id: str) -> list[dict[str, Any]]:
+        if self._mysql:
+            return self._mysql.list_task_findings(task_id)
+        return []  # SQLite 废弃
+
+    def list_all_findings(self, *, conn: sqlite3.Connection | None = None) -> list[dict[str, Any]]:
+        if self._mysql:
+            return self._mysql.list_all_findings()
+        return []  # SQLite 废弃
+
+    def export_task_graph_view(self, task_id: str) -> dict[str, Any]:
+        if self._mysql:
+            return self._mysql.export_task_graph_view(task_id)
+        return {"task_id": task_id, "available": False}  # SQLite 废弃
 
     def upsert_taint_node(self, rec) -> None:
         pass  # v1 遗留: V2 不调用, 表已删

@@ -292,7 +292,7 @@ class DataflowStore:
 
     # ── 函数库 ──────────────────────────────────────────────────────────────
     def upsert_function(self, rec: FunctionRecord) -> None:
-        # MySQL ONLY (SQLite 废弃): functions 表只写 MySQL, 不写 functions.db
+        # MySQL ONLY (SQLite 废弃): functions 表只写 MySQL
         if self._mysql:
             self._mysql.upsert_function(func_id=rec.func_id, file=rec.file, name=rec.name,
                 signature=rec.signature, start_line=rec.start_line, end_line=rec.end_line,
@@ -301,7 +301,7 @@ class DataflowStore:
     def get_function(self, func_id: str) -> FunctionRecord | None:
         if self._mysql:
             return self._mysql.read_function(func_id)
-        return None
+        return None  # SQLite 废弃
 
     def find_function(self, name: str, file: str = "") -> FunctionRecord | None:
         """按名查找函数。C++ 方法: LLM 报短名 (ReadDataTask), 库存限定名
@@ -320,32 +320,33 @@ class DataflowStore:
         一旦某一层有命中, 仅返回该层结果, 不再混入后续回退层, 避免把
         精确匹配和宽松匹配揉成一锅。
         """
-        # MySQL 优先
+        # MySQL ONLY (SQLite 废弃)
         if self._mysql:
             mrecs = self._mysql.read_functions(name, file)
-            return mrecs or []  # MySQL ONLY (SQLite 废弃)
-        return []  # SQLite 废弃: find_functions 只用 MySQL
+            return mrecs or []
+        return []
 
     def list_functions(self) -> list[FunctionRecord]:
         if self._mysql:
-            return self._mysql.read_list_functions()
+            return self._mysql.read_list_functions() or []
         return []  # SQLite 废弃
 
     def count_functions(self) -> int:
+        """快速计数 (COUNT, 不加载全部行)。"""
         if self._mysql:
             return self._mysql.count_functions()
         return 0  # SQLite 废弃
 
     def functions_by_file(self, file: str) -> list[FunctionRecord]:
+        """按文件查函数 (用索引, 不全量扫描)。"""
         if self._mysql:
-            return self._mysql.read_functions_by_file(file)
+            return self._mysql.read_functions_by_file(file) or []
         return []  # SQLite 废弃
 
     # ── 调用关系 (call_edges) ──────────────────────────────────────────
     def save_call_edges(self, caller_func_id: str, edges: list[dict]) -> None:
-        """存储函数调用边 (按需填值, INSERT OR IGNORE 幂等)。
-        edges: [{callee_name, call_line, call_file, call_expr}, ...]
-        同时标记 call_edges_indexed=1 防止重复提取。"""
+        """存储函数调用边到 SQLite (无 MySQL 镜像, 仅 worker 单进程写)。
+        edges: [{callee_name, call_line, call_file, call_expr}, ...]"""
         if not edges: return
         with self._locks["functions"]:
             c = self._conns["functions"]
@@ -356,16 +357,13 @@ class DataflowStore:
                     "VALUES (?,?,?,?,?)",
                     (caller_func_id, e.get("callee_name", ""),
                      e.get("call_line", 0), e.get("call_file", ""), e.get("call_expr", "")))
-            # 标记已提取
-            c.execute(
-                "UPDATE functions SET call_edges_indexed=1 WHERE func_id=?", (caller_func_id,))
             c.commit()
 
     def is_call_edges_indexed(self, func_id: str) -> bool:
-        """查某函数的 call_edges 是否已提取 (避免重复查找)。"""
-        rows = self._q("functions",
-            "SELECT call_edges_indexed FROM functions WHERE func_id=?", (func_id,))
-        return bool(rows and rows[0]["call_edges_indexed"])
+        """查某函数的 call_edges 是否已提取 (避免重复查找)。
+        废弃: functions 表已改 MySQL ONLY, 此方法仅查 SQLite (无数据)。
+        如需查重请用 query_callees 返回值非空判断。"""
+        return False  # SQLite 废弃
 
     def query_callees(self, caller_func_id: str) -> list[dict]:
         """查某函数调用了哪些函数 (callee)。返回 [{callee_name, call_line, call_file, call_expr}, ...]"""
@@ -384,49 +382,32 @@ class DataflowStore:
     # ── include 索引 (C 作用域) ────────────────────────────────────────
     def add_include(self, header: str, file: str) -> None:
         if self._mysql:
-            try:
-                self._mysql.add_include(header, file)
-                return
-            except Exception:
-                logger.warning("mysql add_include failed, fallback sqlite: header=%s file=%s", header, file, exc_info=True)
+            self._mysql.add_include(header, file)
         # SQLite 废弃: include_index 只写 MySQL
 
     def get_files_including(self, header: str) -> list[str]:
         """查找所有传递性 include 了指定 header 的 .c/.cpp 文件。"""
         if self._mysql:
-            files = self._mysql.read_files_including(header)
-            if files: return files
+            return self._mysql.read_files_including(header) or []
         return []  # SQLite 废弃
 
     # ── class 继承图 (C++ 作用域) ──────────────────────────────────────
     def add_class(self, class_name: str, bases: list[str], file: str = "") -> None:
         import json
         if self._mysql:
-            try:
-                self._mysql.add_class(class_name, json.dumps(bases), file)
-                return
-            except Exception:
-                logger.warning("mysql add_class failed, fallback sqlite: class_name=%s", class_name, exc_info=True)
+            self._mysql.add_class(class_name, json.dumps(bases), file)
         # SQLite 废弃: class_hierarchy 只写 MySQL
 
     def add_class_member(self, class_name: str, member_name: str,
                          member_type: str = "", file: str = "") -> None:
         if self._mysql:
-            try:
-                self._mysql.add_class_member(class_name, member_name, member_type, file)
-                return
-            except Exception:
-                logger.warning(
-                    "mysql add_class_member failed, fallback sqlite: class_name=%s member_name=%s",
-                    class_name, member_name, exc_info=True)
+            self._mysql.add_class_member(class_name, member_name, member_type, file)
         # SQLite 废弃: class_members 只写 MySQL
 
     def get_bases(self, class_name: str) -> list[str]:
-        import json
         if self._mysql:
-            return self._mysql.read_bases(class_name)
+            return self._mysql.read_bases(class_name) or []
         return []  # SQLite 废弃
-        return json.loads(rows[0]["bases"] or "[]") if rows else []
 
     def get_all_ancestors(self, class_name: str) -> list[str]:
         """传递闭包: class → 所有祖先类 (含间接继承)。"""
@@ -445,9 +426,208 @@ class DataflowStore:
 
     def get_all_descendants(self, class_name: str) -> list[str]:
         """传递闭包: class → 所有派生类 (含间接继承)。"""
-        # 反向遍历: 找所有 bases 含 class_name 的类
-        import json
-        visited = {class_name}
         if self._mysql:
             descs = self._mysql.read_all_descendants(class_name)
-            return descs or []  # MySQL ONLY
+            return descs or []  # MySQL ONLY (SQLite 废弃)
+        return []  # SQLite 废弃
+
+    def get_member_declaring_class(self, class_name: str, member_name: str) -> str | None:
+        """查找 member 声明在哪个类 (从 class_name 往祖先找)。"""
+        if self._mysql:
+            result = self._mysql.read_member_declaring_class(class_name, member_name)
+            if result: return result
+        return None  # SQLite 废弃
+
+    def get_class_scope_methods(self, class_name: str, member_name: str = "") -> list[str]:
+        """获取能访问 member 的所有方法 (声明类 + 所有派生类的方法)。
+
+        返回函数名列表 (Class::method 格式)。
+        """
+        if self._mysql:
+            methods = self._mysql.read_class_scope_methods(class_name, member_name)
+            return methods or []
+        return []  # SQLite 废弃
+
+    def get_functions_with_type_in_signature(self, type_name: str) -> list[str]:
+        """查找签名中包含指定类型的函数 (用于 C struct 字段作用域)。"""
+        if self._mysql:
+            names = self._mysql.read_functions_with_type_in_signature(type_name)
+            return names or []
+        return []  # SQLite 废弃
+
+    def add_processed_taint(self, func_id: str, pt: ProcessedTaint) -> None:
+        """写入 processed_taint (func_id 级 INSERT OR IGNORE 去重)。"""
+        ts = _norm_sig(pt.taint_signature or "")
+        pvs = pt.pre_validation_signature or ""
+        self._exec("functions",
+            "INSERT OR IGNORE INTO processed_taints (func_id, taint_signature, pre_validation_signature, taint_params, sessions_path) VALUES (?,?,?,?,?)",
+            (func_id, ts, pvs, json.dumps(pt.taint_params, ensure_ascii=False), pt.sessions_path))
+        # 注: processed_taints 不双写 MySQL — 它是"本任务 BFS 去重/占位"状态, 必须任务级隔离;
+        # per-source-dir MySQL 跨任务共享, 双写会导致新任务根函数被前任务残留记录跳过 (0 分析)。
+
+    def try_reserve_processed_taint(self, func_id: str, pt: ProcessedTaint) -> bool:
+        """分析前预留占位。
+
+        去重键: func_id。任务/epoch 内同一函数只分析一次, 即使不同调用路径给出
+        不同污点名/签名, 也视为同一函数级分析结果。analyze 失败时 delete 占位可重试。
+        """
+        ts = _norm_sig(pt.taint_signature or "")
+        pvs = pt.pre_validation_signature or ""
+        tp_json = json.dumps(pt.taint_params, ensure_ascii=False)
+        # processed_taints 仅用任务本地 SQLite (per-epoch): 单 worker/单进程内原子占位即可。
+        # 不走 MySQL: per-source-dir 库跨任务共享, 会导致跨任务残留跳过根分析。
+        with self._locks["functions"]:
+            row = self._conns["functions"].execute(
+                "SELECT 1 FROM processed_taints WHERE func_id=? LIMIT 1",
+                (func_id,)).fetchone()
+            if row is not None:
+                return False
+            cur = self._conns["functions"].execute(
+                "INSERT OR IGNORE INTO processed_taints (func_id, taint_signature, pre_validation_signature, taint_params, sessions_path) VALUES (?,?,?,?,?)",
+                (func_id, ts, pvs, tp_json, pt.sessions_path))
+            self._conns["functions"].commit()
+            return cur.rowcount == 1
+
+    def delete_processed_taint(self, func_id: str, taint_signature: str,
+                               pre_validation_signature: str = "") -> None:
+        self._exec("functions",
+            "DELETE FROM processed_taints WHERE func_id=?",
+            (func_id,))
+        # 不双写 MySQL (见 try_reserve 注释)
+
+    def find_processed_taint(self, func_id: str, taint_signature: str,
+                             pre_validation_signature: str = "") -> ProcessedTaint | None:
+        """函数级去重: func_id — 不依赖污点签名或前置校验集。
+
+        只要同一任务/epoch 内同一函数已被分析过, 后续任何路径到达都不重分析。
+        taint_signature / pre_validation_signature 参数保留兼容签名但不参与查询。
+        """
+        # 仅查任务本地 SQLite (per-epoch); 不查共享 MySQL 避免跨任务残留误判"已分析"。
+        rows = self._q("functions",
+            "SELECT taint_signature, pre_validation_signature, taint_params, sessions_path FROM processed_taints WHERE func_id=? LIMIT 1",
+            (func_id,))
+        if rows:
+            r = rows[0]
+            return ProcessedTaint(taint_params=json.loads(r["taint_params"] or "[]"),
+                                   taint_signature=r["taint_signature"], pre_validations=[],
+                                   pre_validation_signature=r["pre_validation_signature"],
+                                   sessions_path=r["sessions_path"])
+        return None
+
+    # ── 污点库 ──────────────────────────────────────────────────────────────
+    def upsert_taint(self, rec: TaintRecord) -> None:
+        r = rec.to_row()
+        if self._mysql:
+            self._mysql.upsert_taint(taint_id=r["taint_id"], func_id=r["func_id"],
+                name=r["name"], signature=r["signature"], file=r["file"], function=r["function"],
+                next_propagations=r["next_propagations"], description=r["description"])
+        # SQLite 废弃: taints 只写 MySQL
+
+    def get_taint(self, taint_id: str) -> TaintRecord | None:
+        # 废弃: upsert_taint 已改 MySQL ONLY, SQLite taints 表不再有数据
+        # 如需读取请用 list_taints_in_function (MySQL) 或新增 MySQL read_taint_by_id
+        return None  # SQLite 废弃
+
+    def list_taints_in_function(self, func_id: str) -> list[TaintRecord]:
+        if self._mysql:
+            return self._mysql.read_taints_in_function(func_id) or []
+        return []  # SQLite 废弃
+
+    def add_propagation_to_taint(self, taint_id: str, prop_id: str) -> None:
+        # 废弃: get_taint 返回 None (见上), 无调用方
+        pass  # SQLite 废弃
+
+    # ── 传播库 ──────────────────────────────────────────────────────────────
+    def upsert_propagation(self, rec: PropagationRecord) -> None:
+        r = rec.to_row()
+        if self._mysql:
+            self._mysql.upsert_propagation(**r)
+        # SQLite 废弃: propagations 只写 MySQL
+
+    def get_propagation(self, prop_id: str) -> PropagationRecord | None:
+        if self._mysql:
+            return self._mysql.read_propagation(prop_id)
+        return None  # SQLite 废弃
+
+    def list_propagations_from(self, func_id: str) -> list[PropagationRecord]:
+        if self._mysql:
+            return self._mysql.read_propagations_from(func_id) or []
+        return []  # SQLite 废弃
+
+    # ── 编排库 ──────────────────────────────────────────────────────────────
+    def upsert_edge(self, edge: OrchestrationEdge) -> None:
+        r = edge.to_row()
+        if self._mysql:
+            self._mysql.upsert_orchestration_edge(edge_id=r["edge_id"], path_id=r["path_id"],
+                source_func_id=r["source_func_id"], target_func_id=r["target_func_id"],
+                taint_params=r["taint_params"], depth=r["depth"], edge_order=r["edge_order"],
+                status=r["status"],
+                source_function=r["source_function"], source_signature=r["source_signature"],
+                target_function=r["target_function"], target_signature=r["target_signature"])
+        # SQLite 废弃: orchestration 只写 MySQL
+
+    def set_edge_status(self, edge_id: str, status: str) -> None:
+        # 废弃: upsert_edge 已改 MySQL ONLY, 无调用方
+        pass  # SQLite 废弃
+
+    def list_path_edges(self, path_id: str) -> list[OrchestrationEdge]:
+        if self._mysql:
+            return self._mysql.read_path_edges(path_id) or []
+        return []  # SQLite 废弃
+
+    def pending_edges(self) -> list[OrchestrationEdge]:
+        if self._mysql:
+            return self._mysql.read_pending_edges() or []
+        return []  # SQLite 废弃
+
+
+# ── row → record 反序列化 ────────────────────────────────────────────────────
+
+def _row_to_function(row: sqlite3.Row) -> FunctionRecord:
+    pts_raw = json.loads(row["processed_taints"] or "[]")
+    pts = [ProcessedTaint(**{k: p.get(k) for k in (
+        "taint_params", "taint_signature", "pre_validations", "pre_validation_signature", "sessions_path")})
+        for p in pts_raw]
+    return FunctionRecord(
+        file=row["file"], name=row["name"], signature=row["signature"],
+        start_line=row["start_line"], end_line=row["end_line"], body_path=row["body_path"],
+        func_hash=row["func_hash"], description=row["description"],
+        processed_taints=pts, func_id=row["func_id"])
+
+
+def _row_to_taint(row: sqlite3.Row) -> TaintRecord:
+    return TaintRecord(
+        taint_id=row["taint_id"], func_id=row["func_id"], name=row["name"],
+        signature=row["signature"], file=row["file"], function=row["function"],
+        next_propagations=json.loads(row["next_propagations"] or "[]"),
+        description=row["description"])
+
+
+def _row_to_propagation(row: sqlite3.Row) -> PropagationRecord:
+    vals = json.loads(row["validations"] or "[]")
+    return PropagationRecord(
+        prop_id=row["prop_id"], source_func_id=row["source_func_id"],
+        source_taint_name=row["source_taint_name"], source_taint_signature=row["source_taint_signature"],
+        target_taint_name=row["target_taint_name"], target_taint_signature=row["target_taint_signature"],
+        target_func_id=row["target_func_id"], target_function=row["target_function"],
+        target_file=row["target_file"], call_line=row["call_line"], condition=row["condition"],
+        is_external=bool(row["is_external"]), callsite_validated=bool(row["callsite_validated"]),
+        is_indirect_call=bool(row["is_indirect_call"]), dispatch_kind=row["dispatch_kind"],
+        escape_kind=row["escape_kind"], carrier=row["carrier"], escape_via=row["escape_via"],
+        branch_group_id=row["branch_group_id"], branch_arm_id=row["branch_arm_id"],
+        branch_path=json.loads(row["branch_path"] or "[]"),
+        mutex_siblings=json.loads(row["mutex_siblings"] or "[]"),
+        actual_args=json.loads(row["actual_args"] or "[]"),
+        validations=[_validation_from_dict(v) for v in vals if isinstance(v, dict)],
+        description=row["description"])
+
+
+def _row_to_edge(row: sqlite3.Row) -> OrchestrationEdge:
+    return OrchestrationEdge(
+        edge_id=row["edge_id"], path_id=row["path_id"],
+        source_function=row["source_function"], source_signature=row["source_signature"],
+        source_func_id=row["source_func_id"],
+        target_function=row["target_function"], target_signature=row["target_signature"],
+        target_func_id=row["target_func_id"],
+        taint_params=TaintParamInfo.from_json(row["taint_params"]),
+        depth=row["depth"], edge_order=row["edge_order"], status=row["status"])
