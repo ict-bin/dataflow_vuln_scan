@@ -250,12 +250,17 @@ def ensure_file_indexed(source_root: str, rel_file: str, store: DataflowStore) -
         return "indexed"
     if not existing and store._mysql and store._mysql.read_is_indexed(rel_file):
         return "indexed"
-    # 标记为正在索引
+    # 标记为正在索引 (MySQL-first: 有 MySQL 不写 SQLite, 避免 v2_db 子进程并发写)
     import time
-    store._exec("functions", "INSERT OR REPLACE INTO indexing_files (file_path, started_at) VALUES (?, ?)",
-                (rel_file, time.time()))
     if store._mysql:
-        store._mysql.add_indexing_file(rel_file)
+        try:
+            store._mysql.add_indexing_file(rel_file)
+        except Exception:
+            store._exec("functions", "INSERT OR REPLACE INTO indexing_files (file_path, started_at) VALUES (?, ?)",
+                        (rel_file, time.time()))
+    else:
+        store._exec("functions", "INSERT OR REPLACE INTO indexing_files (file_path, started_at) VALUES (?, ?)",
+                    (rel_file, time.time()))
     try:
         # 1) tree-sitter 函数提取
         extract_file_functions(source_root, rel_file, store)
@@ -268,10 +273,14 @@ def ensure_file_indexed(source_root: str, rel_file: str, store: DataflowStore) -
         if _TS_AVAILABLE:
             _extract_class_info_for_file(source_root, rel_file, store)
     finally:
-        # 完成后删除标记
-        store._exec("functions", "DELETE FROM indexing_files WHERE file_path=?", (rel_file,))
+        # 完成后删除标记 (MySQL-first)
         if store._mysql:
-            store._mysql.finish_indexing_file(rel_file)
+            try:
+                store._mysql.finish_indexing_file(rel_file)
+            except Exception:
+                store._exec("functions", "DELETE FROM indexing_files WHERE file_path=?", (rel_file,))
+        else:
+            store._exec("functions", "DELETE FROM indexing_files WHERE file_path=?", (rel_file,))
     return "indexed"
 
 

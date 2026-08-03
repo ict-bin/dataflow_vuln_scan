@@ -292,6 +292,15 @@ class DataflowStore:
 
     # ── 函数库 ──────────────────────────────────────────────────────────────
     def upsert_function(self, rec: FunctionRecord) -> None:
+        # MySQL-first: 有 MySQL 就只写 MySQL (skip SQLite), 避免 v2_db 子进程与 worker 并发写 SQLite
+        if self._mysql:
+            try:
+                self._mysql.upsert_function(func_id=rec.func_id, file=rec.file, name=rec.name,
+                    signature=rec.signature, start_line=rec.start_line, end_line=rec.end_line,
+                    func_hash=rec.func_hash or "", description=rec.description or "")
+                return
+            except Exception:
+                logger.warning("mysql upsert_function failed, fallback sqlite: func_id=%s", rec.func_id, exc_info=True)
         r = rec.to_row()
         self._exec("functions", """
             INSERT INTO functions (func_id,file,name,signature,start_line,end_line,
@@ -304,13 +313,6 @@ class DataflowStore:
                 body_path=excluded.body_path, func_hash=excluded.func_hash,
                 description=excluded.description
         """, r)
-        if self._mysql:
-            try:
-                self._mysql.upsert_function(func_id=rec.func_id, file=rec.file, name=rec.name,
-                    signature=rec.signature, start_line=rec.start_line, end_line=rec.end_line,
-                    func_hash=rec.func_hash or "", description=rec.description or "")
-            except Exception:
-                logger.warning("mysql upsert_function failed: func_id=%s", rec.func_id, exc_info=True)
 
     def get_function(self, func_id: str) -> FunctionRecord | None:
         if self._mysql:
@@ -455,14 +457,15 @@ class DataflowStore:
 
     # ── include 索引 (C 作用域) ────────────────────────────────────────
     def add_include(self, header: str, file: str) -> None:
-        self._exec("functions",
-                   "INSERT OR IGNORE INTO include_index (header, file) VALUES (?, ?)",
-                   (header, file))
         if self._mysql:
             try:
                 self._mysql.add_include(header, file)
+                return
             except Exception:
-                logger.warning("mysql add_include failed: header=%s file=%s", header, file, exc_info=True)
+                logger.warning("mysql add_include failed, fallback sqlite: header=%s file=%s", header, file, exc_info=True)
+        self._exec("functions",
+                   "INSERT OR IGNORE INTO include_index (header, file) VALUES (?, ?)",
+                   (header, file))
 
     def get_files_including(self, header: str) -> list[str]:
         """查找所有传递性 include 了指定 header 的 .c/.cpp 文件。"""
@@ -475,30 +478,29 @@ class DataflowStore:
     # ── class 继承图 (C++ 作用域) ──────────────────────────────────────
     def add_class(self, class_name: str, bases: list[str], file: str = "") -> None:
         import json
-        self._exec("functions",
-                   "INSERT OR REPLACE INTO class_hierarchy (class_name, bases, file) VALUES (?, ?, ?)",
-                   (class_name, json.dumps(bases), file))
         if self._mysql:
             try:
                 self._mysql.add_class(class_name, json.dumps(bases), file)
+                return
             except Exception:
-                logger.warning("mysql add_class failed: class_name=%s", class_name, exc_info=True)
+                logger.warning("mysql add_class failed, fallback sqlite: class_name=%s", class_name, exc_info=True)
+        self._exec("functions",
+                   "INSERT OR REPLACE INTO class_hierarchy (class_name, bases, file) VALUES (?, ?, ?)",
+                   (class_name, json.dumps(bases), file))
 
     def add_class_member(self, class_name: str, member_name: str,
                          member_type: str = "", file: str = "") -> None:
-        self._exec("functions",
-                   "INSERT OR IGNORE INTO class_members (class_name, member_name, member_type, file) VALUES (?, ?, ?, ?)",
-                   (class_name, member_name, member_type, file))
         if self._mysql:
             try:
                 self._mysql.add_class_member(class_name, member_name, member_type, file)
+                return
             except Exception:
                 logger.warning(
-                    "mysql add_class_member failed: class_name=%s member_name=%s",
-                    class_name,
-                    member_name,
-                    exc_info=True,
-                )
+                    "mysql add_class_member failed, fallback sqlite: class_name=%s member_name=%s",
+                    class_name, member_name, exc_info=True)
+        self._exec("functions",
+                   "INSERT OR IGNORE INTO class_members (class_name, member_name, member_type, file) VALUES (?, ?, ?, ?)",
+                   (class_name, member_name, member_type, file))
 
     def get_bases(self, class_name: str) -> list[str]:
         import json
@@ -658,6 +660,13 @@ class DataflowStore:
     # ── 污点库 ──────────────────────────────────────────────────────────────
     def upsert_taint(self, rec: TaintRecord) -> None:
         r = rec.to_row()
+        if self._mysql:
+            try:
+                self._mysql.upsert_taint(taint_id=r["taint_id"], func_id=r["func_id"],
+                    name=r["name"], signature=r["signature"], file=r["file"], function=r["function"],
+                    next_propagations=r["next_propagations"], description=r["description"])
+                return
+            except Exception: logger.warning("mysql upsert_taint failed, fallback sqlite", exc_info=True)
         self._exec("taints", """
             INSERT INTO taints (taint_id,func_id,name,signature,file,function,
                 next_propagations,description)
@@ -666,11 +675,6 @@ class DataflowStore:
             ON CONFLICT(taint_id) DO UPDATE SET
                 next_propagations=excluded.next_propagations, description=excluded.description
         """, r)
-        if self._mysql:
-            try: self._mysql.upsert_taint(taint_id=r["taint_id"], func_id=r["func_id"],
-                name=r["name"], signature=r["signature"], file=r["file"], function=r["function"],
-                next_propagations=r["next_propagations"], description=r["description"])
-            except Exception: logger.debug("mysql upsert_taint failed", exc_info=True)
 
     def get_taint(self, taint_id: str) -> TaintRecord | None:
         row = self._q("taints", "SELECT * FROM taints WHERE taint_id=?", (taint_id,))
@@ -695,6 +699,11 @@ class DataflowStore:
     # ── 传播库 ──────────────────────────────────────────────────────────────
     def upsert_propagation(self, rec: PropagationRecord) -> None:
         r = rec.to_row()
+        if self._mysql:
+            try:
+                self._mysql.upsert_propagation(**r)
+                return
+            except Exception: logger.warning("mysql upsert_propagation failed, fallback sqlite", exc_info=True)
         self._exec("propagations", """
             INSERT INTO propagations (prop_id,source_func_id,source_taint_name,
                 source_taint_signature,target_taint_name,target_taint_signature,
@@ -722,9 +731,6 @@ class DataflowStore:
                 actual_args=excluded.actual_args,
                 validations=excluded.validations, description=excluded.description
         """, r)
-        if self._mysql:
-            try: self._mysql.upsert_propagation(**r)
-            except Exception: logger.debug("mysql upsert_propagation failed", exc_info=True)
 
     def get_propagation(self, prop_id: str) -> PropagationRecord | None:
         if self._mysql:
@@ -743,6 +749,16 @@ class DataflowStore:
     # ── 编排库 ──────────────────────────────────────────────────────────────
     def upsert_edge(self, edge: OrchestrationEdge) -> None:
         r = edge.to_row()
+        if self._mysql:
+            try:
+                self._mysql.upsert_orchestration_edge(edge_id=r["edge_id"], path_id=r["path_id"],
+                    source_func_id=r["source_func_id"], target_func_id=r["target_func_id"],
+                    taint_params=r["taint_params"], depth=r["depth"], edge_order=r["edge_order"],
+                    status=r["status"],
+                    source_function=r["source_function"], source_signature=r["source_signature"],
+                    target_function=r["target_function"], target_signature=r["target_signature"])
+                return
+            except Exception: logger.warning("mysql upsert_edge failed, fallback sqlite", exc_info=True)
         self._exec("orchestration", """
             INSERT INTO orchestration (edge_id,path_id,source_function,source_signature,
                 source_func_id,target_function,target_signature,target_func_id,
@@ -752,14 +768,6 @@ class DataflowStore:
                 :taint_params,:depth,:edge_order,:status)
             ON CONFLICT(edge_id) DO UPDATE SET status=excluded.status
         """, r)
-        if self._mysql:
-            try: self._mysql.upsert_orchestration_edge(edge_id=r["edge_id"], path_id=r["path_id"],
-                source_func_id=r["source_func_id"], target_func_id=r["target_func_id"],
-                taint_params=r["taint_params"], depth=r["depth"], edge_order=r["edge_order"],
-                status=r["status"],
-                source_function=r["source_function"], source_signature=r["source_signature"],
-                target_function=r["target_function"], target_signature=r["target_signature"])
-            except Exception: logger.debug("mysql upsert_edge failed", exc_info=True)
 
     def set_edge_status(self, edge_id: str, status: str) -> None:
         self._exec("orchestration", "UPDATE orchestration SET status=? WHERE edge_id=?", (status, edge_id))
