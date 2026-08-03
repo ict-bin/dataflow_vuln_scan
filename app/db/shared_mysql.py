@@ -448,10 +448,10 @@ class SharedMysqlStore(MysqlReadMixin):
                         start_line: int, end_line: int, func_hash: str = "",
                         description: str = ""):
         name_tail = name.split("::")[-1].strip() if "::" in name else name
-        sql = """INSERT INTO functions (source_dir_id,func_id,file,name,name_tail,signature,
+        sql = """INSERT INTO functions (source_dir_id,func_id,`file`,name,name_tail,signature,
             start_line,end_line,func_hash,description)
             VALUES (:sid,:fid,:file,:name,:tail,:sig,:sl,:el,:fh,:desc)
-            AS new ON DUPLICATE KEY UPDATE file=new.file,name=new.name,name_tail=new.name_tail,
+            AS new ON DUPLICATE KEY UPDATE `file`=new.`file`,name=new.name,name_tail=new.name_tail,
             signature=new.signature,start_line=new.start_line,end_line=new.end_line,
             func_hash=new.func_hash,description=new.description"""
         with self._engine.connect() as conn:
@@ -463,7 +463,7 @@ class SharedMysqlStore(MysqlReadMixin):
     def add_include(self, header: str, file: str):
         with self._engine.connect() as conn:
             conn.execute(sa_text(
-                "INSERT IGNORE INTO include_index (source_dir_id,header,file) VALUES (:sid,:h,:f)"),
+                "INSERT IGNORE INTO include_index (source_dir_id,header,`file`) VALUES (:sid,:h,:f)"),
                 {"sid": self.source_dir_id, "h": header, "f": file})
             conn.commit()
 
@@ -471,16 +471,16 @@ class SharedMysqlStore(MysqlReadMixin):
         import json
         with self._engine.connect() as conn:
             conn.execute(sa_text(
-                """INSERT INTO class_hierarchy (source_dir_id,class_name,bases,file)
+                """INSERT INTO class_hierarchy (source_dir_id,class_name,bases,`file`)
                 VALUES (:sid,:cn,:b,:f)
-                ON DUPLICATE KEY UPDATE bases=VALUES(bases),file=VALUES(file)"""),
+                ON DUPLICATE KEY UPDATE bases=VALUES(bases),`file`=VALUES(`file`)"""),
                 {"sid": self.source_dir_id, "cn": class_name, "b": bases, "f": file})
             conn.commit()
 
     def add_class_member(self, class_name: str, member_name: str, member_type: str = "", file: str = ""):
         with self._engine.connect() as conn:
             conn.execute(sa_text(
-                "INSERT IGNORE INTO class_members (source_dir_id,class_name,member_name,member_type,file) "
+                "INSERT IGNORE INTO class_members (source_dir_id,class_name,member_name,member_type,`file`) "
                 "VALUES (:sid,:cn,:mn,:mt,:f)"),
                 {"sid": self.source_dir_id, "cn": class_name, "mn": member_name,
                  "mt": member_type, "f": file})
@@ -617,7 +617,7 @@ class SharedMysqlStore(MysqlReadMixin):
 
     def upsert_taint(self, *, taint_id: str, func_id: str, name: str, signature: str,
                      file: str, function: str, next_propagations: str = "[]", description: str = ""):
-        sql = """INSERT INTO taints (source_dir_id,taint_id,func_id,name,signature,file,function,
+        sql = """INSERT INTO taints (source_dir_id,taint_id,func_id,name,signature,`file`,`function`,
             next_propagations,description,task_id)
             VALUES (:sid,:tid,:fid,:name,:sig,:file,:func,:np,:desc,:task)
             ON DUPLICATE KEY UPDATE next_propagations=VALUES(next_propagations),description=VALUES(description)"""
@@ -638,7 +638,7 @@ class SharedMysqlStore(MysqlReadMixin):
                 "actual_args", "validations", "description"]
         vals = {c: kw.get(c, "") for c in cols}
         placeholders = ", ".join(f":{c}" for c in cols)
-        col_list = ", ".join(cols)
+        col_list = ", ".join(f"`{c}`" for c in cols)
         sql = (f"INSERT IGNORE INTO propagations (source_dir_id,{col_list},task_id) "
                f"VALUES (:sid,{placeholders},:task)")
         params = {"sid": self.source_dir_id, "task": self.task_id, **vals}
