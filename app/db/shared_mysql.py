@@ -394,6 +394,14 @@ class SharedMysqlStore(MysqlReadMixin):
         新版本不再需要该列 (数据库名即 source_dir_id)。
         此方法检测并迁移旧表, 幂等 (列不存在则跳过)。
         """
+        def _col_exists(table_name, column_name):
+            with self._engine.connect() as conn:
+                row = conn.execute(sa_text(
+                    "SELECT 1 FROM information_schema.columns "
+                    "WHERE table_schema=DATABASE() AND table_name=:t AND column_name=:c LIMIT 1"
+                ), {"t": table_name, "c": column_name}).fetchone()
+                return row is not None
+
         # 表名 → 新主键列列表
         table_pks = {
             "functions": ["func_id"],
@@ -412,7 +420,7 @@ class SharedMysqlStore(MysqlReadMixin):
         }
         for table, new_pk in table_pks.items():
             try:
-                if not _column_exists(table, "source_dir_id"):
+                if not _col_exists(table, "source_dir_id"):
                     continue
                 logger.info("[shared_mysql] migrating table %s: drop source_dir_id", table)
                 with self._engine.begin() as conn:
