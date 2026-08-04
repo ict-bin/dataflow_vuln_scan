@@ -1626,7 +1626,8 @@ def _do_report_finding(task_id: str, finding_id: str, db: Session):
         report_path=report_path,
     )
     reported_ok = result.get("status") == "reported"
-    # 无论上报成败都尽量同步 SQLite / MySQL 统计，并单独保证 DB commit 不被前序异常吞掉。
+    # 无论上报成败都尽量同步 MySQL 统计，并单独保证 DB commit 不被前序异常吞掉。
+    report_update_error = None
     try:
         store = _graph_store_for_run_root(
             run_root,
@@ -1642,8 +1643,9 @@ def _do_report_finding(task_id: str, finding_id: str, db: Session):
                 task_id=task_id,
                 run_id=str(finding.get("run_id") or task_id),
             )
-    except Exception:
-        logger.warning("update finding report status failed: task_id=%s finding_id=%s", task_id, finding_id, exc_info=True)
+    except Exception as exc:
+        report_update_error = str(exc)
+        logger.warning("update finding report status failed: task_id=%s finding_id=%s: %s", task_id, finding_id, report_update_error, exc_info=True)
     try:
         from app.service.task_service import _sync_task_vuln_stats
         _sync_task_vuln_stats(row)
@@ -1661,6 +1663,8 @@ def _do_report_finding(task_id: str, finding_id: str, db: Session):
         "status": result.get("status"),
         "duplicate": result.get("duplicate"),
         "error": result.get("error"),
+        "intake_url": result.get("url"),
+        "report_status_update_error": report_update_error,
     }
 
 

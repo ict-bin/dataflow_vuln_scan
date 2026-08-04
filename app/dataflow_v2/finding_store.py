@@ -365,8 +365,8 @@ def _intake_report(run_id, task_id, source_root, report_dir, rec, finding_id,
         _emit_finding_event(
             on_event,
             "vuln_intake_report_failed",
-            level="warning",
-            message=f"漏洞上报失败: {finding_id}",
+            level="error",
+            message=f"漏洞上报失败: {finding_id} | 原因: {exc}",
             finding_id=finding_id,
             function_name=rec.function_name,
             task_id=task_id,
@@ -386,7 +386,9 @@ def _is_task_id_rejection(res: dict) -> bool:
 def _record_intake_result(*, graph_store, run_id, task_id, finding_id, rec, res, on_event):
     status = str(res.get("status") or "")
     case_id = str(res.get("case_id") or res.get("report_id") or "")
-    # 回写 report_status 到 vuln-scan.sqlite (findings 表)
+    intake_error = str(res.get("error") or "")
+    # 回写 report_status 到 MySQL
+    report_update_error = ""
     if graph_store is not None:
         try:
             graph_store.update_finding_report_status(
@@ -396,8 +398,11 @@ def _record_intake_result(*, graph_store, run_id, task_id, finding_id, rec, res,
                 task_id=task_id,
                 run_id=run_id,
             )
-        except Exception:
-            logger.debug("finding_store update_finding_report_status failed for %s", finding_id, exc_info=True)
+        except Exception as exc:
+            report_update_error = str(exc)
+            logger.warning(
+                "finding_store update_finding_report_status failed for %s: %s",
+                finding_id, report_update_error, exc_info=True)
     try:
         if on_event:
             duplicate = bool(res.get("duplicate"))
@@ -410,28 +415,34 @@ def _record_intake_result(*, graph_store, run_id, task_id, finding_id, rec, res,
                 else (
                     f"漏洞上报失败: {rec.title or finding_id} | 类型={rec.vuln_type or 'unknown'} | "
                     f"级别={rec.severity or 'unknown'} | 位置={rec.source_file}:{rec.line} | "
-                    f"status={status or '-'} | error={str(res.get('error') or '-')}"
+                    f"status={status or '-'} | error={intake_error or '-'}"
                 )
             )
+            extra_data = {
+                "finding_id": finding_id,
+                "function": rec.function_name,
+                "status": status,
+                "case_id": case_id,
+                "duplicate": duplicate,
+                "report_url": report_url,
+                "level": "info" if status == "reported" else "error",
+                "message": message,
+                "error": intake_error,
+                "title": rec.title,
+                "summary": rec.summary,
+                "summary_preview": _preview_text(rec.summary),
+                "evidence_preview": _preview_text(rec.evidence),
+                "vuln_type": rec.vuln_type,
+                "severity": rec.severity,
+                "source_file": rec.source_file,
+                "line": rec.line,
+            }
+            if report_update_error:
+                extra_data["report_status_update_error"] = report_update_error
+                extra_data["level"] = "error"
             on_event(
                 "vuln_intake_result",
-                finding_id=finding_id,
-                function=rec.function_name,
-                status=status,
-                case_id=case_id,
-                duplicate=duplicate,
-                report_url=report_url,
-                level="info" if status == "reported" else "error",
-                message=message,
-                error=str(res.get("error") or ""),
-                title=rec.title,
-                summary=rec.summary,
-                summary_preview=_preview_text(rec.summary),
-                evidence_preview=_preview_text(rec.evidence),
-                vuln_type=rec.vuln_type,
-                severity=rec.severity,
-                source_file=rec.source_file,
-                line=rec.line,
+                **extra_data,
             )
     except Exception:
         logger.warning("finding_store emit vuln_intake_result failed for %s", finding_id, exc_info=True)
