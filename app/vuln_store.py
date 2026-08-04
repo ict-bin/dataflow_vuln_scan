@@ -399,84 +399,18 @@ class VulnScanStore:
         # fallback: 读老版本 SQLite
         return self._sqlite_export_task_graph_view(task_id)
 
-    # ── SQLite fallback (读取老版本任务的 SQLite 数据) ────────────────
+    # ── SQLite fallback (委托 legacy_compat) ──────────────────────────
     def _sqlite_list_task_findings(self, task_id: str) -> list[dict[str, Any]]:
-        """从老版本 vuln-scan.sqlite 读取 findings (兼容旧任务)。"""
-        try:
-            with self.connect() as conn:
-                return [dict(r) for r in conn.execute(
-                    """SELECT vf.* FROM vulnerability_findings vf
-                       JOIN analysis_runs ar ON ar.run_id = vf.run_id
-                       WHERE ar.task_id = ?
-                       ORDER BY vf.created_at, vf.finding_id""",
-                    (task_id,)).fetchall()]
-        except Exception:
-            return []
+        from app.legacy_compat import sqlite_list_task_findings
+        return sqlite_list_task_findings(self.db_path, task_id)
 
     def _sqlite_list_all_findings(self, conn: sqlite3.Connection | None = None) -> list[dict[str, Any]]:
-        """从老版本 vuln-scan.sqlite 读取全部 findings。"""
-        try:
-            if conn is not None:
-                return [dict(r) for r in conn.execute(
-                    "SELECT * FROM vulnerability_findings ORDER BY created_at, finding_id"
-                ).fetchall()]
-            with self.connect() as owned_conn:
-                return [dict(r) for r in owned_conn.execute(
-                    "SELECT * FROM vulnerability_findings ORDER BY created_at, finding_id"
-                ).fetchall()]
-        except Exception:
-            return []
+        from app.legacy_compat import sqlite_list_all_findings
+        return sqlite_list_all_findings(self.db_path, conn)
 
     def _sqlite_export_task_graph_view(self, task_id: str) -> dict[str, Any]:
-        """从老版本 vuln-scan.sqlite 读取任务图谱视图 (兼容旧任务)。"""
-        try:
-            with self.connect() as conn:
-                run = conn.execute(
-                    "SELECT * FROM task_graph_runs WHERE task_id=?",
-                    (task_id,),
-                ).fetchone()
-                nodes = [dict(r) for r in conn.execute(
-                    "SELECT * FROM task_graph_nodes WHERE task_id=? ORDER BY depth, function_name_resolved, node_id",
-                    (task_id,),
-                ).fetchall()]
-                edges = [dict(r) for r in conn.execute(
-                    "SELECT * FROM task_graph_edges WHERE task_id=? ORDER BY display_order, source_function_resolved, edge_id",
-                    (task_id,),
-                ).fetchall()]
-                sessions = [dict(r) for r in conn.execute(
-                    "SELECT * FROM task_graph_sessions WHERE task_id=? ORDER BY session_relpath",
-                    (task_id,),
-                ).fetchall()]
-                findings = [dict(r) for r in conn.execute(
-                    """SELECT vf.* FROM vulnerability_findings vf
-                       JOIN analysis_runs ar ON ar.run_id = vf.run_id
-                       WHERE ar.task_id = ?
-                       ORDER BY vf.created_at, vf.finding_id""",
-                    (task_id,),
-                ).fetchall()]
-            run_d = dict(run) if run else {}
-            summary = {
-                "nodes_total": len(nodes),
-                "edges_total": len(edges),
-                "edges_done": sum(1 for e in edges if e.get("status") == "done"),
-                "edges_running": sum(1 for e in edges if e.get("status") == "running"),
-                "edges_failed": sum(1 for e in edges if e.get("status") == "failed"),
-                "findings_total": len(findings),
-            }
-            return {
-                "task_id": task_id,
-                "epoch": run_d.get("epoch", ""),
-                "available": bool(run or nodes or edges or sessions or findings),
-                "summary": summary,
-                "nodes": nodes,
-                "edges": edges,
-                "sessions": sessions,
-                "findings": findings,
-                "generated_at": run_d.get("generated_at"),
-                "run_root": run_d.get("run_root", ""),
-            }
-        except Exception:
-            return {"task_id": task_id, "available": False}
+        from app.legacy_compat import sqlite_export_task_graph_view
+        return sqlite_export_task_graph_view(self.db_path, task_id)
 
     def upsert_taint_node(self, rec) -> None:
         pass  # v1 遗留: V2 不调用, 表已删

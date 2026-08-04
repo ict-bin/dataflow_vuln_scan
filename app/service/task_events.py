@@ -345,56 +345,9 @@ def read_task_events(row: AppDvsTask, *, newest_first: bool = True) -> list[dict
 
 
 def _read_task_events_from_db(row: AppDvsTask) -> list[dict[str, object]]:
-    """从管理库 secflow_app_dvs_task_events 表读取事件 (兼容老版本任务)。
-
-    老版本任务的事件存储在 DB 中 (没有 events.jsonl), 此函数提供 fallback。
-    """
-    try:
-        from app.db import get_db
-        from sqlalchemy import text as sa_text
-        db = next(get_db())
-        try:
-            rows = db.execute(sa_text(
-                "SELECT * FROM secflow_app_dvs_task_events WHERE task_id=:tid "
-                "ORDER BY created_at"
-            ), {"tid": row.task_id}).fetchall()
-            events: list[dict[str, object]] = []
-            for r in rows:
-                d = dict(r._mapping)
-                payload = {}
-                try:
-                    payload = json.loads(d.get("payload_json") or "{}")
-                except Exception:
-                    pass
-                events.append({
-                    "id": str(d.get("id") or ""),
-                    "task_id": str(d.get("task_id") or ""),
-                    "project_id": str(d.get("project_id") or ""),
-                    "source": str(d.get("source") or "dvs"),
-                    "level": str(d.get("level") or "info"),
-                    "event_type": str(d.get("event_type") or ""),
-                    "status": d.get("status"),
-                    "worker_id": d.get("worker_id"),
-                    "execution_owner_id": d.get("execution_owner_id"),
-                    "execution_epoch": d.get("execution_epoch"),
-                    "control_version": d.get("control_version"),
-                    "dispatch_status": d.get("dispatch_status"),
-                    "function_name": d.get("function_name"),
-                    "source_file": d.get("source_file"),
-                    "line_hint": d.get("line_hint"),
-                    "parent_task_id": d.get("parent_task_id"),
-                    "parent_stage_item_id": d.get("parent_stage_item_id"),
-                    "message": str(d.get("message") or ""),
-                    "payload": payload,
-                    "created_at": d.get("created_at").isoformat() if d.get("created_at") else "",
-                })
-            logger.info("read %d events from DB for task %s (events.jsonl fallback)", len(events), row.task_id)
-            return events
-        finally:
-            db.close()
-    except Exception:
-        logger.debug("read_task_events_from_db failed: task_id=%s", row.task_id, exc_info=True)
-        return []
+    """委托 legacy_compat.db_read_task_events (兼容老版本任务)。"""
+    from app.legacy_compat import db_read_task_events
+    return db_read_task_events(row.task_id)
 
 
 def read_task_event_responses(row: AppDvsTask, *, newest_first: bool = True) -> list[dict[str, object]]:
