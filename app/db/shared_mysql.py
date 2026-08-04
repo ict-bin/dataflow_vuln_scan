@@ -384,6 +384,60 @@ class SharedMysqlStore(MysqlReadMixin):
             _exec_multi(_DDL_WITH_TASK_V2)
         elif self.mode == "dagflow":
             _exec_multi(_DDL_WITH_TASK_DAG)
+        # 迁移: 清除旧版本的 source_dir_id 冗余列
+        self._migrate_drop_source_dir_id()
+
+    def _migrate_drop_source_dir_id(self):
+        """迁移旧表: 去除 source_dir_id 列 (从主键/索引中移除)。
+
+        旧版本每张表都有 source_dir_id 列 (NOT NULL, 在主键中)。
+        新版本不再需要该列 (数据库名即 source_dir_id)。
+        此方法检测并迁移旧表, 幂等 (列不存在则跳过)。
+        """
+        # 表名 → 新主键列列表
+        table_pks = {
+            "functions": ["func_id"],
+            "include_index": ["header", "`file`"],
+            "class_hierarchy": ["class_name"],
+            "class_members": ["class_name", "member_name"],
+            "indexing_files": ["file_path"],
+            "processed_taints": ["func_id", "taint_signature", "task_id"],
+            "taints": ["taint_id", "task_id"],
+            "propagations": ["prop_id", "task_id"],
+            "orchestration": ["edge_id", "task_id"],
+            "dag_processed_taints": ["func_id", "taint_signature", "task_id"],
+            "dag_nodes": ["func_id", "taint_signature", "node_id", "task_id"],
+            "dag_edges": ["func_id", "taint_signature", "edge_id", "task_id"],
+            "dag_meta": ["func_id", "taint_signature", "task_id"],
+        }
+        for table, new_pk in table_pks.items():
+            try:
+                if not _column_exists(table, "source_dir_id"):
+                    continue
+                logger.info("[shared_mysql] migrating table %s: drop source_dir_id", table)
+                with self._engine.begin() as conn:
+                    # 1. 删除含 source_dir_id 的索引
+                    idx_rows = conn.execute(sa_text(
+                        "SELECT DISTINCT index_name FROM information_schema.statistics "
+                        "WHERE table_schema=DATABASE() AND table_name=:t"
+                    ), {"t": table}).fetchall()
+                    for idx in idx_rows:
+                        idx_name = idx[0]
+                        if idx_name == "PRIMARY":
+                            continue
+                        conn.execute(sa_text(f"ALTER TABLE {table} DROP INDEX `{idx_name}`"))
+                    # 2. 删除旧主键
+                    conn.execute(sa_text(f"ALTER TABLE {table} DROP PRIMARY KEY"))
+                    # 3. 删除 source_dir_id 列
+                    conn.execute(sa_text(f"ALTER TABLE {table} DROP COLUMN source_dir_id"))
+                    # 4. 加新主键
+                    pk_cols = ", ".join(new_pk)
+                    conn.execute(sa_text(f"ALTER TABLE {table} ADD PRIMARY KEY ({pk_cols})"))
+                    conn.commit()
+                logger.info("[shared_mysql] migrated table %s: source_dir_id dropped", table)
+            except Exception as e:
+                # 迁移失败不阻断启动 (可能列已不存在或权限不足)
+                logger.debug("[shared_mysql] migrate %s skip: %s", table, str(e)[:120])
 
     def _compute_data_dir(self, source_root: str) -> str:
         """从 source_root 提取 project_id, 返回 NFS 上的 MySQL 数据目录路径。
