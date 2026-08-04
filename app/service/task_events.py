@@ -315,28 +315,86 @@ def append_task_event(row: AppDvsTask, event: dict[str, object]) -> Path:
 
 def read_task_events(row: AppDvsTask, *, newest_first: bool = True) -> list[dict[str, object]]:
     events_path = _task_events_path(row)
-    if not events_path.exists():
-        return []
-    events: list[dict[str, object]] = []
+    if events_path.exists():
+        events: list[dict[str, object]] = []
+        try:
+            with events_path.open("r", encoding="utf-8") as handle:
+                for line_number, raw_line in enumerate(handle, start=1):
+                    line = raw_line.strip()
+                    if not line:
+                        continue
+                    try:
+                        loaded = json.loads(line)
+                        if isinstance(loaded, dict):
+                            events.append(loaded)
+                        else:
+                            logger.warning("task event JSONL line is not object: path=%s line=%s", events_path, line_number)
+                    except Exception:
+                        logger.exception("parse task event JSONL line failed: path=%s line=%s", events_path, line_number)
+        except Exception:
+            logger.exception("read task events failed: task_id=%s path=%s", row.task_id, events_path)
+            return []
+        if events:
+            events.sort(key=_event_sort_key, reverse=newest_first)
+            return events
+    # fallback: 从管理库 secflow_app_dvs_task_events 表读取 (老版本任务)
+    db_events = _read_task_events_from_db(row)
+    if db_events:
+        db_events.sort(key=_event_sort_key, reverse=newest_first)
+    return db_events
+
+
+def _read_task_events_from_db(row: AppDvsTask) -> list[dict[str, object]]:
+    """从管理库 secflow_app_dvs_task_events 表读取事件 (兼容老版本任务)。
+
+    老版本任务的事件存储在 DB 中 (没有 events.jsonl), 此函数提供 fallback。
+    """
     try:
-        with events_path.open("r", encoding="utf-8") as handle:
-            for line_number, raw_line in enumerate(handle, start=1):
-                line = raw_line.strip()
-                if not line:
-                    continue
+        from app.db import get_db
+        from sqlalchemy import text as sa_text
+        db = next(get_db())
+        try:
+            rows = db.execute(sa_text(
+                "SELECT * FROM secflow_app_dvs_task_events WHERE task_id=:tid "
+                "ORDER BY created_at"
+            ), {"tid": row.task_id}).fetchall()
+            events: list[dict[str, object]] = []
+            for r in rows:
+                d = dict(r._mapping)
+                payload = {}
                 try:
-                    loaded = json.loads(line)
-                    if isinstance(loaded, dict):
-                        events.append(loaded)
-                    else:
-                        logger.warning("task event JSONL line is not object: path=%s line=%s", events_path, line_number)
+                    payload = json.loads(d.get("payload_json") or "{}")
                 except Exception:
-                    logger.exception("parse task event JSONL line failed: path=%s line=%s", events_path, line_number)
+                    pass
+                events.append({
+                    "id": str(d.get("id") or ""),
+                    "task_id": str(d.get("task_id") or ""),
+                    "project_id": str(d.get("project_id") or ""),
+                    "source": str(d.get("source") or "dvs"),
+                    "level": str(d.get("level") or "info"),
+                    "event_type": str(d.get("event_type") or ""),
+                    "status": d.get("status"),
+                    "worker_id": d.get("worker_id"),
+                    "execution_owner_id": d.get("execution_owner_id"),
+                    "execution_epoch": d.get("execution_epoch"),
+                    "control_version": d.get("control_version"),
+                    "dispatch_status": d.get("dispatch_status"),
+                    "function_name": d.get("function_name"),
+                    "source_file": d.get("source_file"),
+                    "line_hint": d.get("line_hint"),
+                    "parent_task_id": d.get("parent_task_id"),
+                    "parent_stage_item_id": d.get("parent_stage_item_id"),
+                    "message": str(d.get("message") or ""),
+                    "payload": payload,
+                    "created_at": d.get("created_at").isoformat() if d.get("created_at") else "",
+                })
+            logger.info("read %d events from DB for task %s (events.jsonl fallback)", len(events), row.task_id)
+            return events
+        finally:
+            db.close()
     except Exception:
-        logger.exception("read task events failed: task_id=%s path=%s", row.task_id, events_path)
+        logger.debug("read_task_events_from_db failed: task_id=%s", row.task_id, exc_info=True)
         return []
-    events.sort(key=_event_sort_key, reverse=newest_first)
-    return events
 
 
 def read_task_event_responses(row: AppDvsTask, *, newest_first: bool = True) -> list[dict[str, object]]:
