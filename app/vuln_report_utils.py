@@ -14,6 +14,8 @@ logger = logging.getLogger("dvs.vuln_report_utils")
 from pathlib import Path
 from typing import Any
 
+from .vuln_intake_reporter import _severity_label
+
 
 def read_prompt(path: str) -> str:
     """读取仓库内提示词文件 (相对 app/ 目录)。"""
@@ -201,7 +203,7 @@ def format_vuln_report_md(item: dict, finding_id: str, source_file: str,
     # 概述与可利用性重复, 不单列概述
     sections += ["## 漏洞基本信息",
                  f"- **漏洞类型**: `{vuln_type}`",
-                 f"- **严重程度**: `{severity}`",
+                 f"- **严重程度**: `{_severity_label(severity)}`",
                  f"- **置信度**: `{confidence}`", "",
                  "## 漏洞位置",
                  "| 文件 | 函数 | 行号 |",

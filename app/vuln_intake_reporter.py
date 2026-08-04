@@ -46,15 +46,36 @@ def _normalize_severity(value: Any) -> str:
     text = str(value or "").strip().lower()
     if text in {"critical", "high", "medium", "low"}:
         return text
-    if text in {"严重", "致命", "critical/high"}:
+    # 新标签映射: 致命→critical, 严重→high, 一般→medium, 提示→low
+    if text in {"致命", "严重", "critical/high"}:
         return "critical"
-    if text in {"高", "高危"}:
+    if text in {"高危", "严重"}:
         return "high"
-    if text in {"中", "中危"}:
+    if text in {"中危", "一般"}:
         return "medium"
-    if text in {"低", "低危", "info"}:
+    if text in {"低危", "提示", "info"}:
         return "low"
     return "medium"
+
+
+# severity 英文值 → 平台中文标签映射
+_SEVERITY_LABELS = {
+    "critical": "致命",
+    "high": "严重",
+    "medium": "一般",
+    "low": "提示",
+    "info": "提示",
+    "unknown": "未知",
+}
+
+
+def _severity_label(value: Any) -> str:
+    """将 severity 英文值映射为平台中文标签。
+
+    映射: low→提示, medium→一般, high→严重, critical→致命
+    """
+    key = str(value or "").strip().lower()
+    return _SEVERITY_LABELS.get(key, key or "未知")
 
 
 def _confidence_percent(value: Any) -> int:
@@ -165,7 +186,7 @@ def build_intake_payload(
         report_markdown = (
             f"# {finding.title or finding.finding_id}\n\n"
             f"- 漏洞类型: {finding.vuln_type or 'dataflow'}\n"
-            f"- 严重度: {finding.severity or 'medium'}\n"
+            f"- 严重度: {_severity_label(finding.severity)}\n"
             f"- 位置: {locator}\n\n"
             f"## 摘要\n\n{finding.summary or finding.title or finding.finding_id}\n\n"
             f"## 证据\n\n{finding.evidence or '（无）'}\n"
@@ -195,6 +216,7 @@ def build_intake_payload(
         "title": str(finding.title or f"DVS 数据流漏洞疑点 {finding.finding_id}")[:256],
         "summary": summary[:4000] if summary else None,
         "severity": _normalize_severity(finding.severity),
+        "severity_label": _severity_label(_normalize_severity(finding.severity)),
         "cvss_score": 0.0,
         "confidence": _confidence_percent(finding.confidence),
         "state": "suspected",
@@ -249,6 +271,7 @@ def build_intake_payload(
                 "function_name": function_name,
                 "line": line,
                 "reported_severity": _normalize_severity(finding.severity),
+                "reported_severity_label": _severity_label(_normalize_severity(finding.severity)),
             },
             "dataflow_vuln_scan": {
                 "finding_id": finding.finding_id,

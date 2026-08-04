@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-from ..vuln_intake_reporter import report_finding_to_intake
+from ..vuln_intake_reporter import report_finding_to_intake, _severity_label
 from ..vuln_report_utils import format_vuln_report_md
 from ..vuln_store import VulnFindingRecord, VulnScanStore
 from ..service.task_vuln_stats import sync_vuln_count_from_local_store
@@ -272,7 +272,7 @@ def persist_finding(
         level="info",
         message=(
             f"发现漏洞并已落库: {data['title']} | 类型={data['vuln_type']} | "
-            f"级别={data['severity']} | 位置={fsrc}:{fline} | 摘要={_preview_text(data['summary']) or '-'}"
+            f"级别={_severity_label(data["severity"])} | 位置={fsrc}:{fline} | 摘要={_preview_text(data['summary']) or '-'}"
         ),
         finding_id=finding_id,
         function_name=ffn,
@@ -409,12 +409,12 @@ def _record_intake_result(*, graph_store, run_id, task_id, finding_id, rec, res,
             report_url = str(res.get("url") or "")
             message = (
                 f"漏洞上报成功: {rec.title or finding_id} | 类型={rec.vuln_type or 'unknown'} | "
-                f"级别={rec.severity or 'unknown'} | 位置={rec.source_file}:{rec.line} | "
+                f"级别={_severity_label(rec.severity)} | 位置={rec.source_file}:{rec.line} | "
                 f"case_id={case_id or '-'} | 摘要={_preview_text(rec.summary) or '-'}"
                 if status == "reported"
                 else (
                     f"漏洞上报失败: {rec.title or finding_id} | 类型={rec.vuln_type or 'unknown'} | "
-                    f"级别={rec.severity or 'unknown'} | 位置={rec.source_file}:{rec.line} | "
+                    f"级别={_severity_label(rec.severity)} | 位置={rec.source_file}:{rec.line} | "
                     f"status={status or '-'} | error={intake_error or '-'}"
                 )
             )

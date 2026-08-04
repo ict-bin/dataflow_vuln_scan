@@ -19,6 +19,7 @@ from typing import Any, Callable
 from ..copy_utils import safe_copy2
 from ..models import SwarmEvent, TaskConfig, TaskResult, TaskStatus
 from ..vuln_store import TaskGraphRunRecord, VulnScanStore
+from ..vuln_intake_reporter import _severity_label
 from .analysis import TaintAnalysisCallbacks
 from .function_extractor import ensure_file_indexed
 from .models import TaintParamInfo
@@ -392,7 +393,7 @@ class DataflowV2Runner:
                     f"- 所在函数: `{item.get('function_name') or ''}`",
                     f"- 所在行号: `{item.get('line') or 'unknown'}`",
                     f"- 漏洞类型: `{item.get('vuln_type') or 'unknown'}`",
-                    f"- 严重程度: `{item.get('severity') or 'unknown'}`",
+                    f"- 严重程度: `{_severity_label(item.get('severity'))}`",
                     f"- 置信度: `{item.get('confidence')}`",
                     f"- 概述: {item.get('summary') or ''}",
                     "",
