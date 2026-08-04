@@ -1353,8 +1353,8 @@ class TaskService:
         row = self._get_or_404(db, task_id)
         events = read_task_event_responses(row, newest_first=True)
         # 诊断信息: 帮助定位 events 为空的原因
-        from app.service.task_paths import _task_root, _task_events_path
-        events_path = _task_events_path(row)
+        from app.service.task_events import _task_events_path as _get_events_path
+        events_path = _get_events_path(row)
         diag = {
             "events_path": str(events_path) if events_path else None,
             "events_file_exists": events_path.exists() if events_path else False,
