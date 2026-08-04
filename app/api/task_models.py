@@ -351,6 +351,7 @@ class TaskTimelineEventResponse(BaseModel):
 class TaskTimelineResponse(BaseModel):
     task_id: str
     events: list[TaskTimelineEventResponse] = Field(default_factory=list)
+    diagnostics: Dict[str, Any] = Field(default_factory=dict)
 
 
 class TaskPropagationItemResponse(BaseModel):
