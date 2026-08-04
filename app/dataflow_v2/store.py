@@ -178,33 +178,34 @@ class DataflowStore:
         self._mysql.v2_add_processed_taint(func_id, ts, tp_json, pt.sessions_path or "")
 
     def try_reserve_processed_taint(self, func_id: str, pt: ProcessedTaint) -> bool:
-        """分析前预留占位 (func_id 级, per-task 隔离)。
+        """跨任务原子占位: (source_dir_id, func_id, taint_signature) 级。
 
-        去重键: (source_dir_id, func_id, task_id)。同一任务内同一函数只分析一次。
+        任意任务已分析过该函数+该污点 → 占位失败, 跳过。
         """
         if not self._mysql:
-            return True  # 无 MySQL 时放行 (不会重复, 因为单进程)
+            return True
         ts = _norm_sig(pt.taint_signature or "")
         tp_json = json.dumps(pt.taint_params, ensure_ascii=False)
         return self._mysql.v2_try_reserve_processed_taint(func_id, ts, tp_json, pt.sessions_path or "")
 
     def delete_processed_taint(self, func_id: str, taint_signature: str,
                                pre_validation_signature: str = "") -> None:
-        """删除占位 (分析失败时, 让后续可重试)。"""
+        """删除占位 (仅本任务记录, 分析失败时让后续可重试)。"""
         if not self._mysql:
             return
-        self._mysql.v2_delete_processed_taint(func_id)
+        ts = _norm_sig(taint_signature or "")
+        self._mysql.v2_delete_processed_taint(func_id, ts)
 
     def find_processed_taint(self, func_id: str, taint_signature: str,
                              pre_validation_signature: str = "") -> ProcessedTaint | None:
-        """函数级去重: func_id — 不依赖污点签名或前置校验集。
+        """跨任务去重: (source_dir_id, func_id, taint_signature) 级。
 
-        只要同一任务内同一函数已被分析过, 后续任何路径到达都不重分析。
-        per-task 隔离: MySQL 查询带 task_id, 不会跨任务误判。
+        同一源码目录下任意任务已分析过该函数+该污点 → 跳过, 复用已有结果。
         """
         if not self._mysql:
             return None
-        return self._mysql.v2_find_processed_taint(func_id)
+        ts = _norm_sig(taint_signature or "")
+        return self._mysql.v2_find_processed_taint(func_id, ts)
 
     # ── 污点库 ──────────────────────────────────────────────────────────────
     def upsert_taint(self, rec: TaintRecord) -> None:

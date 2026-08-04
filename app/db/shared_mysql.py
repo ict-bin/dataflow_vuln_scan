@@ -222,7 +222,8 @@ CREATE TABLE IF NOT EXISTS dag_meta (
 );
 """
 
-_V2_TASK_TABLES = ["processed_taints", "taints", "propagations", "orchestration"]
+_V2_TASK_TABLES = ["taints", "propagations", "orchestration"]
+# processed_taints 不清: 跨任务共享去重状态 (source-dir 级)
 _DAG_TASK_TABLES = ["dag_processed_taints", "dag_nodes", "dag_edges", "dag_meta"]
 
 
@@ -519,17 +520,18 @@ class SharedMysqlStore(MysqlReadMixin):
             conn.commit()
 
     # ── V2 模式专用: func_id 级去重 (per-task 隔离) ──────────────────
-    def v2_find_processed_taint(self, func_id: str) -> ProcessedTaint | None:
-        """V2 func_id 级去重: 同一任务内同一函数只分析一次。
-        per-task 隔离: 查询带 task_id, 不会跨任务误判。
+    def v2_find_processed_taint(self, func_id: str, taint_sig: str = "") -> ProcessedTaint | None:
+        """V2 跨任务去重: (source_dir_id, func_id, taint_signature) 级。
+
+        同一源码目录下, 任意任务已分析过该函数+该污点 → 后续任务跳过。
         """
         try:
             with self._engine.connect() as conn:
                 row = conn.execute(sa_text(
                     "SELECT taint_signature, taint_params, sessions_path "
                     "FROM processed_taints "
-                    "WHERE source_dir_id=:sid AND func_id=:fid AND task_id=:tid LIMIT 1"),
-                    {"sid": self.source_dir_id, "fid": func_id, "tid": self.task_id}).fetchone()
+                    "WHERE source_dir_id=:sid AND func_id=:fid AND taint_signature=:ts LIMIT 1"),
+                    {"sid": self.source_dir_id, "fid": func_id, "ts": taint_sig}).fetchone()
                 if row is None:
                     return None
                 m = row._mapping
@@ -545,10 +547,10 @@ class SharedMysqlStore(MysqlReadMixin):
 
     def v2_try_reserve_processed_taint(self, func_id: str, taint_sig: str,
                                        taint_params: str = "[]", sessions_path: str = "") -> bool:
-        """V2 原子占位: INSERT ... WHERE NOT EXISTS (func_id 级, per-task)。
+        """V2 跨任务原子占位: INSERT ... WHERE NOT EXISTS。
 
-        单语句原子执行: 如果 (source_dir_id, func_id, task_id) 已有任何行,
-        INSERT 被跳过 (rowcount=0), 返回 False。
+        去重键: (source_dir_id, func_id, taint_signature) — 不含 task_id。
+        任意任务已分析过该函数+该污点 → INSERT 被跳过, 返回 False。
         """
         try:
             with self._engine.connect() as conn:
@@ -558,7 +560,7 @@ class SharedMysqlStore(MysqlReadMixin):
                     "SELECT :sid, :fid, :ts, :tid, :tp, :sp "
                     "WHERE NOT EXISTS ("
                     "  SELECT 1 FROM processed_taints "
-                    "  WHERE source_dir_id=:sid AND func_id=:fid AND task_id=:tid"
+                    "  WHERE source_dir_id=:sid AND func_id=:fid AND taint_signature=:ts"
                     ")"),
                     {"sid": self.source_dir_id, "fid": func_id, "ts": taint_sig,
                      "tid": self.task_id, "tp": taint_params, "sp": sessions_path})
@@ -568,13 +570,16 @@ class SharedMysqlStore(MysqlReadMixin):
             logger.warning("v2_try_reserve_processed_taint failed func_id=%s", func_id, exc_info=True)
             return False
 
-    def v2_delete_processed_taint(self, func_id: str) -> None:
-        """V2 删除占位 (func_id 级, per-task)。"""
+    def v2_delete_processed_taint(self, func_id: str, taint_sig: str = "") -> None:
+        """V2 删除占位: 仅删本任务的记录 (分析失败重试)。
+
+        去重键不含 task_id (跨任务共享), 但删除只删自己的, 不影响其他任务。
+        """
         with self._engine.connect() as conn:
             conn.execute(sa_text(
                 "DELETE FROM processed_taints "
-                "WHERE source_dir_id=:sid AND func_id=:fid AND task_id=:tid"),
-                {"sid": self.source_dir_id, "fid": func_id, "tid": self.task_id})
+                "WHERE source_dir_id=:sid AND func_id=:fid AND taint_signature=:ts AND task_id=:tid"),
+                {"sid": self.source_dir_id, "fid": func_id, "ts": taint_sig, "tid": self.task_id})
             conn.commit()
 
     def v2_add_processed_taint(self, func_id: str, taint_sig: str,
