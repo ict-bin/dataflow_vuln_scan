@@ -50,6 +50,7 @@ from .task_events import (
     clear_task_events,
     delete_task_event,
     read_task_event_responses,
+    read_task_events,
 )
 from .task_paths import _task_root, _task_run_root, _task_epoch_run_root, _task_result_path, _latest_epoch_run_root, _epoch_label_from_path, _resolve_run_path, _task_source_root
 from .task_session import _write_json_atomic, _safe_session_file, _parse_session_file, _build_task_session_catalog
@@ -1360,7 +1361,7 @@ class TaskService:
             "events_file_exists": events_path.exists() if events_path else False,
             "events_file_size": events_path.stat().st_size if events_path and events_path.exists() else 0,
             "output_path": str(row.output_path or ""),
-            "raw_event_count": len(read_task_events(row, newest_first=True)),
+            "raw_event_count": len(events),
         }
         return {
             "task_id": row.task_id,
