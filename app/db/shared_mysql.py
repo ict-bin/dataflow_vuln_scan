@@ -498,11 +498,12 @@ class SharedMysqlStore(MysqlReadMixin):
         """V2 跨任务去重: (func_id, taint_signature) 级。
 
         同一源码目录下, 任意任务已分析过该函数+该污点 → 后续任务跳过。
+        返回的 ProcessedTaint.source_task_id 记录是哪个任务分析的。
         """
         try:
             with self._engine.connect() as conn:
                 row = conn.execute(sa_text(
-                    "SELECT taint_signature, taint_params, sessions_path "
+                    "SELECT taint_signature, taint_params, sessions_path, task_id "
                     "FROM processed_taints "
                     "WHERE func_id=:fid AND taint_signature=:ts LIMIT 1"),
                     {"fid": func_id, "ts": taint_sig}).fetchone()
@@ -514,7 +515,8 @@ class SharedMysqlStore(MysqlReadMixin):
                     taint_signature=m.get("taint_signature") or "",
                     pre_validations=[],
                     pre_validation_signature="",
-                    sessions_path=m.get("sessions_path") or "")
+                    sessions_path=m.get("sessions_path") or "",
+                    source_task_id=m.get("task_id") or "")
         except Exception:
             logger.warning("v2_find_processed_taint failed func_id=%s", func_id, exc_info=True)
             return None

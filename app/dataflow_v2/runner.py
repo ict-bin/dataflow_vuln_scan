@@ -232,7 +232,13 @@ class DataflowV2Runner:
                         _root_analyzed = bool(getattr(orch, "root_analyzed", False))
                         _root_failed = bool(getattr(orch, "root_taint_failed", False))
                         _root_sc = bool(getattr(orch, "root_self_contained", False))
-                        if not _root_analyzed:
+                        _root_deduped = bool(getattr(orch, "root_deduped", False))
+                        _root_dedup_src = str(getattr(orch, "root_dedup_source", ""))
+                        if _root_deduped:
+                            # 根函数被跨任务去重命中 (已由其他任务分析过) → 复用已有结果, pass
+                            status = TaskStatus.PASSED
+                            err_msg = f"v2: 根函数已被任务 {_root_dedup_src} 分析过, 跨任务去重复用"
+                        elif not _root_analyzed:
                             status = TaskStatus.COMPLETED_LIMITED
                             err_msg = "v2: taint 分析未产出传播边 (根函数未执行分析, 可能 processed_taints 残留/占位冲突)"
                         elif _root_failed:

@@ -191,6 +191,9 @@ class DfsOrchestrator:
         self.root_analyzed = False
         # 根函数 LLM 判定的 self_contained (合法空结果时区分"存根/终态无流" vs "可疑漏报")
         self.root_self_contained = False
+        # 根函数被跨任务去重命中 (已由其他任务分析过)
+        self.root_deduped = False
+        self.root_dedup_source = ""
 
     def _run_llm(self, fn: Callable, *args: Any, **kw: Any) -> Any:
         """LLM 调用限流: 信号量 cap 并发 analyze/mine/track 调用, 避免打爆配额。
@@ -276,19 +279,30 @@ class DfsOrchestrator:
     def _process(self, func: FunctionRecord, taint_params: TaintParamInfo,
                  pre_validations: list[Validation], base_session: str,
                  ctx: PathContext, depth: int) -> list[Validation]:
-        # 1) 函数级去重: 任务/epoch 内同一 func_id 只分析一次。
-        #    taint_signature/pre_validations 只保留作上下文, 不再作为是否开新 LLM 会话的 key。
+        # 1) 跨任务去重: 同一源码目录下, 任意任务已分析过该函数+该污点 → 跳过。
         pre_val_sig = _validation_sig(pre_validations)
         _nts = _norm_taint_sig(taint_params.signature)
-        if self.store.find_processed_taint(func.func_id, _nts, pre_val_sig):
+        _existing = self.store.find_processed_taint(func.func_id, _nts, pre_val_sig)
+        if _existing is not None:
+            _src = _existing.source_task_id or "未知任务"
+            _msg = f"{_src}任务-{func.name}-已分析"
+            self.cbs.on_event("trace_deduped", function=func.name, source_file=func.file,
+                          depth=depth, dedup_source_task=_src, message=_msg)
+            logger.info("[V2-orch] _process DEDUP func=%s depth=%d taint=%s (analyzed by %s)",
+                        func.name, depth, _nts, _src)
+            if depth == 0:
+                self.root_deduped = True
+                self.root_dedup_source = _src
             return []  # 已分析过, 跳过
-        # 1b) 双检锁: analyze 前先占位 (INSERT OR IGNORE), 防并发 N 路径同 func_id
+        # 1b) 双检锁: analyze 前先占位 (INSERT ... WHERE NOT EXISTS), 防并发 N 路径同 func_id
         #     同时 find-None → 全跑 LLM → N 份冗余分析。占位成功→本线程分析; 占位失败→并发 peer 在分析→跳过。
         _reserve = ProcessedTaint(
             taint_params=taint_params.names, taint_signature=_nts,
             pre_validations=[v.to_dict() for v in pre_validations],
             pre_validation_signature=pre_val_sig, sessions_path=base_session)
         if not self.store.try_reserve_processed_taint(func.func_id, _reserve):
+            self.cbs.on_event("trace_deduped", function=func.name, source_file=func.file,
+                          depth=depth, dedup_source_task="并发任务", message=f"并发任务-{func.name}-分析中")
             return []  # 并发 peer 已占位, 跳过
 
         self.cbs.on_event("trace_start", function=func.name, source_file=func.file,

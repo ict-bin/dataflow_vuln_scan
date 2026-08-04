@@ -30,6 +30,7 @@ class ProcessedTaint:
     pre_validations: list[dict] = field(default_factory=list)   # 传入时的前置校验 [{condition,content}]
     pre_validation_signature: str = ""                          # 前置校验归一化签名
     sessions_path: str = ""                                     # 该次分析的 session 路径
+    source_task_id: str = ""                                    # 分析该函数的源任务 ID (跨任务去重时填充)
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), ensure_ascii=False)
