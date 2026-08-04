@@ -114,8 +114,8 @@ class MysqlReadMixin:
         try:
             with self._engine.connect() as conn:
                 row = conn.execute(sa_text(
-                    "SELECT * FROM functions WHERE source_dir_id=:sid AND func_id=:fid"
-                ), {"sid": self.source_dir_id, "fid": func_id}).fetchone()
+                    "SELECT * FROM functions WHERE func_id=:fid"
+                ), {"fid": func_id}).fetchone()
                 return _dict_to_function(dict(row._mapping)) if row else None
         except Exception:
             return None
@@ -134,12 +134,12 @@ class MysqlReadMixin:
                 # Layer 1: exact name
                 if file:
                     rows = conn.execute(sa_text(
-                        "SELECT * FROM functions WHERE source_dir_id=:sid AND name=:nm AND `file`=:fl "
+                        "SELECT * FROM functions WHERE name=:nm AND `file`=:fl "
                         "ORDER BY start_line"),
                         {"sid": sid, "nm": name, "fl": file}).fetchall()
                 else:
                     rows = conn.execute(sa_text(
-                        "SELECT * FROM functions WHERE source_dir_id=:sid AND name=:nm "
+                        "SELECT * FROM functions WHERE name=:nm "
                         "ORDER BY start_line"),
                         {"sid": sid, "nm": name}).fetchall()
                 if rows:
@@ -151,12 +151,12 @@ class MysqlReadMixin:
                     return []
                 if file:
                     rows = conn.execute(sa_text(
-                        "SELECT * FROM functions WHERE source_dir_id=:sid AND name=:nm AND `file`=:fl "
+                        "SELECT * FROM functions WHERE name=:nm AND `file`=:fl "
                         "ORDER BY start_line"),
                         {"sid": sid, "nm": tail, "fl": file}).fetchall()
                 else:
                     rows = conn.execute(sa_text(
-                        "SELECT * FROM functions WHERE source_dir_id=:sid AND name=:nm "
+                        "SELECT * FROM functions WHERE name=:nm "
                         "ORDER BY start_line"),
                         {"sid": sid, "nm": tail}).fetchall()
                 if rows:
@@ -165,12 +165,12 @@ class MysqlReadMixin:
                 # Layer 3: suffix %::tail → use name_tail index
                 if file:
                     rows = conn.execute(sa_text(
-                        "SELECT * FROM functions WHERE source_dir_id=:sid AND name_tail=:nm AND `file`=:fl "
+                        "SELECT * FROM functions WHERE name_tail=:nm AND `file`=:fl "
                         "ORDER BY start_line"),
                         {"sid": sid, "nm": tail, "fl": file}).fetchall()
                 else:
                     rows = conn.execute(sa_text(
-                        "SELECT * FROM functions WHERE source_dir_id=:sid AND name_tail=:nm "
+                        "SELECT * FROM functions WHERE name_tail=:nm "
                         "ORDER BY start_line"),
                         {"sid": sid, "nm": tail}).fetchall()
                 return [_dict_to_function(dict(r._mapping)) for r in rows]
@@ -187,8 +187,8 @@ class MysqlReadMixin:
                 row = conn.execute(sa_text(
                     "SELECT taint_signature, pre_validation_signature, taint_params, sessions_path "
                     "FROM processed_taints "
-                    "WHERE source_dir_id=:sid AND func_id=:fid AND taint_signature=:ts LIMIT 1"),
-                    {"sid": self.source_dir_id, "fid": func_id, "ts": ts}).fetchone()
+                    "WHERE func_id=:fid AND taint_signature=:ts LIMIT 1"),
+                    {"fid": func_id, "ts": ts}).fetchone()
                 return _dict_to_processed_taint(dict(row._mapping)) if row else None
         except Exception:
             return None
@@ -199,8 +199,8 @@ class MysqlReadMixin:
         try:
             with self._engine.connect() as conn:
                 rows = conn.execute(sa_text(
-                    "SELECT * FROM taints WHERE source_dir_id=:sid AND func_id=:fid"),
-                    {"sid": self.source_dir_id, "fid": func_id}).fetchall()
+                    "SELECT * FROM taints WHERE func_id=:fid"),
+                    {"fid": func_id}).fetchall()
                 return [_dict_to_taint(dict(r._mapping)) for r in rows]
         except Exception:
             return []
@@ -211,8 +211,8 @@ class MysqlReadMixin:
         try:
             with self._engine.connect() as conn:
                 rows = conn.execute(sa_text(
-                    "SELECT * FROM propagations WHERE source_dir_id=:sid AND source_func_id=:fid"),
-                    {"sid": self.source_dir_id, "fid": func_id}).fetchall()
+                    "SELECT * FROM propagations WHERE source_func_id=:fid"),
+                    {"fid": func_id}).fetchall()
                 return [_dict_to_propagation(dict(r._mapping)) for r in rows]
         except Exception:
             return []
@@ -221,8 +221,8 @@ class MysqlReadMixin:
         try:
             with self._engine.connect() as conn:
                 row = conn.execute(sa_text(
-                    "SELECT * FROM propagations WHERE source_dir_id=:sid AND prop_id=:pid"),
-                    {"sid": self.source_dir_id, "pid": prop_id}).fetchone()
+                    "SELECT * FROM propagations WHERE prop_id=:pid"),
+                    {"pid": prop_id}).fetchone()
                 return _dict_to_propagation(dict(row._mapping)) if row else None
         except Exception:
             return None
@@ -233,9 +233,9 @@ class MysqlReadMixin:
         try:
             with self._engine.connect() as conn:
                 rows = conn.execute(sa_text(
-                    "SELECT * FROM orchestration WHERE source_dir_id=:sid AND path_id=:pid "
+                    "SELECT * FROM orchestration WHERE path_id=:pid "
                     "ORDER BY edge_order"),
-                    {"sid": self.source_dir_id, "pid": path_id}).fetchall()
+                    {"pid": path_id}).fetchall()
                 return [_dict_to_edge(dict(r._mapping)) for r in rows]
         except Exception:
             return []
@@ -244,9 +244,9 @@ class MysqlReadMixin:
         try:
             with self._engine.connect() as conn:
                 rows = conn.execute(sa_text(
-                    "SELECT * FROM orchestration WHERE source_dir_id=:sid AND `status`='pending' "
+                    "SELECT * FROM orchestration WHERE `status`='pending' "
                     "ORDER BY edge_order"),
-                    {"sid": self.source_dir_id}).fetchall()
+                    {}).fetchall()
                 return [_dict_to_edge(dict(r._mapping)) for r in rows]
         except Exception:
             return []
@@ -257,8 +257,8 @@ class MysqlReadMixin:
         try:
             with self._engine.connect() as conn:
                 rows = conn.execute(sa_text(
-                    "SELECT * FROM functions WHERE source_dir_id=:sid"),
-                    {"sid": self.source_dir_id}).fetchall()
+                    "SELECT * FROM functions WHERE 1=1"),
+                    {}).fetchall()
                 return [_dict_to_function(dict(r._mapping)) for r in rows]
         except Exception:
             return []
@@ -268,8 +268,8 @@ class MysqlReadMixin:
         try:
             with self._engine.connect() as conn:
                 return conn.execute(sa_text(
-                    "SELECT COUNT(*) FROM functions WHERE source_dir_id=:sid"),
-                    {"sid": self.source_dir_id}).scalar()
+                    "SELECT COUNT(*) FROM functions WHERE 1=1"),
+                    {}).scalar()
         except Exception:
             return 0
 
@@ -278,9 +278,9 @@ class MysqlReadMixin:
         try:
             with self._engine.connect() as conn:
                 rows = conn.execute(sa_text(
-                    "SELECT * FROM functions WHERE source_dir_id=:sid AND `file`=:fl "
+                    "SELECT * FROM functions WHERE `file`=:fl "
                     "ORDER BY start_line"),
-                    {"sid": self.source_dir_id, "fl": file}).fetchall()
+                    {"fl": file}).fetchall()
                 return [_dict_to_function(dict(r._mapping)) for r in rows]
         except Exception:
             return []
@@ -289,8 +289,8 @@ class MysqlReadMixin:
         try:
             with self._engine.connect() as conn:
                 rows = conn.execute(sa_text(
-                    "SELECT `file` FROM include_index WHERE source_dir_id=:sid AND header=:h"),
-                    {"sid": self.source_dir_id, "h": header}).fetchall()
+                    "SELECT `file` FROM include_index WHERE header=:h"),
+                    {"h": header}).fetchall()
                 return [r[0] for r in rows]
         except Exception:
             return []
@@ -299,8 +299,8 @@ class MysqlReadMixin:
         try:
             with self._engine.connect() as conn:
                 row = conn.execute(sa_text(
-                    "SELECT bases FROM class_hierarchy WHERE source_dir_id=:sid AND class_name=:cn"),
-                    {"sid": self.source_dir_id, "cn": class_name}).fetchone()
+                    "SELECT bases FROM class_hierarchy WHERE class_name=:cn"),
+                    {"cn": class_name}).fetchone()
                 return json.loads(row[0] or "[]") if row else []
         except Exception:
             return []
@@ -324,8 +324,8 @@ class MysqlReadMixin:
         try:
             with self._engine.connect() as conn:
                 rows = conn.execute(sa_text(
-                    "SELECT class_name, bases FROM class_hierarchy WHERE source_dir_id=:sid"),
-                    {"sid": self.source_dir_id}).fetchall()
+                    "SELECT class_name, bases FROM class_hierarchy WHERE 1=1"),
+                    {}).fetchall()
             changed = True
             while changed:
                 changed = False
@@ -349,8 +349,8 @@ class MysqlReadMixin:
                 for cls in candidates:
                     row = conn.execute(sa_text(
                         "SELECT class_name FROM class_members "
-                        "WHERE source_dir_id=:sid AND class_name=:cn AND member_name=:mn"),
-                        {"sid": self.source_dir_id, "cn": cls, "mn": member_name}).fetchone()
+                        "WHERE class_name=:cn AND member_name=:mn"),
+                        {"cn": cls, "mn": member_name}).fetchone()
                     if row:
                         return cls
         except Exception:
@@ -368,8 +368,8 @@ class MysqlReadMixin:
             with self._engine.connect() as conn:
                 for cls in classes:
                     rows = conn.execute(sa_text(
-                        "SELECT name FROM functions WHERE source_dir_id=:sid AND name LIKE :pat"),
-                        {"sid": self.source_dir_id, "pat": f"{cls}::%"}).fetchall()
+                        "SELECT name FROM functions WHERE name LIKE :pat"),
+                        {"pat": f"{cls}::%"}).fetchall()
                     result.extend(r[0] for r in rows)
         except Exception:
             pass
@@ -379,8 +379,8 @@ class MysqlReadMixin:
         try:
             with self._engine.connect() as conn:
                 rows = conn.execute(sa_text(
-                    "SELECT name FROM functions WHERE source_dir_id=:sid AND signature LIKE :pat"),
-                    {"sid": self.source_dir_id, "pat": f"%{type_name}%"}).fetchall()
+                    "SELECT name FROM functions WHERE signature LIKE :pat"),
+                    {"pat": f"%{type_name}%"}).fetchall()
                 return [r[0] for r in rows]
         except Exception:
             return []
@@ -391,8 +391,8 @@ class MysqlReadMixin:
         try:
             with self._engine.connect() as conn:
                 row = conn.execute(sa_text(
-                    "SELECT 1 FROM indexing_files WHERE source_dir_id=:sid AND file_path=:fp"),
-                    {"sid": self.source_dir_id, "fp": file_path}).fetchone()
+                    "SELECT 1 FROM indexing_files WHERE file_path=:fp"),
+                    {"fp": file_path}).fetchone()
                 return row is not None
         except Exception:
             return False
@@ -401,8 +401,8 @@ class MysqlReadMixin:
         try:
             with self._engine.connect() as conn:
                 row = conn.execute(sa_text(
-                    "SELECT 1 FROM indexing_files WHERE source_dir_id=:sid AND file_path=:fp AND started_at > 0"),
-                    {"sid": self.source_dir_id, "fp": file_path}).fetchone()
+                    "SELECT 1 FROM indexing_files WHERE file_path=:fp AND started_at > 0"),
+                    {"fp": file_path}).fetchone()
                 return row is not None
         except Exception:
             return False
@@ -411,9 +411,9 @@ class MysqlReadMixin:
         try:
             with self._engine.connect() as conn:
                 conn.execute(sa_text(
-                    "INSERT IGNORE INTO indexing_files (source_dir_id, file_path, started_at) "
-                    "VALUES (:sid, :fp, :ts)"),
-                    {"sid": self.source_dir_id, "fp": file_path, "ts": __import__("time").time()})
+                    "INSERT IGNORE INTO indexing_files (file_path, started_at) "
+                    "VALUES (:fp, :ts)"),
+                    {"fp": file_path, "ts": __import__("time").time()})
                 conn.commit()
         except Exception:
             pass
@@ -422,8 +422,8 @@ class MysqlReadMixin:
         try:
             with self._engine.connect() as conn:
                 conn.execute(sa_text(
-                    "UPDATE indexing_files SET started_at=0 WHERE source_dir_id=:sid AND file_path=:fp"),
-                    {"sid": self.source_dir_id, "fp": file_path})
+                    "UPDATE indexing_files SET started_at=0 WHERE file_path=:fp"),
+                    {"fp": file_path})
                 conn.commit()
         except Exception:
             pass

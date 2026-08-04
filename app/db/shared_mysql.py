@@ -32,13 +32,7 @@ _MODE_DB = {
 }
 
 _DDL_NO_TASK = """
-CREATE TABLE IF NOT EXISTS source_dirs (
-    source_dir_id  VARCHAR(64) PRIMARY KEY,
-    source_root    TEXT NOT NULL,
-    created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
 CREATE TABLE IF NOT EXISTS functions (
-    source_dir_id  VARCHAR(64) NOT NULL,
     func_id        VARCHAR(128) NOT NULL,
     `file`         VARCHAR(512) NOT NULL,
     name           VARCHAR(128) NOT NULL,
@@ -48,59 +42,53 @@ CREATE TABLE IF NOT EXISTS functions (
     end_line       INTEGER NOT NULL,
     func_hash      VARCHAR(128),
     description    TEXT,
-    PRIMARY KEY (source_dir_id, func_id)
+    PRIMARY KEY (func_id)
 );
-CREATE INDEX idx_func_name ON functions(source_dir_id, name);
-CREATE INDEX idx_func_tail ON functions(source_dir_id, name_tail);
-CREATE INDEX idx_func_file ON functions(source_dir_id, `file`);
+CREATE INDEX idx_functions ON functions(name);
+CREATE INDEX idx_functions ON functions(name_tail);
+CREATE INDEX idx_functions ON functions(`file`);
 ALTER TABLE functions ADD COLUMN IF NOT EXISTS name_tail VARCHAR(128) NOT NULL DEFAULT '';
-ALTER TABLE functions ADD INDEX IF NOT EXISTS idx_func_tail (source_dir_id, name_tail);
-ALTER TABLE functions ADD INDEX IF NOT EXISTS idx_func_file (source_dir_id, `file`);
+ALTER TABLE functions ADD INDEX IF NOT EXISTS idx_functions(name_tail);
+ALTER TABLE functions ADD INDEX IF NOT EXISTS idx_functions(`file`);
 CREATE TABLE IF NOT EXISTS include_index (
-    source_dir_id  VARCHAR(64) NOT NULL,
     header         VARCHAR(128) NOT NULL,
     `file`         VARCHAR(512) NOT NULL,
-    PRIMARY KEY (source_dir_id, header, file)
+    PRIMARY KEY (header, file)
 );
 CREATE TABLE IF NOT EXISTS class_hierarchy (
-    source_dir_id  VARCHAR(64) NOT NULL,
     class_name     VARCHAR(128) NOT NULL,
     bases          TEXT,
     `file`         VARCHAR(512),
-    PRIMARY KEY (source_dir_id, class_name)
+    PRIMARY KEY (class_name)
 );
 CREATE TABLE IF NOT EXISTS class_members (
-    source_dir_id  VARCHAR(64) NOT NULL,
     class_name     VARCHAR(128) NOT NULL,
     member_name    VARCHAR(128) NOT NULL,
     member_type    VARCHAR(128),
     `file`         VARCHAR(512),
-    PRIMARY KEY (source_dir_id, class_name, member_name)
+    PRIMARY KEY (class_name, member_name)
 );
 CREATE TABLE IF NOT EXISTS indexing_files (
-    source_dir_id  VARCHAR(64) NOT NULL,
     file_path      VARCHAR(512) NOT NULL,
     started_at     DOUBLE NOT NULL DEFAULT 0,
-    PRIMARY KEY (source_dir_id, file_path)
+    PRIMARY KEY (file_path)
 );
 """
 
 _DDL_WITH_TASK_V2 = """
 CREATE TABLE IF NOT EXISTS processed_taints (
-    source_dir_id    VARCHAR(64) NOT NULL,
     func_id          VARCHAR(128) NOT NULL,
     taint_signature  VARCHAR(128) NOT NULL,
     task_id          VARCHAR(64) NOT NULL,
     taint_params     TEXT,
     sessions_path    VARCHAR(512),
     analyzed_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (source_dir_id, func_id, taint_signature, task_id)
+    PRIMARY KEY (func_id, taint_signature, task_id)
 );
-CREATE INDEX idx_pt_dir_func ON processed_taints(source_dir_id, func_id, taint_signature);
+CREATE INDEX idx_processed_taints ON processed_taints(func_id, taint_signature);
 CREATE INDEX idx_pt_task ON processed_taints(task_id);
 ALTER TABLE processed_taints MODIFY COLUMN sessions_path VARCHAR(512);
 CREATE TABLE IF NOT EXISTS taints (
-    source_dir_id       VARCHAR(64) NOT NULL,
     taint_id            VARCHAR(128) NOT NULL,
     func_id             VARCHAR(128) NOT NULL,
     name                VARCHAR(128) NOT NULL,
@@ -110,11 +98,10 @@ CREATE TABLE IF NOT EXISTS taints (
     next_propagations   TEXT,
     description         TEXT,
     task_id             VARCHAR(64) NOT NULL,
-    PRIMARY KEY (source_dir_id, taint_id, task_id)
+    PRIMARY KEY (taint_id, task_id)
 );
-CREATE INDEX idx_taint_func ON taints(source_dir_id, func_id);
+CREATE INDEX idx_taints ON taints(func_id);
 CREATE TABLE IF NOT EXISTS propagations (
-    source_dir_id           VARCHAR(64) NOT NULL,
     prop_id                 VARCHAR(128) NOT NULL,
     source_func_id          VARCHAR(128),
     source_taint_signature  VARCHAR(128) NOT NULL,
@@ -132,9 +119,9 @@ CREATE TABLE IF NOT EXISTS propagations (
     actual_args             TEXT,
     validations             TEXT,
     task_id                 VARCHAR(64) NOT NULL,
-    PRIMARY KEY (source_dir_id, prop_id, task_id)
+    PRIMARY KEY (prop_id, task_id)
 );
-CREATE INDEX idx_prop_source ON propagations(source_dir_id, source_func_id);
+CREATE INDEX idx_propagations ON propagations(source_func_id);
 ALTER TABLE propagations ADD COLUMN IF NOT EXISTS source_taint_name VARCHAR(128) NOT NULL DEFAULT '';
 ALTER TABLE propagations ADD COLUMN IF NOT EXISTS target_taint_name VARCHAR(128) NOT NULL DEFAULT '';
 ALTER TABLE propagations ADD COLUMN IF NOT EXISTS callsite_validated INTEGER NOT NULL DEFAULT 0;
@@ -146,7 +133,6 @@ ALTER TABLE propagations ADD COLUMN IF NOT EXISTS branch_path TEXT;
 ALTER TABLE propagations ADD COLUMN IF NOT EXISTS mutex_siblings TEXT;
 ALTER TABLE propagations ADD COLUMN IF NOT EXISTS description TEXT;
 CREATE TABLE IF NOT EXISTS orchestration (
-    source_dir_id   VARCHAR(64) NOT NULL,
     edge_id          VARCHAR(128) NOT NULL,
     path_id          VARCHAR(128) NOT NULL,
     source_func_id   VARCHAR(128) NOT NULL,
@@ -156,9 +142,9 @@ CREATE TABLE IF NOT EXISTS orchestration (
     edge_order       INTEGER NOT NULL,
     `status`           VARCHAR(32) DEFAULT 'pending',
     task_id          VARCHAR(64) NOT NULL,
-    PRIMARY KEY (source_dir_id, edge_id, task_id)
+    PRIMARY KEY (edge_id, task_id)
 );
-CREATE INDEX idx_orch_status ON orchestration(source_dir_id, status);
+CREATE INDEX idx_orchestration ON orchestration(status);
 ALTER TABLE orchestration ADD COLUMN IF NOT EXISTS source_function VARCHAR(512) NOT NULL DEFAULT '';
 ALTER TABLE orchestration ADD COLUMN IF NOT EXISTS source_signature VARCHAR(512) NOT NULL DEFAULT '';
 ALTER TABLE orchestration ADD COLUMN IF NOT EXISTS target_function VARCHAR(512) NOT NULL DEFAULT '';
@@ -167,17 +153,15 @@ ALTER TABLE orchestration ADD COLUMN IF NOT EXISTS target_signature VARCHAR(512)
 
 _DDL_WITH_TASK_DAG = """
 CREATE TABLE IF NOT EXISTS dag_processed_taints (
-    source_dir_id    VARCHAR(64) NOT NULL,
     func_id          VARCHAR(128) NOT NULL,
     taint_signature  VARCHAR(128) NOT NULL,
     task_id          VARCHAR(64) NOT NULL,
     analyzed_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (source_dir_id, func_id, taint_signature, task_id)
+    PRIMARY KEY (func_id, taint_signature, task_id)
 );
-CREATE INDEX idx_dpt_dir_func ON dag_processed_taints(source_dir_id, func_id, taint_signature);
+CREATE INDEX idx_dag_processed_taints ON dag_processed_taints(func_id, taint_signature);
 CREATE INDEX idx_dpt_task ON dag_processed_taints(task_id);
 CREATE TABLE IF NOT EXISTS dag_nodes (
-    source_dir_id    VARCHAR(64) NOT NULL,
     func_id          VARCHAR(128) NOT NULL,
     taint_signature  VARCHAR(128) NOT NULL,
     node_id          INTEGER NOT NULL,
@@ -188,10 +172,9 @@ CREATE TABLE IF NOT EXISTS dag_nodes (
     prune_json       TEXT,
     is_source        INTEGER NOT NULL DEFAULT 0,
     task_id          VARCHAR(64) NOT NULL,
-    PRIMARY KEY (source_dir_id, func_id, taint_signature, node_id, task_id)
+    PRIMARY KEY (func_id, taint_signature, node_id, task_id)
 );
 CREATE TABLE IF NOT EXISTS dag_edges (
-    source_dir_id      VARCHAR(64) NOT NULL,
     func_id            VARCHAR(128) NOT NULL,
     taint_signature    VARCHAR(256) NOT NULL,
     edge_id            VARCHAR(128) NOT NULL,
@@ -207,18 +190,17 @@ CREATE TABLE IF NOT EXISTS dag_edges (
     carrier            VARCHAR(128),
     escape_via          VARCHAR(128),
     task_id            VARCHAR(64) NOT NULL,
-    PRIMARY KEY (source_dir_id, func_id, taint_signature, edge_id, task_id)
+    PRIMARY KEY (func_id, taint_signature, edge_id, task_id)
 );
-CREATE INDEX idx_dag_edges_sink ON dag_edges(source_dir_id, sink_ref);
+CREATE INDEX idx_dag_edges ON dag_edges(sink_ref);
 CREATE TABLE IF NOT EXISTS dag_meta (
-    source_dir_id   VARCHAR(64) NOT NULL,
     func_id         VARCHAR(128) NOT NULL,
     taint_signature VARCHAR(512) NOT NULL,
     self_contained  INTEGER NOT NULL DEFAULT 0,
     description     TEXT,
     taint_failed    INTEGER NOT NULL DEFAULT 0,
     task_id         VARCHAR(64) NOT NULL,
-    PRIMARY KEY (source_dir_id, func_id, taint_signature, task_id)
+    PRIMARY KEY (func_id, taint_signature, task_id)
 );
 """
 
@@ -247,7 +229,6 @@ class SharedMysqlStore(MysqlReadMixin):
         self.data_dir = self._compute_data_dir(source_root)
         self._engine = self._get_engine(mysql_url, self.db_name)
         self._ensure_schema()
-        self._register_source_dir(source_root)
 
     @staticmethod
     def _get_engine(mysql_url: str, db_name: str):
@@ -421,14 +402,6 @@ class SharedMysqlStore(MysqlReadMixin):
             os.makedirs(d, exist_ok=True)
         return d
 
-    def _register_source_dir(self, source_root: str):
-        """注册源码目录 (INSERT IGNORE)。"""
-        with self._engine.connect() as conn:
-            conn.execute(sa_text(
-                "INSERT IGNORE INTO source_dirs (source_dir_id, source_root) VALUES (:sid, :sr)"),
-                {"sid": self.source_dir_id, "sr": source_root})
-            conn.commit()
-
     # ── 清理 (restart/delete 调) ──────────────────────────────────────
 
     def clear_task_analysis(self):
@@ -438,8 +411,8 @@ class SharedMysqlStore(MysqlReadMixin):
             try:
                 with self._engine.begin() as conn:
                     conn.execute(sa_text(
-                        f"DELETE FROM {t} WHERE source_dir_id=:sid AND task_id=:tid"),
-                        {"sid": self.source_dir_id, "tid": self.task_id})
+                        f"DELETE FROM {t} WHERE task_id=:tid"),
+                        {"tid": self.task_id})
             except Exception as e:
                 logger.warning("[shared_mysql] clear %s failed: %s", t, str(e)[:120])
         logger.info("[shared_mysql] cleared task %s analysis records (mode=%s, source_dir=%s, tables=%s)",
@@ -451,14 +424,14 @@ class SharedMysqlStore(MysqlReadMixin):
                         start_line: int, end_line: int, func_hash: str = "",
                         description: str = ""):
         name_tail = name.split("::")[-1].strip() if "::" in name else name
-        sql = """INSERT INTO functions (source_dir_id,func_id,`file`,name,name_tail,signature,
+        sql = """INSERT IGNORE INTO functions (func_id,`file`,name,name_tail,signature,
             start_line,end_line,func_hash,description)
-            VALUES (:sid,:fid,:file,:name,:tail,:sig,:sl,:el,:fh,:desc)
+            VALUES (:fid,:file,:name,:tail,:sig,:sl,:el,:fh,:desc)
             AS new ON DUPLICATE KEY UPDATE `file`=new.`file`,name=new.name,name_tail=new.name_tail,
             signature=new.signature,start_line=new.start_line,end_line=new.end_line,
             func_hash=new.func_hash,description=new.description"""
         with self._engine.connect() as conn:
-            conn.execute(sa_text(sql), {"sid": self.source_dir_id, "fid": func_id, "file": file,
+            conn.execute(sa_text(sql), {"fid": func_id, "file": file,
                 "name": name, "tail": name_tail, "sig": signature, "sl": start_line, "el": end_line,
                 "fh": func_hash, "desc": description})
             conn.commit()
@@ -466,26 +439,26 @@ class SharedMysqlStore(MysqlReadMixin):
     def add_include(self, header: str, file: str):
         with self._engine.connect() as conn:
             conn.execute(sa_text(
-                "INSERT IGNORE INTO include_index (source_dir_id,header,`file`) VALUES (:sid,:h,:f)"),
-                {"sid": self.source_dir_id, "h": header, "f": file})
+                "INSERT IGNORE INTO include_index (header,`file`) VALUES (:h,:f)"),
+                {"h": header, "f": file})
             conn.commit()
 
     def add_class(self, class_name: str, bases: str, file: str = ""):
         import json
         with self._engine.connect() as conn:
             conn.execute(sa_text(
-                """INSERT INTO class_hierarchy (source_dir_id,class_name,bases,`file`)
-                VALUES (:sid,:cn,:b,:f)
+                """INSERT IGNORE INTO class_hierarchy (class_name,bases,`file`)
+                VALUES (:cn,:b,:f)
                 ON DUPLICATE KEY UPDATE bases=VALUES(bases),`file`=VALUES(`file`)"""),
-                {"sid": self.source_dir_id, "cn": class_name, "b": bases, "f": file})
+                {"cn": class_name, "b": bases, "f": file})
             conn.commit()
 
     def add_class_member(self, class_name: str, member_name: str, member_type: str = "", file: str = ""):
         with self._engine.connect() as conn:
             conn.execute(sa_text(
-                "INSERT IGNORE INTO class_members (source_dir_id,class_name,member_name,member_type,`file`) "
-                "VALUES (:sid,:cn,:mn,:mt,:f)"),
-                {"sid": self.source_dir_id, "cn": class_name, "mn": member_name,
+                "INSERT IGNORE INTO class_members (class_name,member_name,member_type,`file`) "
+                "VALUES (:cn,:mn,:mt,:f)"),
+                {"cn": class_name, "mn": member_name,
                  "mt": member_type, "f": file})
             conn.commit()
 
@@ -495,9 +468,9 @@ class SharedMysqlStore(MysqlReadMixin):
                            sessions_path: str = ""):
         with self._engine.connect() as conn:
             conn.execute(sa_text(
-                "INSERT IGNORE INTO processed_taints (source_dir_id,func_id,taint_signature,task_id,taint_params,sessions_path) "
-                "VALUES (:sid,:fid,:ts,:tid,:tp,:sp)"),
-                {"sid": self.source_dir_id, "fid": func_id, "ts": taint_sig,
+                "INSERT IGNORE INTO processed_taints (func_id,taint_signature,task_id,taint_params,sessions_path) "
+                "VALUES (:fid,:ts,:tid,:tp,:sp)"),
+                {"fid": func_id, "ts": taint_sig,
                  "tid": self.task_id, "tp": taint_params, "sp": sessions_path})
             conn.commit()
 
@@ -506,9 +479,9 @@ class SharedMysqlStore(MysqlReadMixin):
         """跨 worker 原子占位 (INSERT IGNORE, rowcount=1=占位成功)。"""
         with self._engine.connect() as conn:
             result = conn.execute(sa_text(
-                "INSERT IGNORE INTO processed_taints (source_dir_id,func_id,taint_signature,task_id,taint_params,sessions_path) "
-                "VALUES (:sid,:fid,:ts,:tid,:tp,:sp)"),
-                {"sid": self.source_dir_id, "fid": func_id, "ts": taint_sig,
+                "INSERT IGNORE INTO processed_taints (func_id,taint_signature,task_id,taint_params,sessions_path) "
+                "VALUES (:fid,:ts,:tid,:tp,:sp)"),
+                {"fid": func_id, "ts": taint_sig,
                  "tid": self.task_id, "tp": taint_params, "sp": sessions_path})
             conn.commit()
             return result.rowcount == 1
@@ -516,13 +489,13 @@ class SharedMysqlStore(MysqlReadMixin):
     def delete_processed_taint(self, func_id: str, taint_sig: str):
         with self._engine.connect() as conn:
             conn.execute(sa_text(
-                "DELETE FROM processed_taints WHERE source_dir_id=:sid AND func_id=:fid AND taint_signature=:ts AND task_id=:tid"),
-                {"sid": self.source_dir_id, "fid": func_id, "ts": taint_sig, "tid": self.task_id})
+                "DELETE FROM processed_taints WHERE func_id=:fid AND taint_signature=:ts AND task_id=:tid"),
+                {"fid": func_id, "ts": taint_sig, "tid": self.task_id})
             conn.commit()
 
     # ── V2 模式专用: func_id 级去重 (per-task 隔离) ──────────────────
     def v2_find_processed_taint(self, func_id: str, taint_sig: str = "") -> ProcessedTaint | None:
-        """V2 跨任务去重: (source_dir_id, func_id, taint_signature) 级。
+        """V2 跨任务去重: (func_id, taint_signature) 级。
 
         同一源码目录下, 任意任务已分析过该函数+该污点 → 后续任务跳过。
         """
@@ -531,8 +504,8 @@ class SharedMysqlStore(MysqlReadMixin):
                 row = conn.execute(sa_text(
                     "SELECT taint_signature, taint_params, sessions_path "
                     "FROM processed_taints "
-                    "WHERE source_dir_id=:sid AND func_id=:fid AND taint_signature=:ts LIMIT 1"),
-                    {"sid": self.source_dir_id, "fid": func_id, "ts": taint_sig}).fetchone()
+                    "WHERE func_id=:fid AND taint_signature=:ts LIMIT 1"),
+                    {"fid": func_id, "ts": taint_sig}).fetchone()
                 if row is None:
                     return None
                 m = row._mapping
@@ -550,20 +523,20 @@ class SharedMysqlStore(MysqlReadMixin):
                                        taint_params: str = "[]", sessions_path: str = "") -> bool:
         """V2 跨任务原子占位: INSERT ... WHERE NOT EXISTS。
 
-        去重键: (source_dir_id, func_id, taint_signature) — 不含 task_id。
+        去重键: (func_id, taint_signature) — 不含 task_id。
         任意任务已分析过该函数+该污点 → INSERT 被跳过, 返回 False。
         """
         try:
             with self._engine.connect() as conn:
                 result = conn.execute(sa_text(
                     "INSERT INTO processed_taints "
-                    "(source_dir_id, func_id, taint_signature, task_id, taint_params, sessions_path) "
-                    "SELECT :sid, :fid, :ts, :tid, :tp, :sp "
+                    "(func_id, taint_signature, task_id, taint_params, sessions_path) "
+                    "SELECT :fid, :ts, :tid, :tp, :sp "
                     "WHERE NOT EXISTS ("
                     "  SELECT 1 FROM processed_taints "
-                    "  WHERE source_dir_id=:sid AND func_id=:fid AND taint_signature=:ts"
+                    "  WHERE func_id=:fid AND taint_signature=:ts"
                     ")"),
-                    {"sid": self.source_dir_id, "fid": func_id, "ts": taint_sig,
+                    {"fid": func_id, "ts": taint_sig,
                      "tid": self.task_id, "tp": taint_params, "sp": sessions_path})
                 conn.commit()
                 return result.rowcount == 1
@@ -579,8 +552,8 @@ class SharedMysqlStore(MysqlReadMixin):
         with self._engine.connect() as conn:
             conn.execute(sa_text(
                 "DELETE FROM processed_taints "
-                "WHERE source_dir_id=:sid AND func_id=:fid AND taint_signature=:ts AND task_id=:tid"),
-                {"sid": self.source_dir_id, "fid": func_id, "ts": taint_sig, "tid": self.task_id})
+                "WHERE func_id=:fid AND taint_signature=:ts AND task_id=:tid"),
+                {"fid": func_id, "ts": taint_sig, "tid": self.task_id})
             conn.commit()
 
     def v2_add_processed_taint(self, func_id: str, taint_sig: str,
@@ -594,8 +567,8 @@ class SharedMysqlStore(MysqlReadMixin):
             with self._engine.connect() as conn:
                 row = conn.execute(sa_text(
                     "SELECT COUNT(*) FROM orchestration "
-                    "WHERE source_dir_id=:sid AND task_id=:tid"),
-                    {"sid": self.source_dir_id, "tid": self.task_id}).fetchone()
+                    "WHERE task_id=:tid"),
+                    {"tid": self.task_id}).fetchone()
                 return int(row[0]) if row else 0
         except Exception:
             return 0
@@ -605,8 +578,8 @@ class SharedMysqlStore(MysqlReadMixin):
             with self._engine.connect() as conn:
                 row = conn.execute(sa_text(
                     "SELECT COUNT(*) FROM propagations "
-                    "WHERE source_dir_id=:sid AND task_id=:tid"),
-                    {"sid": self.source_dir_id, "tid": self.task_id}).fetchone()
+                    "WHERE task_id=:tid"),
+                    {"tid": self.task_id}).fetchone()
                 return int(row[0]) if row else 0
         except Exception:
             return 0
@@ -616,20 +589,20 @@ class SharedMysqlStore(MysqlReadMixin):
             with self._engine.connect() as conn:
                 row = conn.execute(sa_text(
                     "SELECT COUNT(*) FROM taints "
-                    "WHERE source_dir_id=:sid AND task_id=:tid"),
-                    {"sid": self.source_dir_id, "tid": self.task_id}).fetchone()
+                    "WHERE task_id=:tid"),
+                    {"tid": self.task_id}).fetchone()
                 return int(row[0]) if row else 0
         except Exception:
             return 0
 
     def upsert_taint(self, *, taint_id: str, func_id: str, name: str, signature: str,
                      file: str, function: str, next_propagations: str = "[]", description: str = ""):
-        sql = """INSERT INTO taints (source_dir_id,taint_id,func_id,name,signature,`file`,`function`,
+        sql = """INSERT IGNORE INTO taints (taint_id,func_id,name,signature,`file`,`function`,
             next_propagations,description,task_id)
-            VALUES (:sid,:tid,:fid,:name,:sig,:file,:func,:np,:desc,:task)
+            VALUES (:tid,:fid,:name,:sig,:file,:func,:np,:desc,:task)
             ON DUPLICATE KEY UPDATE next_propagations=VALUES(next_propagations),description=VALUES(description)"""
         with self._engine.connect() as conn:
-            conn.execute(sa_text(sql), {"sid": self.source_dir_id, "tid": taint_id, "fid": func_id,
+            conn.execute(sa_text(sql), {"tid": taint_id, "fid": func_id,
                 "name": name, "sig": signature, "file": file, "func": function,
                 "np": next_propagations, "desc": description, "task": self.task_id})
             conn.commit()
@@ -646,9 +619,9 @@ class SharedMysqlStore(MysqlReadMixin):
         vals = {c: kw.get(c, "") for c in cols}
         placeholders = ", ".join(f":{c}" for c in cols)
         col_list = ", ".join(f"`{c}`" for c in cols)
-        sql = (f"INSERT IGNORE INTO propagations (source_dir_id,{col_list},task_id) "
-               f"VALUES (:sid,{placeholders},:task)")
-        params = {"sid": self.source_dir_id, "task": self.task_id, **vals}
+        sql = (f"INSERT IGNORE INTO propagations ({col_list},task_id) "
+               f"VALUES ({placeholders},:task)")
+        params = {"task": self.task_id, **vals}
         with self._engine.connect() as conn:
             conn.execute(sa_text(sql), params)
             conn.commit()
@@ -658,12 +631,12 @@ class SharedMysqlStore(MysqlReadMixin):
                                   edge_order: int, status: str = "pending",
                                   source_function: str = "", source_signature: str = "",
                                   target_function: str = "", target_signature: str = ""):
-        sql = """INSERT IGNORE INTO orchestration (source_dir_id,edge_id,path_id,source_func_id,
+        sql = """INSERT IGNORE INTO orchestration (edge_id,path_id,source_func_id,
             target_func_id,taint_params,depth,edge_order,status,task_id,
             source_function,source_signature,target_function,target_signature)
-            VALUES (:sid,:eid,:pid,:sfid,:tfid,:tp,:d,:eo,:st,:task,:sf,:ssig,:tf,:tsig)"""
+            VALUES (:eid,:pid,:sfid,:tfid,:tp,:d,:eo,:st,:task,:sf,:ssig,:tf,:tsig)"""
         with self._engine.connect() as conn:
-            conn.execute(sa_text(sql), {"sid": self.source_dir_id, "eid": edge_id, "pid": path_id,
+            conn.execute(sa_text(sql), {"eid": edge_id, "pid": path_id,
                 "sfid": source_func_id, "tfid": target_func_id, "tp": taint_params,
                 "d": depth, "eo": edge_order, "st": status, "task": self.task_id,
                 "sf": source_function, "ssig": source_signature,
@@ -676,44 +649,44 @@ class SharedMysqlStore(MysqlReadMixin):
         """INSERT IGNORE → rowcount=1 表示本任务占位成功。"""
         with self._engine.connect() as conn:
             r = conn.execute(sa_text(
-                "INSERT IGNORE INTO dag_processed_taints (source_dir_id,func_id,taint_signature,task_id) "
-                "VALUES (:sid,:fid,:ts,:tid)"),
-                {"sid": self.source_dir_id, "fid": func_id, "ts": taint_sig, "tid": self.task_id})
+                "INSERT IGNORE INTO dag_processed_taints (func_id,taint_signature,task_id) "
+                "VALUES (:fid,:ts,:tid)"),
+                {"fid": func_id, "ts": taint_sig, "tid": self.task_id})
             conn.commit()
             return r.rowcount > 0
 
     def dag_delete_processed(self, func_id: str, taint_sig: str):
         with self._engine.connect() as conn:
             conn.execute(sa_text(
-                "DELETE FROM dag_processed_taints WHERE source_dir_id=:sid AND func_id=:fid AND taint_signature=:ts AND task_id=:tid"),
-                {"sid": self.source_dir_id, "fid": func_id, "ts": taint_sig, "tid": self.task_id})
+                "DELETE FROM dag_processed_taints WHERE func_id=:fid AND taint_signature=:ts AND task_id=:tid"),
+                {"fid": func_id, "ts": taint_sig, "tid": self.task_id})
             conn.commit()
 
     def save_dag(self, func_id: str, taint_sig: str, nodes: list[dict], edges: list[dict], meta: dict):
         """保存 DAG (先删旧再插, 限定 source_dir + func + taint + task)。"""
         import json
-        sd, tid = self.source_dir_id, self.task_id
+        tid = self.task_id
         with self._engine.connect() as conn:
             for t in ("dag_nodes", "dag_edges", "dag_meta"):
                 conn.execute(sa_text(
-                    f"DELETE FROM {t} WHERE source_dir_id=:sid AND func_id=:fid AND taint_signature=:ts AND task_id=:tid"),
-                    {"sid": sd, "fid": func_id, "ts": taint_sig, "tid": tid})
+                    f"DELETE FROM {t} WHERE func_id=:fid AND taint_signature=:ts AND task_id=:tid"),
+                    {"fid": func_id, "ts": taint_sig, "tid": tid})
             for n in nodes:
                 conn.execute(sa_text(
-                    """INSERT INTO dag_nodes (source_dir_id,func_id,taint_signature,node_id,line,taint,
+                    """INSERT IGNORE INTO dag_nodes (func_id,taint_signature,node_id,line,taint,
                     parents_json,checks_json,prune_json,is_source,task_id)
-                    VALUES (:sid,:fid,:ts,:nid,:ln,:t,:p,:c,:pr,:is,:tid)"""),
-                    {"sid": sd, "fid": func_id, "ts": taint_sig, "nid": n["node_id"], "ln": n["line"],
+                    VALUES (:fid,:ts,:nid,:ln,:t,:p,:c,:pr,:is,:tid)"""),
+                    {"fid": func_id, "ts": taint_sig, "nid": n["node_id"], "ln": n["line"],
                      "t": n["taint"], "p": json.dumps(n.get("parents", []), ensure_ascii=False),
                      "c": json.dumps(n.get("checks", []), ensure_ascii=False),
                      "pr": json.dumps(n.get("prune", {}), ensure_ascii=False) if n.get("prune") else "",
                      "is": 1 if n.get("is_source") else 0, "tid": tid})
             for e in edges:
                 conn.execute(sa_text(
-                    """INSERT INTO dag_edges (source_dir_id,func_id,taint_signature,edge_id,from_node,to_node,
+                    """INSERT IGNORE INTO dag_edges (func_id,taint_signature,edge_id,from_node,to_node,
                     line,condition_json,taints_json,kind,sink_ref,param_taints_json,escape_subkind,carrier,escape_via,task_id)
-                    VALUES (:sid,:fid,:ts,:eid,:fn,:tn,:ln,:cond,:taints,:kind,:sr,:pt,:es,:car,:ev,:tid)"""),
-                    {"sid": sd, "fid": func_id, "ts": taint_sig, "eid": e["edge_id"],
+                    VALUES (:fid,:ts,:eid,:fn,:tn,:ln,:cond,:taints,:kind,:sr,:pt,:es,:car,:ev,:tid)"""),
+                    {"fid": func_id, "ts": taint_sig, "eid": e["edge_id"],
                      "fn": e["from_node"], "tn": e["to_node"], "ln": e["line"],
                      "cond": json.dumps(e.get("condition", []), ensure_ascii=False),
                      "taints": json.dumps(e.get("taints", []), ensure_ascii=False),
@@ -722,11 +695,11 @@ class SharedMysqlStore(MysqlReadMixin):
                      "es": e.get("escape_subkind", ""), "car": e.get("carrier", ""),
                      "ev": e.get("escape_via", ""), "tid": tid})
             conn.execute(sa_text(
-                """INSERT INTO dag_meta (source_dir_id,func_id,taint_signature,self_contained,description,taint_failed,task_id)
-                VALUES (:sid,:fid,:ts,:sc,:desc,:tf,:tid)
+                """INSERT IGNORE INTO dag_meta (func_id,taint_signature,self_contained,description,taint_failed,task_id)
+                VALUES (:fid,:ts,:sc,:desc,:tf,:tid)
                 ON DUPLICATE KEY UPDATE self_contained=VALUES(self_contained),
                 description=VALUES(description),taint_failed=VALUES(taint_failed)"""),
-                {"sid": sd, "fid": func_id, "ts": taint_sig,
+                {"fid": func_id, "ts": taint_sig,
                  "sc": 1 if meta.get("self_contained") else 0,
                  "desc": meta.get("description", ""),
                  "tf": 1 if meta.get("taint_failed") else 0, "tid": tid})
