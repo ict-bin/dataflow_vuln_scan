@@ -222,8 +222,9 @@ CREATE TABLE IF NOT EXISTS dag_meta (
 );
 """
 
-_V2_TASK_TABLES = ["taints", "propagations", "orchestration"]
-# processed_taints 不清: 跨任务共享去重状态 (source-dir 级)
+_V2_TASK_TABLES = ["processed_taints", "taints", "propagations", "orchestration"]
+# processed_taints 跨任务共享去重 (find/try_reserve 不含 task_id),
+# 但 restart/delete 时清本任务的记录 (WHERE task_id=:tid), 不影响其他任务
 _DAG_TASK_TABLES = ["dag_processed_taints", "dag_nodes", "dag_edges", "dag_meta"]
 
 
