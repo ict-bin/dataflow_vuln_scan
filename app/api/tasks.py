@@ -2056,10 +2056,13 @@ def _graph_store_for_run_root(
                     mgs = create_mysql_graph_store(_MYSQL_URL, project_id=project_id,
                                                    source_dir_id=sid, source_root=source_root)
                     if mgs is not None:
-                        # 用 VulnScanStore 包装 (兼容旧 API)
-                        db_path = task_root / "output" / "vuln-scan.sqlite"
+                        # 用 authoritative SQLite 路径 (兼容旧任务 fallback)
+                        from app.service.task_paths import resolve_authoritative_vuln_scan_sqlite
+                        sqlite_path = resolve_authoritative_vuln_scan_sqlite(task_root, prefer_live=True)
+                        if sqlite_path is None:
+                            sqlite_path = task_root / "output" / "vuln-scan.sqlite"
                         from app.vuln_store import VulnScanStore
-                        store = VulnScanStore(str(db_path), mysql_store=mgs, readonly=True, enable_wal=False)
+                        store = VulnScanStore(str(sqlite_path), mysql_store=mgs, readonly=True, enable_wal=False)
                         db.close()
                         return store
             db.close()
