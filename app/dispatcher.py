@@ -26,14 +26,35 @@ PUMP_BATCH = int(os.environ.get("DVS_DISPATCHER_PUMP_BATCH", "20"))
 STALE_HEARTBEAT_SECONDS = int(os.environ.get("DVS_DISPATCHER_STALE_HEARTBEAT_SECONDS", "60"))  # 60s 无心跳=卡死
 PUBLISHING_TIMEOUT_SECONDS = int(os.environ.get("DVS_DISPATCH_PUBLISHING_TIMEOUT_SECONDS", "120"))
 DELIVERING_TIMEOUT_SECONDS = int(os.environ.get("DVS_DISPATCH_DELIVERING_TIMEOUT_SECONDS", "120"))
+PUBLISHED_RECOVERY_SECONDS = int(os.environ.get("DVS_DISPATCH_PUBLISHED_RECOVERY_SECONDS", "120"))
 LEGACY_DISPATCH_RECOVERY_SECONDS = int(os.environ.get("DVS_LEGACY_DISPATCH_RECOVERY_SECONDS", "600"))
 DISPATCH_RECOVERY_BATCH = int(os.environ.get("DVS_DISPATCH_RECOVERY_BATCH", "20"))
+PUBLISHED_RECOVERY_CONFIRMATIONS = 2
 BROKER_EPOCH_KEY = os.environ.get("DVS_BROKER_EPOCH_KEY", "dvs:broker_epoch")
 DEBUG_DISPATCH_INTERVAL = float(os.environ.get("DVS_DISPATCHER_DEBUG_INTERVAL", "15"))
 DEBUGGER_HOST = os.environ.get("DVS_DEBUGGER_HOST", "secflow-app-dataflow-vuln-scan-debugger")
 DEBUGGER_PORT = int(os.environ.get("DVS_DEBUGGER_PORT", "8080"))
 # 需调试的终态
 _DEBUG_STATUSES = ("failed", "error", "completed_limited")
+
+
+def _celery_task_ids(messages) -> set[str]:
+    """Extract Celery IDs from Kombu Redis message envelopes."""
+    task_ids: set[str] = set()
+    for raw in messages or ():
+        try:
+            envelope = json.loads(raw.decode() if isinstance(raw, bytes) else raw)
+            message = envelope[0] if isinstance(envelope, list) and envelope else envelope
+            if not isinstance(message, dict):
+                continue
+            headers = message.get("headers") or {}
+            properties = message.get("properties") or {}
+            task_id = headers.get("id") or properties.get("correlation_id")
+            if task_id:
+                task_ids.add(str(task_id))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+    return task_ids
 
 
 def _current_broker_epoch() -> str:
@@ -76,6 +97,7 @@ class Dispatcher:
         self._stop = threading.Event()
         self._threads: list[threading.Thread] = []
         self._debug_watermark = None  # 已处理终态任务 finished_at 水位线, 之前的不回扫
+        self._published_recovery_observations: dict[str, tuple[str, int]] = {}
 
     def start(self) -> None:
         self._stop.clear()
@@ -315,10 +337,10 @@ class Dispatcher:
     def _recover_dispatch_handoffs(self, db, now) -> int:
         """Release only proven-lost dispatch handoffs.
 
-        ``published`` deliberately has no elapsed-time recovery: it is a normal
-        broker queue state. Recovery is restricted to broker epoch loss, a
-        scheduler crash during ``publishing``, a worker crash during
-        ``delivering``, and temporary pre-state-machine compatibility rows.
+        Published messages normally remain in the broker queue, but a worker
+        rollout can move one to Redis ``unacked`` immediately before the worker
+        exits. Such a message needs broker evidence plus two stale observations
+        before its DB reservation is released.
         """
         from app.db.models import AppDvsTask
 
@@ -330,6 +352,7 @@ class Dispatcher:
 
         publishing_cutoff = now - timedelta(seconds=PUBLISHING_TIMEOUT_SECONDS)
         delivering_cutoff = now - timedelta(seconds=DELIVERING_TIMEOUT_SECONDS)
+        published_cutoff = now - timedelta(seconds=PUBLISHED_RECOVERY_SECONDS)
         legacy_cutoff = now - timedelta(seconds=LEGACY_DISPATCH_RECOVERY_SECONDS)
         epoch_lost = and_(
             AppDvsTask.dispatch_broker_epoch.is_not(None),
@@ -345,11 +368,22 @@ class Dispatcher:
             AppDvsTask.dispatch_delivery_started_at.is_not(None),
             AppDvsTask.dispatch_delivery_started_at < delivering_cutoff,
         )
+        published_aged = and_(
+            AppDvsTask.dispatch_status == "published",
+            AppDvsTask.dispatch_published_at.is_not(None),
+            AppDvsTask.dispatch_published_at < published_cutoff,
+        )
         legacy_aged = and_(
             AppDvsTask.dispatch_reserved_at.is_(None),
             AppDvsTask.dispatch_broker_epoch.is_(None),
             AppDvsTask.dispatch_delivery_started_at.is_(None),
             AppDvsTask.updated_at < legacy_cutoff,
+        )
+        legacy_published_aged = and_(
+            AppDvsTask.dispatch_status == "published",
+            AppDvsTask.dispatch_broker_epoch.is_(None),
+            AppDvsTask.dispatch_published_at.is_not(None),
+            AppDvsTask.dispatch_published_at < legacy_cutoff,
         )
         rows = (
             db.query(AppDvsTask)
@@ -359,7 +393,14 @@ class Dispatcher:
                 AppDvsTask.celery_task_id.is_not(None),
                 AppDvsTask.execution_owner_id.is_(None),
                 AppDvsTask.execution_lease_until.is_(None),
-                or_(epoch_lost, publishing_aged, delivering_aged, legacy_aged),
+                or_(
+                    epoch_lost,
+                    publishing_aged,
+                    delivering_aged,
+                    published_aged,
+                    legacy_aged,
+                    legacy_published_aged,
+                ),
             )
             .order_by(
                 AppDvsTask.dispatch_reserved_at.asc(),
@@ -372,6 +413,17 @@ class Dispatcher:
         if not rows:
             return 0
 
+        published_dispatch_ids = {
+            str(row.celery_task_id)
+            for row in rows
+            if (
+                row.dispatch_status == "published"
+                and row.dispatch_published_at is not None
+                and row.dispatch_published_at < published_cutoff
+                and (row.dispatch_broker_epoch == broker_epoch or row.dispatch_broker_epoch is None)
+            )
+        }
+        published_locations = self._observe_published_dispatches(published_dispatch_ids)
         released = 0
         for row in rows:
             dispatch_id = str(row.celery_task_id or "").strip()
@@ -394,6 +446,23 @@ class Dispatcher:
             ):
                 reason = "delivering handoff timed out; scheduled for retry"
                 state_condition = delivering_aged
+            elif (
+                row.dispatch_status == "published"
+                and row.dispatch_published_at is not None
+                and row.dispatch_published_at < published_cutoff
+            ):
+                is_legacy = row.dispatch_broker_epoch is None
+                if is_legacy and row.dispatch_published_at >= legacy_cutoff:
+                    self._published_recovery_observations.pop(dispatch_id, None)
+                    continue
+                location = published_locations.get(dispatch_id, "unknown")
+                if location in {"queue", "active", "reserved", "unknown"}:
+                    self._published_recovery_observations.pop(dispatch_id, None)
+                    continue
+                if not self._confirm_published_recovery(dispatch_id, location):
+                    continue
+                reason = f"published handoff stale in broker ({location}); scheduled for retry"
+                state_condition = legacy_published_aged if is_legacy else published_aged
             elif (
                 row.dispatch_reserved_at is None
                 and row.dispatch_broker_epoch is None
@@ -440,6 +509,84 @@ class Dispatcher:
                     reason,
                 )
         return released
+
+    def _observe_published_dispatches(self, dispatch_ids: set[str]) -> dict[str, str]:
+        """Classify published messages with one read-only broker observation."""
+        if not dispatch_ids:
+            return {}
+        try:
+            import redis
+
+            host = os.environ.get("DVS_SCHEDULER_HOST", "secflow-app-dataflow-vuln-scan-scheduler")
+            port = int(os.environ.get("DVS_SCHEDULER_REDIS_PORT", "6379"))
+            db = int(os.environ.get("DVS_CELERY_BROKER_DB", "0"))
+            client = redis.Redis(
+                host=host,
+                port=port,
+                db=db,
+                decode_responses=True,
+                socket_connect_timeout=3,
+                socket_timeout=3,
+            )
+            ready_ids = _celery_task_ids(client.lrange("dvs", 0, -1))
+            unacked_ids = _celery_task_ids(client.hvals("unacked"))
+
+            from app.celery_app import app as celery_app
+
+            inspect = celery_app.control.inspect(timeout=3)
+            if not inspect.ping():
+                return {dispatch_id: "unknown" for dispatch_id in dispatch_ids}
+            active = inspect.active()
+            reserved = inspect.reserved()
+            if active is None or reserved is None:
+                return {dispatch_id: "unknown" for dispatch_id in dispatch_ids}
+            active_ids = {
+                str(item.get("id"))
+                for tasks in active.values()
+                for item in (tasks or [])
+                if isinstance(item, dict) and item.get("id")
+            }
+            reserved_ids = {
+                str(item.get("id"))
+                for tasks in reserved.values()
+                for item in (tasks or [])
+                if isinstance(item, dict) and item.get("id")
+            }
+            locations: dict[str, str] = {}
+            for dispatch_id in dispatch_ids:
+                if dispatch_id in active_ids:
+                    locations[dispatch_id] = "active"
+                elif dispatch_id in reserved_ids:
+                    locations[dispatch_id] = "reserved"
+                elif dispatch_id in ready_ids:
+                    locations[dispatch_id] = "queue"
+                elif dispatch_id in unacked_ids:
+                    locations[dispatch_id] = "unacked"
+                else:
+                    locations[dispatch_id] = "missing"
+            return locations
+        except Exception:
+            logger.warning("published broker observation failed celery_ids=%s", sorted(dispatch_ids), exc_info=True)
+            return {dispatch_id: "unknown" for dispatch_id in dispatch_ids}
+
+    def _confirm_published_recovery(self, dispatch_id: str, location: str) -> bool:
+        if location not in {"unacked", "missing"}:
+            self._published_recovery_observations.pop(dispatch_id, None)
+            return False
+        previous = self._published_recovery_observations.get(dispatch_id)
+        count = (previous[1] + 1) if previous and previous[0] == location else 1
+        self._published_recovery_observations[dispatch_id] = (location, count)
+        if count < PUBLISHED_RECOVERY_CONFIRMATIONS:
+            logger.info(
+                "published handoff recovery pending confirmation task_celery_id=%s location=%s confirmation=%s/%s",
+                dispatch_id,
+                location,
+                count,
+                PUBLISHED_RECOVERY_CONFIRMATIONS,
+            )
+            return False
+        self._published_recovery_observations.pop(dispatch_id, None)
+        return True
 
     # ── debugger 调度: 扫终态失败任务 → 发给 debugger (scheduler 职责) ──
     def _debug_dispatch_loop(self) -> None:

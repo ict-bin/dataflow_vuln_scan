@@ -1,3 +1,4 @@
+import json
 import unittest
 from datetime import timedelta
 from unittest.mock import Mock, patch
@@ -6,7 +7,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.db.models import AppDvsTask, Base
-from app.dispatcher import Dispatcher
+from app.dispatcher import Dispatcher, _celery_task_ids
 from app.service.execution_coordinator import begin_delivery_handoff, claim_specific_task
 from app.time_utils import now_local
 
@@ -73,6 +74,14 @@ class DispatcherTests(unittest.TestCase):
             return db.query(AppDvsTask).filter_by(task_id=task_id).first()
         finally:
             db.close()
+
+    def test_celery_task_ids_reads_kombu_redis_envelopes(self):
+        envelope = json.dumps([
+            {"headers": {"id": "celery-envelope-id"}, "properties": {}},
+            "",
+            "dvs",
+        ])
+        self.assertEqual({"celery-envelope-id"}, _celery_task_ids([envelope]))
 
     def test_pump_publishes_pending_task_only_once(self):
         self._insert_task(
@@ -262,7 +271,7 @@ class DispatcherTests(unittest.TestCase):
         self.assertIsNone(row.dispatch_reserved_at)
         self.assertIn("broker epoch changed", row.last_dispatch_error)
 
-    def test_old_published_dispatch_in_current_epoch_is_not_retried(self):
+    def test_old_published_dispatch_in_ready_queue_is_not_retried(self):
         self._insert_task(
             task_id="dvs_dispatcher_published_waiting",
             status="pending",
@@ -278,6 +287,10 @@ class DispatcherTests(unittest.TestCase):
 
         with patch("app.db.get_db", self._get_db), patch(
             "app.dispatcher._current_broker_epoch", return_value="epoch-a"
+        ), patch.object(
+            Dispatcher,
+            "_observe_published_dispatches",
+            return_value={"celery-published-waiting": "queue"},
         ):
             reset = Dispatcher()._stale_once()
 
@@ -286,6 +299,95 @@ class DispatcherTests(unittest.TestCase):
             "celery-published-waiting",
             self._task("dvs_dispatcher_published_waiting").celery_task_id,
         )
+
+    def test_old_published_unacked_dispatch_is_retried_after_two_observations(self):
+        self._insert_task(
+            task_id="dvs_dispatcher_published_unacked",
+            status="pending",
+            celery_task_id="celery-published-unacked",
+            execution_owner_id=None,
+            execution_lease_until=None,
+            dispatch_status="published",
+            dispatch_reserved_at=now_local() - timedelta(minutes=10),
+            dispatch_published_at=now_local() - timedelta(minutes=10),
+            dispatch_broker_epoch="epoch-a",
+        )
+        dispatcher = Dispatcher()
+        with patch("app.db.get_db", self._get_db), patch(
+            "app.dispatcher._current_broker_epoch", return_value="epoch-a"
+        ), patch.object(
+            dispatcher,
+            "_observe_published_dispatches",
+            return_value={"celery-published-unacked": "unacked"},
+        ):
+            self.assertEqual(0, dispatcher._stale_once())
+            self.assertEqual(1, dispatcher._stale_once())
+
+        row = self._task("dvs_dispatcher_published_unacked")
+        self.assertIsNone(row.celery_task_id)
+        self.assertEqual("pending", row.dispatch_status)
+        self.assertIn("published handoff stale", row.last_dispatch_error)
+
+    def test_published_recovery_confirmation_resets_when_message_returns_to_queue(self):
+        self._insert_task(
+            task_id="dvs_dispatcher_published_flapping",
+            status="pending",
+            celery_task_id="celery-published-flapping",
+            execution_owner_id=None,
+            execution_lease_until=None,
+            dispatch_status="published",
+            dispatch_reserved_at=now_local() - timedelta(minutes=10),
+            dispatch_published_at=now_local() - timedelta(minutes=10),
+            dispatch_broker_epoch="epoch-a",
+        )
+        dispatcher = Dispatcher()
+        observations = [
+            {"celery-published-flapping": "unacked"},
+            {"celery-published-flapping": "queue"},
+            {"celery-published-flapping": "unacked"},
+        ]
+        with patch("app.db.get_db", self._get_db), patch(
+            "app.dispatcher._current_broker_epoch", return_value="epoch-a"
+        ), patch.object(
+            dispatcher,
+            "_observe_published_dispatches",
+            side_effect=observations,
+        ):
+            self.assertEqual(0, dispatcher._stale_once())
+            self.assertEqual(0, dispatcher._stale_once())
+            self.assertEqual(0, dispatcher._stale_once())
+
+        self.assertEqual(
+            "celery-published-flapping",
+            self._task("dvs_dispatcher_published_flapping").celery_task_id,
+        )
+
+    def test_legacy_published_with_reservation_is_retried_when_missing(self):
+        self._insert_task(
+            task_id="dvs_dispatcher_legacy_published",
+            status="pending",
+            celery_task_id="celery-legacy-published",
+            execution_owner_id=None,
+            execution_lease_until=None,
+            dispatch_status="published",
+            dispatch_reserved_at=now_local() - timedelta(minutes=20),
+            dispatch_published_at=now_local() - timedelta(minutes=20),
+            dispatch_broker_epoch=None,
+        )
+        dispatcher = Dispatcher()
+        with patch("app.db.get_db", self._get_db), patch(
+            "app.dispatcher._current_broker_epoch", return_value="epoch-a"
+        ), patch.object(
+            dispatcher,
+            "_observe_published_dispatches",
+            return_value={"celery-legacy-published": "missing"},
+        ):
+            self.assertEqual(0, dispatcher._stale_once())
+            self.assertEqual(1, dispatcher._stale_once())
+
+        row = self._task("dvs_dispatcher_legacy_published")
+        self.assertIsNone(row.celery_task_id)
+        self.assertIn("published handoff stale", row.last_dispatch_error)
 
     def test_publishing_handoff_timeout_releases_task(self):
         self._insert_task(
