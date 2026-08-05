@@ -128,6 +128,7 @@ def claim_specific_task(
     task_id: str,
     *,
     celery_task_id: str | None = None,
+    allow_pending: bool = True,
 ) -> ClaimedTask | None:
     """Celery worker 收到 LAUNCH 后按 task_id 认领 (非竞争性)。
 
@@ -152,7 +153,7 @@ def claim_specific_task(
     if celery_task_id is not None and candidate.celery_task_id != celery_task_id:
         return None
     status = str(candidate.status or "pending")
-    if status == "pending":
+    if status == "pending" and allow_pending:
         expected_status = "pending"
     elif status == "running" and (
         candidate.execution_lease_until is None or candidate.execution_lease_until < now
@@ -204,6 +205,43 @@ def claim_specific_task(
         control_version=int(candidate.control_version or 0),
         dispatch_status="leased",
     )
+
+
+def begin_delivery_handoff(
+    db: Session,
+    owner_id: str,
+    task_id: str,
+    celery_task_id: str,
+) -> bool:
+    """Record that a worker received the current dispatch before it claims it.
+
+    This tiny CAS makes the worker-restart handoff window observable. A stale
+    ``delivering`` row can be safely re-dispatched without treating normal queue
+    wait in ``published`` as an error.
+    """
+    now = now_local()
+    updated = (
+        db.query(AppDvsTask)
+        .filter(
+            AppDvsTask.task_id == task_id,
+            AppDvsTask.status == "pending",
+            AppDvsTask.is_deleted.is_(False),
+            AppDvsTask.celery_task_id == celery_task_id,
+            AppDvsTask.dispatch_status.in_(["publishing", "published"]),
+            AppDvsTask.execution_owner_id.is_(None),
+            AppDvsTask.execution_lease_until.is_(None),
+        )
+        .update(
+            {
+                AppDvsTask.dispatch_status: "delivering",
+                AppDvsTask.dispatch_delivery_started_at: now,
+                AppDvsTask.dispatch_delivery_worker_id: owner_id,
+            },
+            synchronize_session=False,
+        )
+    )
+    db.commit()
+    return bool(updated)
 
 
 def claim_one_runnable_task(db: Session, owner_id: str) -> ClaimedTask | None:
@@ -270,6 +308,13 @@ def reclaim_orphaned_running_tasks(db: Session) -> list[RecoveredRunningTask]:
                     AppDvsTask.execution_lease_until: None,
                     AppDvsTask.execution_heartbeat_at: None,
                     AppDvsTask.dispatch_status: "pending",
+                    AppDvsTask.celery_task_id: None,
+                    AppDvsTask.dispatch_reserved_at: None,
+                    AppDvsTask.dispatch_published_at: None,
+                    AppDvsTask.dispatch_broker_epoch: None,
+                    AppDvsTask.dispatch_delivery_started_at: None,
+                    AppDvsTask.dispatch_delivery_worker_id: None,
+                    AppDvsTask.last_dispatch_error: None,
                     **_clean_restart_update_fields(row, reason=reason),
                 },
                 synchronize_session=False,
@@ -366,6 +411,13 @@ def recover_running_task_if_owner(
                 AppDvsTask.execution_lease_until: None,
                 AppDvsTask.execution_heartbeat_at: None,
                 AppDvsTask.dispatch_status: "pending",
+                AppDvsTask.celery_task_id: None,
+                AppDvsTask.dispatch_reserved_at: None,
+                AppDvsTask.dispatch_published_at: None,
+                AppDvsTask.dispatch_broker_epoch: None,
+                AppDvsTask.dispatch_delivery_started_at: None,
+                AppDvsTask.dispatch_delivery_worker_id: None,
+                AppDvsTask.last_dispatch_error: None,
                 **_clean_restart_update_fields(
                     current_row,  # type: ignore[arg-type]
                     reason=reason,

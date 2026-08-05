@@ -1543,6 +1543,9 @@ class TaskService:
         row.celery_task_id = None  # dispatcher 泵会重新发布
         row.dispatch_reserved_at = None
         row.dispatch_published_at = None
+        row.dispatch_broker_epoch = None
+        row.dispatch_delivery_started_at = None
+        row.dispatch_delivery_worker_id = None
         row.last_dispatch_error = None
         flag_modified(row, "task_config_json")
         flag_modified(row, "latest_abnormal_reason_json")
@@ -1594,7 +1597,10 @@ class TaskService:
                 for mode in ("complete", "autonomous", "dagflow"):
                     ms = create_shared_store(
                         "mysql+pymysql://root:Huawei12%23$@secflow-app-dataflow-vuln-scan-mysql.secflow-ns.svc.cluster.local:3306",
-                        mode, source_root, task_id, project_id=str(row.project_id or ""))
+                        mode, source_root, task_id,
+                        project_id=str(row.project_id or ""),
+                        parent_task_id=str(row.parent_task_id or ""),
+                    )
                     if ms:
                         ms.clear_task_analysis()
         except Exception as e:
@@ -1659,6 +1665,9 @@ class TaskService:
         row.celery_task_id = None
         row.dispatch_reserved_at = None
         row.dispatch_published_at = None
+        row.dispatch_broker_epoch = None
+        row.dispatch_delivery_started_at = None
+        row.dispatch_delivery_worker_id = None
         row.last_dispatch_error = None
         # 清空运行结果大字段，保留任务输入定义以支持后续 restart/resume。
         row.stages_json = None
@@ -1776,7 +1785,8 @@ class TaskService:
                 _url = "mysql+pymysql://root:Huawei12%23$@secflow-app-dataflow-vuln-scan-mysql.secflow-ns.svc.cluster.local:3306"
                 for mode in ("complete", "autonomous", "dagflow"):
                     ms = create_shared_store(_url, mode, source_root, task_id,
-                                             project_id=str(row.project_id or ""))
+                                             project_id=str(row.project_id or ""),
+                                             parent_task_id=str(row.parent_task_id or ""))
                     if ms:
                         ms.clear_task_analysis()
                 mgs = create_mysql_graph_store(_url, project_id=str(row.project_id or ""),

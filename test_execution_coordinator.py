@@ -296,6 +296,38 @@ class ExecutionCoordinatorTests(unittest.TestCase):
         finally:
             db.close()
 
+    def test_recover_running_task_releases_previous_dispatch_token(self):
+        self._insert_task(
+            status="running",
+            execution_owner_id="pod-a",
+            execution_lease_until=now_local() + timedelta(hours=1),
+            execution_epoch=2,
+            control_version=3,
+            dispatch_status="running",
+        )
+        db = self._session()
+        try:
+            row = db.query(AppDvsTask).filter_by(task_id="dvs_test_1").first()
+            row.celery_task_id = "old-dispatch-id"
+            row.dispatch_reserved_at = now_local()
+            row.dispatch_published_at = now_local()
+            row.dispatch_broker_epoch = "old-epoch"
+            row.dispatch_delivery_started_at = now_local()
+            row.dispatch_delivery_worker_id = "pod-a"
+            db.commit()
+
+            self.assertTrue(recover_running_task_if_owner(db, "dvs_test_1", "pod-a", 2, 3))
+            row = db.query(AppDvsTask).filter_by(task_id="dvs_test_1").first()
+            self.assertEqual("pending", row.status)
+            self.assertIsNone(row.celery_task_id)
+            self.assertIsNone(row.dispatch_reserved_at)
+            self.assertIsNone(row.dispatch_published_at)
+            self.assertIsNone(row.dispatch_broker_epoch)
+            self.assertIsNone(row.dispatch_delivery_started_at)
+            self.assertIsNone(row.dispatch_delivery_worker_id)
+        finally:
+            db.close()
+
     def test_reclaim_orphaned_running_tasks_repairs_missing_owner_and_expired_lease(self):
         expired = now_local() - timedelta(minutes=5)
         future = now_local() + timedelta(hours=1)

@@ -15,7 +15,6 @@ import time
 import json
 import uuid
 from datetime import timedelta
-from typing import Any
 
 from sqlalchemy import and_, or_
 
@@ -25,9 +24,11 @@ PUMP_INTERVAL = float(os.environ.get("DVS_DISPATCHER_PUMP_INTERVAL", "3"))
 STALE_INTERVAL = float(os.environ.get("DVS_DISPATCHER_STALE_INTERVAL", "30"))
 PUMP_BATCH = int(os.environ.get("DVS_DISPATCHER_PUMP_BATCH", "20"))
 STALE_HEARTBEAT_SECONDS = int(os.environ.get("DVS_DISPATCHER_STALE_HEARTBEAT_SECONDS", "60"))  # 60s 无心跳=卡死
-PENDING_CELERY_STALE_SECONDS = int(os.environ.get("DVS_PENDING_CELERY_STALE_SECONDS", "600"))  # 10min 未消费=重投
-PENDING_RECOVERY_BATCH = int(os.environ.get("DVS_PENDING_RECOVERY_BATCH", "20"))
-INSPECT_TIMEOUT = float(os.environ.get("DVS_DISPATCHER_INSPECT_TIMEOUT", "3"))
+PUBLISHING_TIMEOUT_SECONDS = int(os.environ.get("DVS_DISPATCH_PUBLISHING_TIMEOUT_SECONDS", "120"))
+DELIVERING_TIMEOUT_SECONDS = int(os.environ.get("DVS_DISPATCH_DELIVERING_TIMEOUT_SECONDS", "120"))
+LEGACY_DISPATCH_RECOVERY_SECONDS = int(os.environ.get("DVS_LEGACY_DISPATCH_RECOVERY_SECONDS", "600"))
+DISPATCH_RECOVERY_BATCH = int(os.environ.get("DVS_DISPATCH_RECOVERY_BATCH", "20"))
+BROKER_EPOCH_KEY = os.environ.get("DVS_BROKER_EPOCH_KEY", "dvs:broker_epoch")
 DEBUG_DISPATCH_INTERVAL = float(os.environ.get("DVS_DISPATCHER_DEBUG_INTERVAL", "15"))
 DEBUGGER_HOST = os.environ.get("DVS_DEBUGGER_HOST", "secflow-app-dataflow-vuln-scan-debugger")
 DEBUGGER_PORT = int(os.environ.get("DVS_DEBUGGER_PORT", "8080"))
@@ -35,61 +36,39 @@ DEBUGGER_PORT = int(os.environ.get("DVS_DEBUGGER_PORT", "8080"))
 _DEBUG_STATUSES = ("failed", "error", "completed_limited")
 
 
-def _collect_known_celery_ids(payload: Any) -> set[str]:
-    known_ids: set[str] = set()
-    for tasks in (payload or {}).values():
-        for task in (tasks or []):
-            cid = task.get("id") if isinstance(task, dict) else None
-            # Celery inspect.scheduled() returns {"request": {"id": ...}}
-            # while active/reserved normally expose the id at the top level.
-            if not cid and isinstance(task, dict):
-                request = task.get("request")
-                cid = request.get("id") if isinstance(request, dict) else None
-            if cid:
-                known_ids.add(str(cid))
-    return known_ids
+def _current_broker_epoch() -> str:
+    """Return the current Redis lifetime marker.
 
+    Redis is colocated with the scheduler and intentionally nonpersistent. Its
+    disappearance is therefore authoritative evidence that queued messages
+    from the prior epoch were lost.
+    """
+    import redis
 
-def _healthy_worker_capacity(
-    ping_payload: Any,
-    stats_payload: Any,
-    active_payload: Any,
-) -> int | None:
-    """Return free Celery slots, or None when inspect cannot prove worker health."""
-    if not isinstance(ping_payload, dict) or not ping_payload:
-        return None
+    host = os.environ.get("DVS_SCHEDULER_HOST", "secflow-app-dataflow-vuln-scan-scheduler")
+    port = int(os.environ.get("DVS_SCHEDULER_REDIS_PORT", "6379"))
+    db = int(os.environ.get("DVS_CELERY_BROKER_DB", "0"))
+    client = redis.Redis(
+        host=host,
+        port=port,
+        db=db,
+        decode_responses=True,
+        socket_connect_timeout=3,
+        socket_timeout=3,
+    )
+    epoch = client.get(BROKER_EPOCH_KEY)
+    if epoch:
+        return str(epoch)
 
-    healthy_workers = [
-        str(worker_name)
-        for worker_name, pong in ping_payload.items()
-        if isinstance(pong, dict) and pong.get("ok") == "pong"
-    ]
-    if not healthy_workers:
-        return None
+    candidate = uuid.uuid4().hex
+    if client.set(BROKER_EPOCH_KEY, candidate, nx=True):
+        logger.warning("initialized DVS broker epoch=%s", candidate)
+        return candidate
 
-    if not isinstance(stats_payload, dict) or not isinstance(active_payload, dict):
-        return None
-
-    total_capacity = 0
-    active_count = 0
-    for worker_name in healthy_workers:
-        stats = stats_payload.get(worker_name)
-        if not isinstance(stats, dict):
-            return None
-        try:
-            capacity = int((stats.get("pool") or {}).get("max-concurrency", 1))
-        except (TypeError, ValueError):
-            logger.warning("invalid celery worker capacity worker=%s stats=%r", worker_name, stats)
-            return None
-        if capacity < 1:
-            logger.warning("invalid non-positive celery worker capacity worker=%s capacity=%s", worker_name, capacity)
-            return None
-        active = active_payload.get(worker_name)
-        if not isinstance(active, list):
-            return None
-        total_capacity += capacity
-        active_count += len(active)
-    return max(0, total_capacity - active_count)
+    epoch = client.get(BROKER_EPOCH_KEY)
+    if not epoch:
+        raise RuntimeError("could not create or read DVS broker epoch")
+    return str(epoch)
 
 
 class Dispatcher:
@@ -138,6 +117,7 @@ class Dispatcher:
         db = next(db_gen)
         published = 0
         try:
+            broker_epoch = _current_broker_epoch()
             rows = (
                 db.query(AppDvsTask.task_id)
                 .filter(
@@ -168,6 +148,9 @@ class Dispatcher:
                             AppDvsTask.dispatch_status: "publishing",
                             AppDvsTask.dispatch_reserved_at: reserved_at,
                             AppDvsTask.dispatch_published_at: None,
+                            AppDvsTask.dispatch_broker_epoch: broker_epoch,
+                            AppDvsTask.dispatch_delivery_started_at: None,
+                            AppDvsTask.dispatch_delivery_worker_id: None,
                             AppDvsTask.dispatch_attempts: AppDvsTask.dispatch_attempts + 1,
                             AppDvsTask.last_dispatch_error: None,
                         },
@@ -227,6 +210,9 @@ class Dispatcher:
                                 AppDvsTask.dispatch_status: "pending",
                                 AppDvsTask.dispatch_reserved_at: None,
                                 AppDvsTask.dispatch_published_at: None,
+                                AppDvsTask.dispatch_broker_epoch: None,
+                                AppDvsTask.dispatch_delivery_started_at: None,
+                                AppDvsTask.dispatch_delivery_worker_id: None,
                                 AppDvsTask.last_dispatch_error: str(exc)[:4096],
                             },
                             synchronize_session=False,
@@ -309,10 +295,13 @@ class Dispatcher:
                 row.dispatch_status = None
                 row.dispatch_reserved_at = None
                 row.dispatch_published_at = None
+                row.dispatch_broker_epoch = None
+                row.dispatch_delivery_started_at = None
+                row.dispatch_delivery_worker_id = None
                 reset += 1
                 logger.warning("stale reset task=%s celery_id=%s hb_stale=%s (lease expired, worker dead, data cleaned)",
                                row.task_id, cid, heartbeat_stale)
-            pending_reset = self._recover_aged_pending_dispatches(db, celery_app, now)
+            pending_reset = self._recover_dispatch_handoffs(db, now)
             reset += pending_reset
             if reset:
                 db.commit()
@@ -323,20 +312,44 @@ class Dispatcher:
                 logger.debug("dispatcher: stale_once db generator closed")
         return reset
 
-    def _recover_aged_pending_dispatches(self, db, celery_app, now) -> int:
-        """Release lost pending dispatch reservations only when recovery is safe.
+    def _recover_dispatch_handoffs(self, db, now) -> int:
+        """Release only proven-lost dispatch handoffs.
 
-        dispatch_reserved_at is authoritative for new records. The updated_at fallback
-        exists only for pre-migration pending rows which already had a celery id when
-        this deployment introduced dispatch reservation timestamps.
+        ``published`` deliberately has no elapsed-time recovery: it is a normal
+        broker queue state. Recovery is restricted to broker epoch loss, a
+        scheduler crash during ``publishing``, a worker crash during
+        ``delivering``, and temporary pre-state-machine compatibility rows.
         """
         from app.db.models import AppDvsTask
 
-        cutoff = now - timedelta(seconds=PENDING_CELERY_STALE_SECONDS)
-        dispatch_aged = AppDvsTask.dispatch_reserved_at < cutoff
-        legacy_dispatch_aged = and_(
+        try:
+            broker_epoch = _current_broker_epoch()
+        except Exception:
+            logger.exception("dispatch handoff recovery skipped: broker epoch unavailable")
+            return 0
+
+        publishing_cutoff = now - timedelta(seconds=PUBLISHING_TIMEOUT_SECONDS)
+        delivering_cutoff = now - timedelta(seconds=DELIVERING_TIMEOUT_SECONDS)
+        legacy_cutoff = now - timedelta(seconds=LEGACY_DISPATCH_RECOVERY_SECONDS)
+        epoch_lost = and_(
+            AppDvsTask.dispatch_broker_epoch.is_not(None),
+            AppDvsTask.dispatch_broker_epoch != broker_epoch,
+        )
+        publishing_aged = and_(
+            AppDvsTask.dispatch_status == "publishing",
+            AppDvsTask.dispatch_reserved_at.is_not(None),
+            AppDvsTask.dispatch_reserved_at < publishing_cutoff,
+        )
+        delivering_aged = and_(
+            AppDvsTask.dispatch_status == "delivering",
+            AppDvsTask.dispatch_delivery_started_at.is_not(None),
+            AppDvsTask.dispatch_delivery_started_at < delivering_cutoff,
+        )
+        legacy_aged = and_(
             AppDvsTask.dispatch_reserved_at.is_(None),
-            AppDvsTask.updated_at < cutoff,
+            AppDvsTask.dispatch_broker_epoch.is_(None),
+            AppDvsTask.dispatch_delivery_started_at.is_(None),
+            AppDvsTask.updated_at < legacy_cutoff,
         )
         rows = (
             db.query(AppDvsTask)
@@ -346,61 +359,54 @@ class Dispatcher:
                 AppDvsTask.celery_task_id.is_not(None),
                 AppDvsTask.execution_owner_id.is_(None),
                 AppDvsTask.execution_lease_until.is_(None),
-                or_(dispatch_aged, legacy_dispatch_aged),
+                or_(epoch_lost, publishing_aged, delivering_aged, legacy_aged),
             )
             .order_by(
                 AppDvsTask.dispatch_reserved_at.asc(),
+                AppDvsTask.dispatch_delivery_started_at.asc(),
                 AppDvsTask.updated_at.asc(),
             )
-            .limit(PENDING_RECOVERY_BATCH)
+            .limit(DISPATCH_RECOVERY_BATCH)
             .all()
         )
         if not rows:
             return 0
 
-        try:
-            inspect = celery_app.control.inspect(timeout=INSPECT_TIMEOUT)
-            ping = inspect.ping()
-            stats = inspect.stats()
-            active = inspect.active()
-            reserved = inspect.reserved()
-            scheduled = inspect.scheduled()
-            free_slots = _healthy_worker_capacity(ping, stats, active)
-        except Exception:
-            logger.exception(
-                "pending dispatch aging inspect failed; skip recovery for %d task(s)",
-                len(rows),
-            )
-            return 0
-
-        if free_slots is None:
-            logger.warning(
-                "pending dispatch aging skipped: Celery worker health/capacity is incomplete; candidates=%d",
-                len(rows),
-            )
-            return 0
-        if free_slots <= 0:
-            logger.info(
-                "pending dispatch aging deferred: all healthy worker slots are busy; candidates=%d",
-                len(rows),
-            )
-            return 0
-
-        known_ids = (
-            _collect_known_celery_ids(active)
-            | _collect_known_celery_ids(reserved)
-            | _collect_known_celery_ids(scheduled)
-        )
         released = 0
         for row in rows:
             dispatch_id = str(row.celery_task_id or "").strip()
             if not dispatch_id:
                 continue
-            if dispatch_id in known_ids:
+            if row.dispatch_broker_epoch and row.dispatch_broker_epoch != broker_epoch:
+                reason = "broker epoch changed; queued message was lost; scheduled for retry"
+                state_condition = epoch_lost
+            elif (
+                row.dispatch_status == "publishing"
+                and row.dispatch_reserved_at is not None
+                and row.dispatch_reserved_at < publishing_cutoff
+            ):
+                reason = "publishing handoff timed out; scheduled for retry"
+                state_condition = publishing_aged
+            elif (
+                row.dispatch_status == "delivering"
+                and row.dispatch_delivery_started_at is not None
+                and row.dispatch_delivery_started_at < delivering_cutoff
+            ):
+                reason = "delivering handoff timed out; scheduled for retry"
+                state_condition = delivering_aged
+            elif (
+                row.dispatch_reserved_at is None
+                and row.dispatch_broker_epoch is None
+                and row.dispatch_delivery_started_at is None
+                and row.updated_at < legacy_cutoff
+            ):
+                reason = "legacy dispatch recovery; scheduled for retry"
+                state_condition = legacy_aged
+            else:
                 continue
-            is_legacy_dispatch = row.dispatch_reserved_at is None
-            # Match the old id in the WHERE clause so an overlapping claim/retry
-            # can never have its newer reservation erased.
+
+            # Match the old token and reason state in the WHERE clause so an
+            # overlapping claim/retry can never erase a newer reservation.
             conditions = [
                 AppDvsTask.task_id == row.task_id,
                 AppDvsTask.status == "pending",
@@ -408,21 +414,8 @@ class Dispatcher:
                 AppDvsTask.celery_task_id == dispatch_id,
                 AppDvsTask.execution_owner_id.is_(None),
                 AppDvsTask.execution_lease_until.is_(None),
+                state_condition,
             ]
-            if is_legacy_dispatch:
-                conditions.extend(
-                    [
-                        AppDvsTask.dispatch_reserved_at.is_(None),
-                        AppDvsTask.updated_at < cutoff,
-                    ]
-                )
-            else:
-                conditions.extend(
-                    [
-                        AppDvsTask.dispatch_reserved_at.is_not(None),
-                        AppDvsTask.dispatch_reserved_at < cutoff,
-                    ]
-                )
             changed = db.query(AppDvsTask).filter(
                 *conditions,
             ).update(
@@ -431,25 +424,21 @@ class Dispatcher:
                     AppDvsTask.dispatch_status: "pending",
                     AppDvsTask.dispatch_reserved_at: None,
                     AppDvsTask.dispatch_published_at: None,
-                    AppDvsTask.last_dispatch_error: (
-                        "legacy pending dispatch aged out: Celery message not observed; scheduled for retry"
-                        if is_legacy_dispatch else
-                        "pending dispatch aged out: Celery message not observed; scheduled for retry"
-                    ),
+                    AppDvsTask.dispatch_broker_epoch: None,
+                    AppDvsTask.dispatch_delivery_started_at: None,
+                    AppDvsTask.dispatch_delivery_worker_id: None,
+                    AppDvsTask.last_dispatch_error: reason,
                 },
                 synchronize_session=False,
             )
             if changed:
                 released += 1
-                free_slots -= 1
                 logger.warning(
-                    "%spending dispatch aged out task=%s celery_id=%s; released for retry",
-                    "legacy " if is_legacy_dispatch else "",
+                    "dispatch handoff recovered task=%s celery_id=%s reason=%s",
                     row.task_id,
                     dispatch_id,
+                    reason,
                 )
-                if free_slots <= 0:
-                    break
         return released
 
     # ── debugger 调度: 扫终态失败任务 → 发给 debugger (scheduler 职责) ──

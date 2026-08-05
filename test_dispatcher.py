@@ -7,73 +7,21 @@ from sqlalchemy.orm import sessionmaker
 
 from app.db.models import AppDvsTask, Base
 from app.dispatcher import Dispatcher
-from app.service.execution_coordinator import claim_specific_task
+from app.service.execution_coordinator import begin_delivery_handoff, claim_specific_task
 from app.time_utils import now_local
 
 
-class _FakeInspect:
-    def __init__(
-        self,
-        active_payload=None,
-        reserved_payload=None,
-        scheduled_payload=None,
-        ping_payload=None,
-        stats_payload=None,
-        error=None,
-    ):
-        self._active_payload = active_payload or {}
-        self._reserved_payload = reserved_payload or {}
-        self._scheduled_payload = scheduled_payload or {}
-        self._ping_payload = ping_payload or {}
-        self._stats_payload = stats_payload or {}
-        self._error = error
-
-    def _value(self, value):
-        if self._error:
-            raise self._error
-        return value
-
-    def active(self):
-        return self._value(self._active_payload)
-
-    def reserved(self):
-        return self._value(self._reserved_payload)
-
-    def scheduled(self):
-        return self._value(self._scheduled_payload)
-
-    def ping(self):
-        return self._value(self._ping_payload)
-
-    def stats(self):
-        return self._value(self._stats_payload)
-
-
 class _FakeControl:
-    def __init__(self, inspect):
-        self._inspect = inspect
+    def __init__(self):
         self.revoked: list[tuple[str, bool, str]] = []
-
-    def inspect(self, timeout=None):
-        return self._inspect
 
     def revoke(self, task_id, terminate=False, signal=None):
         self.revoked.append((task_id, terminate, signal))
 
 
 class _FakeCeleryApp:
-    def __init__(self, inspect):
-        self.control = _FakeControl(inspect)
-
-
-def _healthy_inspect(*, active=None, reserved=None, scheduled=None, capacity=1):
-    return _FakeInspect(
-        active_payload=active or {"worker-a": []},
-        reserved_payload=reserved or {},
-        scheduled_payload=scheduled or {},
-        ping_payload={"worker-a": {"ok": "pong"}},
-        stats_payload={"worker-a": {"pool": {"max-concurrency": capacity}}},
-    )
+    def __init__(self):
+        self.control = _FakeControl()
 
 
 class DispatcherTests(unittest.TestCase):
@@ -108,6 +56,9 @@ class DispatcherTests(unittest.TestCase):
                 dispatch_status=kwargs.get("dispatch_status", "running"),
                 dispatch_reserved_at=kwargs.get("dispatch_reserved_at"),
                 dispatch_published_at=kwargs.get("dispatch_published_at"),
+                dispatch_broker_epoch=kwargs.get("dispatch_broker_epoch"),
+                dispatch_delivery_started_at=kwargs.get("dispatch_delivery_started_at"),
+                dispatch_delivery_worker_id=kwargs.get("dispatch_delivery_worker_id"),
                 dispatch_attempts=kwargs.get("dispatch_attempts", 0),
                 last_dispatch_error=kwargs.get("last_dispatch_error"),
             )
@@ -134,6 +85,8 @@ class DispatcherTests(unittest.TestCase):
         dispatcher = Dispatcher()
 
         with patch("app.db.get_db", self._get_db), patch(
+            "app.dispatcher._current_broker_epoch", return_value="epoch-a"
+        ), patch(
             "app.celery_tasks.run_dvs_task.apply_async", apply_async
         ):
             self.assertEqual(1, dispatcher._pump_once())
@@ -145,6 +98,7 @@ class DispatcherTests(unittest.TestCase):
         self.assertIsNotNone(row.celery_task_id)
         self.assertIsNotNone(row.dispatch_reserved_at)
         self.assertIsNotNone(row.dispatch_published_at)
+        self.assertEqual("epoch-a", row.dispatch_broker_epoch)
         self.assertEqual(1, row.dispatch_attempts)
         self.assertIsNone(row.last_dispatch_error)
         self.assertEqual(("dvs_dispatcher_1",), apply_async.call_args.kwargs["args"])
@@ -165,6 +119,8 @@ class DispatcherTests(unittest.TestCase):
             return 0
 
         with patch("app.db.get_db", self._get_db), patch(
+            "app.dispatcher._current_broker_epoch", return_value="epoch-a"
+        ), patch(
             "app.celery_tasks.run_dvs_task.apply_async", apply_async
         ), patch("sqlalchemy.orm.query.Query.update", autospec=True, side_effect=reservation_lost):
             self.assertEqual(0, dispatcher._pump_once())
@@ -184,6 +140,8 @@ class DispatcherTests(unittest.TestCase):
         apply_async = Mock(side_effect=RuntimeError("redis unavailable"))
 
         with patch("app.db.get_db", self._get_db), patch(
+            "app.dispatcher._current_broker_epoch", return_value="epoch-a"
+        ), patch(
             "app.celery_tasks.run_dvs_task.apply_async", apply_async
         ):
             self.assertEqual(0, dispatcher._pump_once())
@@ -214,6 +172,8 @@ class DispatcherTests(unittest.TestCase):
         apply_async = Mock(side_effect=[RuntimeError("first publish failed"), None])
 
         with patch("app.db.get_db", self._get_db), patch(
+            "app.dispatcher._current_broker_epoch", return_value="epoch-a"
+        ), patch(
             "app.celery_tasks.run_dvs_task.apply_async", apply_async
         ):
             self.assertEqual(1, Dispatcher()._pump_once())
@@ -243,9 +203,11 @@ class DispatcherTests(unittest.TestCase):
             execution_heartbeat_at=now_local(),
             execution_lease_until=now_local() + timedelta(minutes=5),
         )
-        fake_app = _FakeCeleryApp(_healthy_inspect())
+        fake_app = _FakeCeleryApp()
 
-        with patch("app.db.get_db", self._get_db), patch("app.celery_app.app", fake_app):
+        with patch("app.db.get_db", self._get_db), patch(
+            "app.celery_app.app", fake_app
+        ), patch("app.dispatcher._current_broker_epoch", return_value="epoch-a"):
             reset = Dispatcher()._stale_once()
 
         self.assertEqual(0, reset)
@@ -260,9 +222,11 @@ class DispatcherTests(unittest.TestCase):
             execution_heartbeat_at=now_local() - timedelta(seconds=601),
             execution_lease_until=now_local() - timedelta(seconds=1),
         )
-        fake_app = _FakeCeleryApp(_healthy_inspect())
+        fake_app = _FakeCeleryApp()
 
-        with patch("app.db.get_db", self._get_db), patch("app.celery_app.app", fake_app), patch(
+        with patch("app.db.get_db", self._get_db), patch(
+            "app.celery_app.app", fake_app
+        ), patch("app.dispatcher._current_broker_epoch", return_value="epoch-a"), patch(
             "app.service.task_paths.cleanup_task_data"
         ):
             reset = Dispatcher()._stale_once()
@@ -273,29 +237,135 @@ class DispatcherTests(unittest.TestCase):
         self.assertEqual("pending", row.status)
         self.assertIsNone(row.celery_task_id)
 
-    def test_aged_pending_dispatch_is_released_when_message_is_missing_and_capacity_is_free(self):
+    def test_broker_epoch_change_releases_pending_dispatch_immediately(self):
         self._insert_task(
-            task_id="dvs_dispatcher_aged",
+            task_id="dvs_dispatcher_broker_lost",
             status="pending",
-            celery_task_id="celery-aged",
+            celery_task_id="celery-broker-lost",
             execution_owner_id=None,
             execution_lease_until=None,
             execution_heartbeat_at=None,
             dispatch_status="published",
-            dispatch_reserved_at=now_local() - timedelta(seconds=601),
-            dispatch_published_at=now_local() - timedelta(seconds=601),
+            dispatch_reserved_at=now_local(),
+            dispatch_broker_epoch="epoch-before-restart",
         )
-        fake_app = _FakeCeleryApp(_healthy_inspect(capacity=2))
 
-        with patch("app.db.get_db", self._get_db), patch("app.celery_app.app", fake_app):
+        with patch("app.db.get_db", self._get_db), patch(
+            "app.dispatcher._current_broker_epoch", return_value="epoch-after-restart"
+        ):
             reset = Dispatcher()._stale_once()
 
         self.assertEqual(1, reset)
-        row = self._task("dvs_dispatcher_aged")
+        row = self._task("dvs_dispatcher_broker_lost")
         self.assertEqual("pending", row.dispatch_status)
         self.assertIsNone(row.celery_task_id)
         self.assertIsNone(row.dispatch_reserved_at)
-        self.assertIn("aged out", row.last_dispatch_error)
+        self.assertIn("broker epoch changed", row.last_dispatch_error)
+
+    def test_old_published_dispatch_in_current_epoch_is_not_retried(self):
+        self._insert_task(
+            task_id="dvs_dispatcher_published_waiting",
+            status="pending",
+            celery_task_id="celery-published-waiting",
+            execution_owner_id=None,
+            execution_lease_until=None,
+            execution_heartbeat_at=None,
+            dispatch_status="published",
+            dispatch_reserved_at=now_local() - timedelta(hours=1),
+            dispatch_published_at=now_local() - timedelta(hours=1),
+            dispatch_broker_epoch="epoch-a",
+        )
+
+        with patch("app.db.get_db", self._get_db), patch(
+            "app.dispatcher._current_broker_epoch", return_value="epoch-a"
+        ):
+            reset = Dispatcher()._stale_once()
+
+        self.assertEqual(0, reset)
+        self.assertEqual(
+            "celery-published-waiting",
+            self._task("dvs_dispatcher_published_waiting").celery_task_id,
+        )
+
+    def test_publishing_handoff_timeout_releases_task(self):
+        self._insert_task(
+            task_id="dvs_dispatcher_publishing_aged",
+            status="pending",
+            celery_task_id="celery-publishing-aged",
+            execution_owner_id=None,
+            execution_lease_until=None,
+            execution_heartbeat_at=None,
+            dispatch_status="publishing",
+            dispatch_reserved_at=now_local() - timedelta(seconds=121),
+            dispatch_broker_epoch="epoch-a",
+        )
+
+        with patch("app.db.get_db", self._get_db), patch(
+            "app.dispatcher._current_broker_epoch", return_value="epoch-a"
+        ):
+            reset = Dispatcher()._stale_once()
+
+        self.assertEqual(1, reset)
+        row = self._task("dvs_dispatcher_publishing_aged")
+        self.assertIsNone(row.celery_task_id)
+        self.assertIn("publishing handoff timed out", row.last_dispatch_error)
+
+    def test_delivering_handoff_timeout_releases_task(self):
+        self._insert_task(
+            task_id="dvs_dispatcher_delivering_aged",
+            status="pending",
+            celery_task_id="celery-delivering-aged",
+            execution_owner_id=None,
+            execution_lease_until=None,
+            execution_heartbeat_at=None,
+            dispatch_status="delivering",
+            dispatch_reserved_at=now_local(),
+            dispatch_broker_epoch="epoch-a",
+            dispatch_delivery_started_at=now_local() - timedelta(seconds=121),
+            dispatch_delivery_worker_id="worker-dead",
+        )
+
+        with patch("app.db.get_db", self._get_db), patch(
+            "app.dispatcher._current_broker_epoch", return_value="epoch-a"
+        ):
+            reset = Dispatcher()._stale_once()
+
+        self.assertEqual(1, reset)
+        row = self._task("dvs_dispatcher_delivering_aged")
+        self.assertIsNone(row.celery_task_id)
+        self.assertIn("delivering handoff timed out", row.last_dispatch_error)
+
+    def test_fresh_publishing_and_delivering_handoffs_are_not_retried(self):
+        self._insert_task(
+            task_id="dvs_dispatcher_publishing_fresh",
+            status="pending",
+            celery_task_id="celery-publishing-fresh",
+            execution_owner_id=None,
+            execution_lease_until=None,
+            dispatch_status="publishing",
+            dispatch_reserved_at=now_local() - timedelta(seconds=119),
+            dispatch_broker_epoch="epoch-a",
+        )
+        self._insert_task(
+            task_id="dvs_dispatcher_delivering_fresh",
+            status="pending",
+            celery_task_id="celery-delivering-fresh",
+            execution_owner_id=None,
+            execution_lease_until=None,
+            dispatch_status="delivering",
+            dispatch_reserved_at=now_local(),
+            dispatch_broker_epoch="epoch-a",
+            dispatch_delivery_started_at=now_local() - timedelta(seconds=119),
+        )
+
+        with patch("app.db.get_db", self._get_db), patch(
+            "app.dispatcher._current_broker_epoch", return_value="epoch-a"
+        ):
+            reset = Dispatcher()._stale_once()
+
+        self.assertEqual(0, reset)
+        self.assertEqual("celery-publishing-fresh", self._task("dvs_dispatcher_publishing_fresh").celery_task_id)
+        self.assertEqual("celery-delivering-fresh", self._task("dvs_dispatcher_delivering_fresh").celery_task_id)
 
     def test_legacy_aged_pending_dispatch_uses_updated_at_fallback_once(self):
         self._insert_task(
@@ -315,124 +385,15 @@ class DispatcherTests(unittest.TestCase):
             db.commit()
         finally:
             db.close()
-        fake_app = _FakeCeleryApp(_healthy_inspect(capacity=2))
-
-        with patch("app.db.get_db", self._get_db), patch("app.celery_app.app", fake_app):
+        with patch("app.db.get_db", self._get_db), patch(
+            "app.dispatcher._current_broker_epoch", return_value="epoch-a"
+        ):
             reset = Dispatcher()._stale_once()
 
         self.assertEqual(1, reset)
         row = self._task("dvs_dispatcher_legacy_aged")
         self.assertIsNone(row.celery_task_id)
-        self.assertIn("legacy pending dispatch aged out", row.last_dispatch_error)
-
-    def test_aged_pending_dispatch_is_kept_when_celery_knows_the_message(self):
-        self._insert_task(
-            task_id="dvs_dispatcher_reserved",
-            status="pending",
-            celery_task_id="celery-reserved",
-            execution_owner_id=None,
-            execution_lease_until=None,
-            execution_heartbeat_at=None,
-            dispatch_status="published",
-            dispatch_reserved_at=now_local() - timedelta(seconds=601),
-        )
-        fake_app = _FakeCeleryApp(
-            _healthy_inspect(reserved={"worker-a": [{"id": "celery-reserved"}]})
-        )
-
-        with patch("app.db.get_db", self._get_db), patch("app.celery_app.app", fake_app):
-            reset = Dispatcher()._stale_once()
-
-        self.assertEqual(0, reset)
-        row = self._task("dvs_dispatcher_reserved")
-        self.assertEqual("celery-reserved", row.celery_task_id)
-
-    def test_aged_pending_dispatch_is_kept_when_celery_is_active(self):
-        self._insert_task(
-            task_id="dvs_dispatcher_active",
-            status="pending",
-            celery_task_id="celery-active",
-            execution_owner_id=None,
-            execution_lease_until=None,
-            execution_heartbeat_at=None,
-            dispatch_status="published",
-            dispatch_reserved_at=now_local() - timedelta(seconds=601),
-        )
-        fake_app = _FakeCeleryApp(
-            _healthy_inspect(active={"worker-a": [{"id": "celery-active"}]}, capacity=2)
-        )
-
-        with patch("app.db.get_db", self._get_db), patch("app.celery_app.app", fake_app):
-            reset = Dispatcher()._stale_once()
-
-        self.assertEqual(0, reset)
-        self.assertEqual("celery-active", self._task("dvs_dispatcher_active").celery_task_id)
-
-    def test_aged_pending_dispatch_is_kept_when_celery_is_scheduled(self):
-        self._insert_task(
-            task_id="dvs_dispatcher_scheduled",
-            status="pending",
-            celery_task_id="celery-scheduled",
-            execution_owner_id=None,
-            execution_lease_until=None,
-            execution_heartbeat_at=None,
-            dispatch_status="published",
-            dispatch_reserved_at=now_local() - timedelta(seconds=601),
-        )
-        fake_app = _FakeCeleryApp(
-            _healthy_inspect(
-                scheduled={"worker-a": [{"request": {"id": "celery-scheduled"}}]}
-            )
-        )
-
-        with patch("app.db.get_db", self._get_db), patch("app.celery_app.app", fake_app):
-            reset = Dispatcher()._stale_once()
-
-        self.assertEqual(0, reset)
-        self.assertEqual("celery-scheduled", self._task("dvs_dispatcher_scheduled").celery_task_id)
-
-    def test_aged_pending_dispatch_is_kept_when_workers_are_full(self):
-        self._insert_task(
-            task_id="dvs_dispatcher_full",
-            status="pending",
-            celery_task_id="celery-full",
-            execution_owner_id=None,
-            execution_lease_until=None,
-            execution_heartbeat_at=None,
-            dispatch_status="published",
-            dispatch_reserved_at=now_local() - timedelta(seconds=601),
-        )
-        fake_app = _FakeCeleryApp(
-            _healthy_inspect(active={"worker-a": [{"id": "other-job"}]}, capacity=1)
-        )
-
-        with patch("app.db.get_db", self._get_db), patch("app.celery_app.app", fake_app):
-            reset = Dispatcher()._stale_once()
-
-        self.assertEqual(0, reset)
-        self.assertEqual("celery-full", self._task("dvs_dispatcher_full").celery_task_id)
-
-    def test_aged_pending_dispatch_is_kept_when_inspect_fails(self):
-        self._insert_task(
-            task_id="dvs_dispatcher_inspect_error",
-            status="pending",
-            celery_task_id="celery-inspect-error",
-            execution_owner_id=None,
-            execution_lease_until=None,
-            execution_heartbeat_at=None,
-            dispatch_status="published",
-            dispatch_reserved_at=now_local() - timedelta(seconds=601),
-        )
-        fake_app = _FakeCeleryApp(_FakeInspect(error=RuntimeError("inspect timeout")))
-
-        with patch("app.db.get_db", self._get_db), patch("app.celery_app.app", fake_app):
-            reset = Dispatcher()._stale_once()
-
-        self.assertEqual(0, reset)
-        self.assertEqual(
-            "celery-inspect-error",
-            self._task("dvs_dispatcher_inspect_error").celery_task_id,
-        )
+        self.assertIn("legacy dispatch recovery", row.last_dispatch_error)
 
     def test_old_celery_message_cannot_claim_a_republished_task(self):
         self._insert_task(
@@ -479,6 +440,32 @@ class DispatcherTests(unittest.TestCase):
             row = db.query(AppDvsTask).filter_by(task_id="dvs_dispatcher_current").first()
             self.assertEqual("worker-a", row.execution_owner_id)
             self.assertEqual("leased", row.dispatch_status)
+        finally:
+            db.close()
+
+    def test_delivery_handoff_records_worker_before_claim(self):
+        self._insert_task(
+            task_id="dvs_dispatcher_delivering",
+            status="pending",
+            celery_task_id="delivery-dispatch-id",
+            execution_owner_id=None,
+            execution_lease_until=None,
+            dispatch_status="published",
+        )
+        db = self.SessionLocal()
+        try:
+            self.assertTrue(
+                begin_delivery_handoff(
+                    db,
+                    "worker-a",
+                    "dvs_dispatcher_delivering",
+                    "delivery-dispatch-id",
+                )
+            )
+            row = db.query(AppDvsTask).filter_by(task_id="dvs_dispatcher_delivering").first()
+            self.assertEqual("delivering", row.dispatch_status)
+            self.assertEqual("worker-a", row.dispatch_delivery_worker_id)
+            self.assertIsNotNone(row.dispatch_delivery_started_at)
         finally:
             db.close()
 

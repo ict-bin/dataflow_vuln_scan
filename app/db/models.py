@@ -66,6 +66,9 @@ class AppDvsTask(Base):
     # API/status writes must not postpone lost-message recovery.
     dispatch_reserved_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     dispatch_published_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    dispatch_broker_epoch: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    dispatch_delivery_started_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    dispatch_delivery_worker_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     dispatch_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     last_dispatch_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 

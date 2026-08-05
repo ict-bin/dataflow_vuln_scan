@@ -221,6 +221,24 @@ _MIGRATIONS = [
     Migration(
         kind="column",
         table_name="secflow_app_dvs_tasks",
+        name="dispatch_broker_epoch",
+        statement="ALTER TABLE secflow_app_dvs_tasks ADD COLUMN dispatch_broker_epoch VARCHAR(64) NULL",
+    ),
+    Migration(
+        kind="column",
+        table_name="secflow_app_dvs_tasks",
+        name="dispatch_delivery_started_at",
+        statement="ALTER TABLE secflow_app_dvs_tasks ADD COLUMN dispatch_delivery_started_at DATETIME NULL",
+    ),
+    Migration(
+        kind="column",
+        table_name="secflow_app_dvs_tasks",
+        name="dispatch_delivery_worker_id",
+        statement="ALTER TABLE secflow_app_dvs_tasks ADD COLUMN dispatch_delivery_worker_id VARCHAR(128) NULL",
+    ),
+    Migration(
+        kind="column",
+        table_name="secflow_app_dvs_tasks",
         name="dispatch_attempts",
         statement="ALTER TABLE secflow_app_dvs_tasks ADD COLUMN dispatch_attempts INT NOT NULL DEFAULT 0",
     ),
@@ -237,6 +255,16 @@ _MIGRATIONS = [
         statement=(
             "CREATE INDEX ix_dvs_tasks_dispatch_pending "
             "ON secflow_app_dvs_tasks (status, is_deleted, celery_task_id, created_at)"
+        ),
+    ),
+    Migration(
+        kind="index",
+        table_name="secflow_app_dvs_tasks",
+        name="ix_dvs_tasks_dispatch_recovery",
+        statement=(
+            "CREATE INDEX ix_dvs_tasks_dispatch_recovery "
+            "ON secflow_app_dvs_tasks "
+            "(status, is_deleted, dispatch_status, dispatch_reserved_at, dispatch_delivery_started_at)"
         ),
     ),
 ]

@@ -45,14 +45,27 @@ def run_dvs_task(self, task_id: str) -> dict:
     logger.info("run_dvs_task start task=%s celery_id=%s pgid=%s pod=%s", task_id, celery_id, pgid, WORKER_ID)
 
     from app.db import get_db
-    from app.service.execution_coordinator import claim_specific_task
+    from app.service.execution_coordinator import begin_delivery_handoff, claim_specific_task
     from app.service.task_service import get_task_service
 
     db_gen = get_db()
     db = next(db_gen)
     claimed = None
     try:
-        claimed = claim_specific_task(db, WORKER_ID, task_id, celery_task_id=celery_id)
+        if begin_delivery_handoff(db, WORKER_ID, task_id, celery_id):
+            claimed = claim_specific_task(db, WORKER_ID, task_id, celery_task_id=celery_id)
+        else:
+            # Preserve acks_late recovery for a redelivered message whose task
+            # is already running but whose lease expired. Pending tasks must
+            # first pass the delivery CAS above, otherwise an old duplicate
+            # message could bypass the observable delivering handoff.
+            claimed = claim_specific_task(
+                db,
+                WORKER_ID,
+                task_id,
+                celery_task_id=celery_id,
+                allow_pending=False,
+            )
     finally:
         try:
             next(db_gen)
