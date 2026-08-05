@@ -297,6 +297,34 @@ class DispatcherTests(unittest.TestCase):
         self.assertIsNone(row.dispatch_reserved_at)
         self.assertIn("aged out", row.last_dispatch_error)
 
+    def test_legacy_aged_pending_dispatch_uses_updated_at_fallback_once(self):
+        self._insert_task(
+            task_id="dvs_dispatcher_legacy_aged",
+            status="pending",
+            celery_task_id="celery-legacy-aged",
+            execution_owner_id=None,
+            execution_lease_until=None,
+            execution_heartbeat_at=None,
+            dispatch_status="pending",
+            dispatch_reserved_at=None,
+        )
+        db = self.SessionLocal()
+        try:
+            row = db.query(AppDvsTask).filter_by(task_id="dvs_dispatcher_legacy_aged").first()
+            row.updated_at = now_local() - timedelta(seconds=601)
+            db.commit()
+        finally:
+            db.close()
+        fake_app = _FakeCeleryApp(_healthy_inspect(capacity=2))
+
+        with patch("app.db.get_db", self._get_db), patch("app.celery_app.app", fake_app):
+            reset = Dispatcher()._stale_once()
+
+        self.assertEqual(1, reset)
+        row = self._task("dvs_dispatcher_legacy_aged")
+        self.assertIsNone(row.celery_task_id)
+        self.assertIn("legacy pending dispatch aged out", row.last_dispatch_error)
+
     def test_aged_pending_dispatch_is_kept_when_celery_knows_the_message(self):
         self._insert_task(
             task_id="dvs_dispatcher_reserved",

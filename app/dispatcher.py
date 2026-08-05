@@ -17,6 +17,8 @@ import uuid
 from datetime import timedelta
 from typing import Any
 
+from sqlalchemy import and_, or_
+
 logger = logging.getLogger("dvs.dispatcher")
 
 PUMP_INTERVAL = float(os.environ.get("DVS_DISPATCHER_PUMP_INTERVAL", "3"))
@@ -322,10 +324,20 @@ class Dispatcher:
         return reset
 
     def _recover_aged_pending_dispatches(self, db, celery_app, now) -> int:
-        """Release lost pending dispatch reservations only when recovery is safe."""
+        """Release lost pending dispatch reservations only when recovery is safe.
+
+        dispatch_reserved_at is authoritative for new records. The updated_at fallback
+        exists only for pre-migration pending rows which already had a celery id when
+        this deployment introduced dispatch reservation timestamps.
+        """
         from app.db.models import AppDvsTask
 
         cutoff = now - timedelta(seconds=PENDING_CELERY_STALE_SECONDS)
+        dispatch_aged = AppDvsTask.dispatch_reserved_at < cutoff
+        legacy_dispatch_aged = and_(
+            AppDvsTask.dispatch_reserved_at.is_(None),
+            AppDvsTask.updated_at < cutoff,
+        )
         rows = (
             db.query(AppDvsTask)
             .filter(
@@ -334,10 +346,12 @@ class Dispatcher:
                 AppDvsTask.celery_task_id.is_not(None),
                 AppDvsTask.execution_owner_id.is_(None),
                 AppDvsTask.execution_lease_until.is_(None),
-                AppDvsTask.dispatch_reserved_at.is_not(None),
-                AppDvsTask.dispatch_reserved_at < cutoff,
+                or_(dispatch_aged, legacy_dispatch_aged),
             )
-            .order_by(AppDvsTask.dispatch_reserved_at.asc())
+            .order_by(
+                AppDvsTask.dispatch_reserved_at.asc(),
+                AppDvsTask.updated_at.asc(),
+            )
             .limit(PENDING_RECOVERY_BATCH)
             .all()
         )
@@ -384,17 +398,33 @@ class Dispatcher:
                 continue
             if dispatch_id in known_ids:
                 continue
+            is_legacy_dispatch = row.dispatch_reserved_at is None
             # Match the old id in the WHERE clause so an overlapping claim/retry
             # can never have its newer reservation erased.
-            changed = db.query(AppDvsTask).filter(
+            conditions = [
                 AppDvsTask.task_id == row.task_id,
                 AppDvsTask.status == "pending",
                 AppDvsTask.is_deleted.is_(False),
                 AppDvsTask.celery_task_id == dispatch_id,
                 AppDvsTask.execution_owner_id.is_(None),
                 AppDvsTask.execution_lease_until.is_(None),
-                AppDvsTask.dispatch_reserved_at.is_not(None),
-                AppDvsTask.dispatch_reserved_at < cutoff,
+            ]
+            if is_legacy_dispatch:
+                conditions.extend(
+                    [
+                        AppDvsTask.dispatch_reserved_at.is_(None),
+                        AppDvsTask.updated_at < cutoff,
+                    ]
+                )
+            else:
+                conditions.extend(
+                    [
+                        AppDvsTask.dispatch_reserved_at.is_not(None),
+                        AppDvsTask.dispatch_reserved_at < cutoff,
+                    ]
+                )
+            changed = db.query(AppDvsTask).filter(
+                *conditions,
             ).update(
                 {
                     AppDvsTask.celery_task_id: None,
@@ -402,6 +432,8 @@ class Dispatcher:
                     AppDvsTask.dispatch_reserved_at: None,
                     AppDvsTask.dispatch_published_at: None,
                     AppDvsTask.last_dispatch_error: (
+                        "legacy pending dispatch aged out: Celery message not observed; scheduled for retry"
+                        if is_legacy_dispatch else
                         "pending dispatch aged out: Celery message not observed; scheduled for retry"
                     ),
                 },
@@ -411,7 +443,8 @@ class Dispatcher:
                 released += 1
                 free_slots -= 1
                 logger.warning(
-                    "pending dispatch aged out task=%s celery_id=%s; released for retry",
+                    "%spending dispatch aged out task=%s celery_id=%s; released for retry",
+                    "legacy " if is_legacy_dispatch else "",
                     row.task_id,
                     dispatch_id,
                 )
