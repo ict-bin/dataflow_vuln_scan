@@ -46,8 +46,10 @@ E(msg){ g_msg=msg; }           → 外部变量, 跟踪 LLM 找 H/I:
 - E 场景: E 的出传播是外部变量 → H/I 分叉; E 的挖掘等 H、I 都完成 (后序一致)。
 
 ## 去重 (三重)
-到达函数时, 若 `(函数签名→func_id, 污点参数→taint_signature, 前置校验→
-pre_validation_signature)` 已在 `functions.processed_taints` 命中 → 跳过。
+到达函数时, 若 `(source_dir_id, parent_task_scope_id, 函数签名→func_id,
+污点参数→taint_signature)` 已在 `processed_taint_scope_claims` 命中 → 跳过。
+`parent_task_scope_id` 使用父任务 ID；没有父任务时统一使用
+`__dvs_no_parent_task__`。`processed_taints` 仍保留每个任务的审计记录。
 `store.find_processed_taint()` 实现。
 
 ## 当前进度 (准备阶段)

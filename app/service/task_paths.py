@@ -299,7 +299,11 @@ def cleanup_task_data(row: AppDvsTask, *, reason: str = "cleanup") -> None:
         try:
             from app.db.shared_mysql import create_shared_store
             for mode in ("complete", "autonomous", "dagflow"):
-                ms = create_shared_store(_MYSQL_URL, mode, source_root, task_id, project_id=project_id)
+                ms = create_shared_store(
+                    _MYSQL_URL, mode, source_root, task_id,
+                    project_id=project_id,
+                    parent_task_id=str(row.parent_task_id or ""),
+                )
                 if ms:
                     ms.clear_task_analysis()
         except Exception as e:

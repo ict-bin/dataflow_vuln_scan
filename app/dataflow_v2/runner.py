@@ -47,7 +47,11 @@ class DataflowV2Runner:
             url = db_cfg.url if db_cfg else \
                 "mysql+pymysql://root:Huawei12%23$@secflow-app-dataflow-vuln-scan-mysql.secflow-ns.svc.cluster.local:3306"
             project_id = getattr(self.cfg, "project_id", "") or ""
-            return create_shared_store(url, mode, self.cfg.cwd, self.task_id, project_id=project_id)
+            return create_shared_store(
+                url, mode, self.cfg.cwd, self.task_id,
+                project_id=project_id,
+                parent_task_id=getattr(self.cfg, "parent_task_id", "") or "",
+            )
         except Exception as e:
             logger.warning("create mysql store failed: %s", e)
             return None

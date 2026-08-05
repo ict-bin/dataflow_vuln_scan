@@ -279,7 +279,7 @@ class DfsOrchestrator:
     def _process(self, func: FunctionRecord, taint_params: TaintParamInfo,
                  pre_validations: list[Validation], base_session: str,
                  ctx: PathContext, depth: int) -> list[Validation]:
-        # 1) 跨任务去重: 同一源码目录下, 任意任务已分析过该函数+该污点 → 跳过。
+        # 1) 跨任务去重: 同一源码目录且同一父任务范围内已有分析 → 跳过。
         pre_val_sig = _validation_sig(pre_validations)
         _nts = _norm_taint_sig(taint_params.signature)
         _existing = self.store.find_processed_taint(func.func_id, _nts, pre_val_sig)

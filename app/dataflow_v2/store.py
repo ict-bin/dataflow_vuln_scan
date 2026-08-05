@@ -5,7 +5,7 @@ V2 引擎的所有数据全部存 MySQL, 不再使用 SQLite。
 数据分布:
   MySQL dvs_<source_dir_id> 库:
     functions / include_index / class_hierarchy / class_members / indexing_files
-    processed_taints / taints / propagations / orchestration
+    processed_taints / processed_taint_scope_claims / taints / propagations / orchestration
 
   MySQL dvs_<project_hash> 库 (MysqlGraphStore):
     dvs_task_graph_runs / nodes / edges / sessions
@@ -168,7 +168,7 @@ class DataflowStore:
             return names or []
         return []
 
-    # ── processed_taints (函数级去重, per-task 隔离) ──────────────────
+    # ── processed_taints (父任务范围内函数级去重 + 每任务审计) ─────────
     def add_processed_taint(self, func_id: str, pt: ProcessedTaint) -> None:
         """写入 processed_taint (func_id 级, per-task 隔离)。"""
         if not self._mysql:
@@ -178,9 +178,9 @@ class DataflowStore:
         self._mysql.v2_add_processed_taint(func_id, ts, tp_json, pt.sessions_path or "")
 
     def try_reserve_processed_taint(self, func_id: str, pt: ProcessedTaint) -> bool:
-        """跨任务原子占位: (source_dir_id, func_id, taint_signature) 级。
+        """跨任务原子占位: (source_dir_id, parent_task_scope_id, func_id, taint_signature) 级。
 
-        任意任务已分析过该函数+该污点 → 占位失败, 跳过。
+        仅同一父任务范围内的已有分析会使占位失败。
         """
         if not self._mysql:
             return True
@@ -198,9 +198,9 @@ class DataflowStore:
 
     def find_processed_taint(self, func_id: str, taint_signature: str,
                              pre_validation_signature: str = "") -> ProcessedTaint | None:
-        """跨任务去重: (source_dir_id, func_id, taint_signature) 级。
+        """跨任务去重: (source_dir_id, parent_task_scope_id, func_id, taint_signature) 级。
 
-        同一源码目录下任意任务已分析过该函数+该污点 → 跳过, 复用已有结果。
+        同一父任务范围内任意任务已分析过该函数+该污点 → 跳过并复用。
         """
         if not self._mysql:
             return None

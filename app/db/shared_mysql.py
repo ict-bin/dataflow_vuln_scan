@@ -5,6 +5,7 @@
   以 source_dir_id (sha1(source_root)[:16]) 为分区键
   源码信息表 (functions/include/class) 无 task_id, 共享不清
   分析记录表 (processed_taints/dag_*/taints/propagations/orchestration) 有 task_id, restart 清本任务的
+  V2 跨任务去重范围由 parent_task_scope_id 隔离
 
 当前只实现写 + 清理, 不实现读 (worker 读仍走 SQLite)。
 """
@@ -30,6 +31,13 @@ _MODE_DB = {
     "autonomous": "dvs_autonomous",
     "dagflow": "dvs_dagflow",
 }
+
+NO_PARENT_TASK_SCOPE_ID = "__dvs_no_parent_task__"
+
+
+def normalize_parent_task_scope_id(parent_task_id: str | None) -> str:
+    """把父任务归属归一为稳定的跨任务去重范围。"""
+    return str(parent_task_id or "").strip() or NO_PARENT_TASK_SCOPE_ID
 
 _DDL_NO_TASK = """
 CREATE TABLE IF NOT EXISTS functions (
@@ -88,6 +96,17 @@ CREATE TABLE IF NOT EXISTS processed_taints (
 CREATE INDEX idx_processed_taints ON processed_taints(func_id, taint_signature);
 CREATE INDEX idx_pt_task ON processed_taints(task_id);
 ALTER TABLE processed_taints MODIFY COLUMN sessions_path VARCHAR(512);
+CREATE TABLE IF NOT EXISTS processed_taint_scope_claims (
+    parent_task_scope_id VARCHAR(128) NOT NULL,
+    func_id             VARCHAR(128) NOT NULL,
+    taint_signature     VARCHAR(128) NOT NULL,
+    owner_task_id       VARCHAR(64) NOT NULL,
+    taint_params        TEXT,
+    sessions_path       VARCHAR(512),
+    claimed_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (parent_task_scope_id, func_id, taint_signature)
+);
+CREATE INDEX idx_pt_scope_owner ON processed_taint_scope_claims(owner_task_id);
 CREATE TABLE IF NOT EXISTS taints (
     taint_id            VARCHAR(128) NOT NULL,
     func_id             VARCHAR(128) NOT NULL,
@@ -205,8 +224,7 @@ CREATE TABLE IF NOT EXISTS dag_meta (
 """
 
 _V2_TASK_TABLES = ["processed_taints", "taints", "propagations", "orchestration"]
-# processed_taints 跨任务共享去重 (find/try_reserve 不含 task_id),
-# 但 restart/delete 时清本任务的记录 (WHERE task_id=:tid), 不影响其他任务
+# processed_taints 保留每任务审计；跨任务占位由 scope claim 表负责。
 _DAG_TASK_TABLES = ["dag_processed_taints", "dag_nodes", "dag_edges", "dag_meta"]
 
 
@@ -219,9 +237,10 @@ class SharedMysqlStore(MysqlReadMixin):
     """
 
     def __init__(self, mysql_url: str, mode: str, source_root: str, task_id: str,
-                 project_id: str = "") -> None:
+                 project_id: str = "", parent_task_id: str = "") -> None:
         self.source_dir_id = hashlib.sha1(source_root.encode("utf-8")).hexdigest()[:16]
         self.task_id = task_id
+        self.parent_task_scope_id = normalize_parent_task_scope_id(parent_task_id)
         self.mode = mode
         # 每个源码目录独立一个数据库: dvs_<source_dir_id>
         self.db_name = f"dvs_{self.source_dir_id}"
@@ -477,8 +496,16 @@ class SharedMysqlStore(MysqlReadMixin):
                         {"tid": self.task_id})
             except Exception as e:
                 logger.warning("[shared_mysql] clear %s failed: %s", t, str(e)[:120])
-        logger.info("[shared_mysql] cleared task %s analysis records (mode=%s, source_dir=%s, tables=%s)",
-                    self.task_id, self.mode, self.source_dir_id, tables)
+        if self.mode in ("complete", "autonomous"):
+            try:
+                with self._engine.begin() as conn:
+                    conn.execute(sa_text(
+                        "DELETE FROM processed_taint_scope_claims WHERE owner_task_id=:tid"),
+                        {"tid": self.task_id})
+            except Exception as e:
+                logger.warning("[shared_mysql] clear scope claims failed: %s", str(e)[:120])
+        logger.info("[shared_mysql] cleared task %s analysis records (mode=%s, source_dir=%s, parent_scope=%s, tables=%s)",
+                    self.task_id, self.mode, self.source_dir_id, self.parent_task_scope_id, tables)
 
     # ── 源码信息 (无 task_id, 共享) ──────────────────────────────────
 
@@ -555,20 +582,17 @@ class SharedMysqlStore(MysqlReadMixin):
                 {"fid": func_id, "ts": taint_sig, "tid": self.task_id})
             conn.commit()
 
-    # ── V2 模式专用: func_id 级去重 (per-task 隔离) ──────────────────
+    # ── V2 模式专用: 父任务范围内的 func_id 级去重 ──────────────────
     def v2_find_processed_taint(self, func_id: str, taint_sig: str = "") -> ProcessedTaint | None:
-        """V2 跨任务去重: (func_id, taint_signature) 级。
-
-        同一源码目录下, 任意任务已分析过该函数+该污点 → 后续任务跳过。
-        返回的 ProcessedTaint.source_task_id 记录是哪个任务分析的。
-        """
+        """V2 跨任务去重: (parent_task_scope_id, func_id, taint_signature) 级。"""
         try:
             with self._engine.connect() as conn:
                 row = conn.execute(sa_text(
-                    "SELECT taint_signature, taint_params, sessions_path, task_id "
-                    "FROM processed_taints "
-                    "WHERE func_id=:fid AND taint_signature=:ts LIMIT 1"),
-                    {"fid": func_id, "ts": taint_sig}).fetchone()
+                    "SELECT taint_signature, taint_params, sessions_path, owner_task_id "
+                    "FROM processed_taint_scope_claims "
+                    "WHERE parent_task_scope_id=:scope AND func_id=:fid "
+                    "AND taint_signature=:ts LIMIT 1"),
+                    {"scope": self.parent_task_scope_id, "fid": func_id, "ts": taint_sig}).fetchone()
                 if row is None:
                     return None
                 m = row._mapping
@@ -578,51 +602,54 @@ class SharedMysqlStore(MysqlReadMixin):
                     pre_validations=[],
                     pre_validation_signature="",
                     sessions_path=m.get("sessions_path") or "",
-                    source_task_id=m.get("task_id") or "")
+                    source_task_id=m.get("owner_task_id") or "")
         except Exception:
             logger.warning("v2_find_processed_taint failed func_id=%s", func_id, exc_info=True)
             return None
 
     def v2_try_reserve_processed_taint(self, func_id: str, taint_sig: str,
                                        taint_params: str = "[]", sessions_path: str = "") -> bool:
-        """V2 跨任务原子占位: INSERT ... WHERE NOT EXISTS。
-
-        去重键: (func_id, taint_signature) — 不含 task_id。
-        任意任务已分析过该函数+该污点 → INSERT 被跳过, 返回 False。
-        """
+        """V2 父任务范围内原子占位，并保留每任务审计记录。"""
         try:
-            with self._engine.connect() as conn:
+            with self._engine.begin() as conn:
                 result = conn.execute(sa_text(
+                    "INSERT IGNORE INTO processed_taint_scope_claims "
+                    "(parent_task_scope_id, func_id, taint_signature, owner_task_id, taint_params, sessions_path) "
+                    "VALUES (:scope,:fid,:ts,:tid,:tp,:sp)"),
+                    {"scope": self.parent_task_scope_id, "fid": func_id, "ts": taint_sig,
+                     "tid": self.task_id, "tp": taint_params, "sp": sessions_path})
+                if result.rowcount != 1:
+                    return False
+                conn.execute(sa_text(
                     "INSERT INTO processed_taints "
                     "(func_id, taint_signature, task_id, taint_params, sessions_path) "
-                    "SELECT :fid, :ts, :tid, :tp, :sp "
-                    "WHERE NOT EXISTS ("
-                    "  SELECT 1 FROM processed_taints "
-                    "  WHERE func_id=:fid AND taint_signature=:ts"
-                    ")"),
-                    {"fid": func_id, "ts": taint_sig,
-                     "tid": self.task_id, "tp": taint_params, "sp": sessions_path})
-                conn.commit()
-                return result.rowcount == 1
+                    "VALUES (:fid,:ts,:tid,:tp,:sp) "
+                    "ON DUPLICATE KEY UPDATE taint_params=VALUES(taint_params), "
+                    "sessions_path=VALUES(sessions_path), analyzed_at=CURRENT_TIMESTAMP"),
+                    {"fid": func_id, "ts": taint_sig, "tid": self.task_id,
+                     "tp": taint_params, "sp": sessions_path})
+                return True
         except Exception:
             logger.warning("v2_try_reserve_processed_taint failed func_id=%s", func_id, exc_info=True)
             return False
 
     def v2_delete_processed_taint(self, func_id: str, taint_sig: str = "") -> None:
-        """V2 删除占位: 仅删本任务的记录 (分析失败重试)。
-
-        去重键不含 task_id (跨任务共享), 但删除只删自己的, 不影响其他任务。
-        """
-        with self._engine.connect() as conn:
+        """V2 删除本任务在本父任务范围内的占位及审计记录。"""
+        with self._engine.begin() as conn:
             conn.execute(sa_text(
                 "DELETE FROM processed_taints "
                 "WHERE func_id=:fid AND taint_signature=:ts AND task_id=:tid"),
                 {"fid": func_id, "ts": taint_sig, "tid": self.task_id})
-            conn.commit()
+            conn.execute(sa_text(
+                "DELETE FROM processed_taint_scope_claims "
+                "WHERE parent_task_scope_id=:scope AND func_id=:fid "
+                "AND taint_signature=:ts AND owner_task_id=:tid"),
+                {"scope": self.parent_task_scope_id, "fid": func_id,
+                 "ts": taint_sig, "tid": self.task_id})
 
     def v2_add_processed_taint(self, func_id: str, taint_sig: str,
                                taint_params: str = "[]", sessions_path: str = "") -> None:
-        """V2 写入 processed_taint (func_id 级, per-task)。"""
+        """V2 写入父任务范围 claim 与每任务审计。"""
         self.v2_try_reserve_processed_taint(func_id, taint_sig, taint_params, sessions_path)
 
     # ── V2 计数方法 (诊断用) ────────────────────────────────────────
@@ -784,10 +811,13 @@ def dispose_engine(self):
 
 
 def create_shared_store(mysql_url: str, mode: str, source_root: str, task_id: str,
-                          project_id: str = "") -> SharedMysqlStore | None:
+                          project_id: str = "", parent_task_id: str = "") -> SharedMysqlStore | None:
     """工厂: 创建 SharedMysqlStore, 失败返回 None (不影响主流程)。"""
     try:
-        return SharedMysqlStore(mysql_url, mode, source_root, task_id, project_id=project_id)
+        return SharedMysqlStore(
+            mysql_url, mode, source_root, task_id,
+            project_id=project_id, parent_task_id=parent_task_id,
+        )
     except Exception as e:
         logger.warning("create SharedMysqlStore failed (mode=%s): %s", mode, e)
         return None
