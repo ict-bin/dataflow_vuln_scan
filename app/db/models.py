@@ -62,6 +62,12 @@ class AppDvsTask(Base):
     execution_epoch: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     control_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     dispatch_status: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    # Scheduler-owned dispatch state. It is intentionally distinct from updated_at:
+    # API/status writes must not postpone lost-message recovery.
+    dispatch_reserved_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    dispatch_published_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    dispatch_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_dispatch_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     vuln_total_count: Mapped[int] = mapped_column(Integer, nullable=False, default=-1)
     vuln_reported_count: Mapped[int] = mapped_column(Integer, nullable=False, default=-1)

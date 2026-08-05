@@ -272,7 +272,7 @@ def persist_finding(
         level="info",
         message=(
             f"发现漏洞并已落库: {data['title']} | 类型={data['vuln_type']} | "
-            f"级别={_severity_label(data["severity"])} | 位置={fsrc}:{fline} | 摘要={_preview_text(data['summary']) or '-'}"
+            f"级别={_severity_label(data['severity'])} | 位置={fsrc}:{fline} | 摘要={_preview_text(data['summary']) or '-'}"
         ),
         finding_id=finding_id,
         function_name=ffn,

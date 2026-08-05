@@ -52,7 +52,7 @@ def run_dvs_task(self, task_id: str) -> dict:
     db = next(db_gen)
     claimed = None
     try:
-        claimed = claim_specific_task(db, WORKER_ID, task_id)
+        claimed = claim_specific_task(db, WORKER_ID, task_id, celery_task_id=celery_id)
     finally:
         try:
             next(db_gen)

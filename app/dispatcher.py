@@ -1,8 +1,8 @@
-"""DVS 调度器侧车: DB→Celery 泵 + 启动重置 + stale 扫描。
+"""DVS 调度器侧车: DB→Celery 泵 + stale 扫描。
 
 跑在 scheduler pod (与 Redis 同 pod)。纯 threading, 无 asyncio。
-DB 是任务真相, Redis 是临时队列; Redis 丢/重启 → _startup_reset 全 running→pending + 重新发布。
-worker 死亡 → _stale_loop 用 inspect.active() 找孤儿 running → 重置重排。
+DB 是任务真相, Redis 是临时队列。pump 先在 DB 原子占位再发布，避免重复消息。
+worker 死亡由心跳 stale 恢复；已占位但丢失的 pending 消息由独立老化恢复。
 
 入口: python -m app.dispatcher
 """
@@ -13,6 +13,8 @@ import os
 import threading
 import time
 import json
+import uuid
+from datetime import timedelta
 from typing import Any
 
 logger = logging.getLogger("dvs.dispatcher")
@@ -22,6 +24,7 @@ STALE_INTERVAL = float(os.environ.get("DVS_DISPATCHER_STALE_INTERVAL", "30"))
 PUMP_BATCH = int(os.environ.get("DVS_DISPATCHER_PUMP_BATCH", "20"))
 STALE_HEARTBEAT_SECONDS = int(os.environ.get("DVS_DISPATCHER_STALE_HEARTBEAT_SECONDS", "60"))  # 60s 无心跳=卡死
 PENDING_CELERY_STALE_SECONDS = int(os.environ.get("DVS_PENDING_CELERY_STALE_SECONDS", "600"))  # 10min 未消费=重投
+PENDING_RECOVERY_BATCH = int(os.environ.get("DVS_PENDING_RECOVERY_BATCH", "20"))
 INSPECT_TIMEOUT = float(os.environ.get("DVS_DISPATCHER_INSPECT_TIMEOUT", "3"))
 DEBUG_DISPATCH_INTERVAL = float(os.environ.get("DVS_DISPATCHER_DEBUG_INTERVAL", "15"))
 DEBUGGER_HOST = os.environ.get("DVS_DEBUGGER_HOST", "secflow-app-dataflow-vuln-scan-debugger")
@@ -35,9 +38,56 @@ def _collect_known_celery_ids(payload: Any) -> set[str]:
     for tasks in (payload or {}).values():
         for task in (tasks or []):
             cid = task.get("id") if isinstance(task, dict) else None
+            # Celery inspect.scheduled() returns {"request": {"id": ...}}
+            # while active/reserved normally expose the id at the top level.
+            if not cid and isinstance(task, dict):
+                request = task.get("request")
+                cid = request.get("id") if isinstance(request, dict) else None
             if cid:
                 known_ids.add(str(cid))
     return known_ids
+
+
+def _healthy_worker_capacity(
+    ping_payload: Any,
+    stats_payload: Any,
+    active_payload: Any,
+) -> int | None:
+    """Return free Celery slots, or None when inspect cannot prove worker health."""
+    if not isinstance(ping_payload, dict) or not ping_payload:
+        return None
+
+    healthy_workers = [
+        str(worker_name)
+        for worker_name, pong in ping_payload.items()
+        if isinstance(pong, dict) and pong.get("ok") == "pong"
+    ]
+    if not healthy_workers:
+        return None
+
+    if not isinstance(stats_payload, dict) or not isinstance(active_payload, dict):
+        return None
+
+    total_capacity = 0
+    active_count = 0
+    for worker_name in healthy_workers:
+        stats = stats_payload.get(worker_name)
+        if not isinstance(stats, dict):
+            return None
+        try:
+            capacity = int((stats.get("pool") or {}).get("max-concurrency", 1))
+        except (TypeError, ValueError):
+            logger.warning("invalid celery worker capacity worker=%s stats=%r", worker_name, stats)
+            return None
+        if capacity < 1:
+            logger.warning("invalid non-positive celery worker capacity worker=%s capacity=%s", worker_name, capacity)
+            return None
+        active = active_payload.get(worker_name)
+        if not isinstance(active, list):
+            return None
+        total_capacity += capacity
+        active_count += len(active)
+    return max(0, total_capacity - active_count)
 
 
 class Dispatcher:
@@ -61,47 +111,12 @@ class Dispatcher:
     def stop(self) -> None:
         self._stop.set()
 
-    # ── 启动重置: Redis 丢队列 → running 全回 pending + pending 的 stale celery_id 清掉 (重发) ──
+    # ── 启动恢复: 不无条件清投递标记，避免 rollout 时重新制造重复消息 ──
     def _startup_reset(self) -> None:
-        from app.db import get_db
-        from app.db.models import AppDvsTask
-        from app.time_utils import now_local
-        db_gen = get_db()
-        db = next(db_gen)
-        try:
-            # running → pending (孤儿任务重排)
-            n_running = db.query(AppDvsTask).filter(
-                AppDvsTask.status == "running",
-                AppDvsTask.is_deleted.is_(False),
-            ).update(
-                {AppDvsTask.status: "pending",
-                 AppDvsTask.celery_task_id: None,
-                 AppDvsTask.execution_owner_id: None,
-                 AppDvsTask.execution_lease_until: None,
-                 AppDvsTask.dispatch_status: None},
-                synchronize_session=False,
-            )
-            # pending 但已有 celery_id (Redis 丢消息) → 清掉让 pump 重发
-            n_pending = db.query(AppDvsTask).filter(
-                AppDvsTask.status == "pending",
-                AppDvsTask.is_deleted.is_(False),
-                AppDvsTask.celery_task_id.is_not(None),
-            ).update(
-                {AppDvsTask.celery_task_id: None,
-                 AppDvsTask.execution_owner_id: None,
-                 AppDvsTask.execution_lease_until: None,
-                 AppDvsTask.dispatch_status: None},
-                synchronize_session=False,
-            )
-            db.commit()
-            if n_running or n_pending:
-                logger.warning("startup_reset: %d running→pending, %d pending stale celery_id cleared (redis queue rebuilt)",
-                               n_running, n_pending)
-        finally:
-            try:
-                next(db_gen)
-            except StopIteration:
-                logger.debug("dispatcher: startup_reset db generator closed")
+        logger.info(
+            "dispatcher startup: preserving pending dispatch reservations; "
+            "running tasks use heartbeat recovery and lost pending messages use aging recovery"
+        )
 
     # ── 泵: pending(celery_task_id IS NULL) → 发布到 Celery ──
     def _pump_loop(self) -> None:
@@ -116,6 +131,7 @@ class Dispatcher:
         from app.db import get_db
         from app.db.models import AppDvsTask
         from app.celery_tasks import run_dvs_task
+        from app.time_utils import now_local
         db_gen = get_db()
         db = next(db_gen)
         published = 0
@@ -125,6 +141,7 @@ class Dispatcher:
                 .filter(
                     AppDvsTask.status == "pending",
                     AppDvsTask.is_deleted.is_(False),
+                    AppDvsTask.celery_task_id.is_(None),
                 )
                 .order_by(AppDvsTask.created_at.asc())
                 .limit(PUMP_BATCH)
@@ -132,16 +149,100 @@ class Dispatcher:
             )
             for row in rows:
                 tid = row[0] if isinstance(row, tuple) else row.task_id
+                dispatch_id = uuid.uuid4().hex
+                reserved_at = now_local()
+                published_to_broker = False
                 try:
-                    ar = run_dvs_task.delay(tid)
-                    db.query(AppDvsTask).filter(AppDvsTask.task_id == tid).update({"celery_task_id": ar.id})
+                    # A DB compare-and-set, not the preceding SELECT, grants publication rights.
+                    # This keeps the behavior safe if a second scheduler is introduced later.
+                    reserved = db.query(AppDvsTask).filter(
+                        AppDvsTask.task_id == tid,
+                        AppDvsTask.status == "pending",
+                        AppDvsTask.is_deleted.is_(False),
+                        AppDvsTask.celery_task_id.is_(None),
+                    ).update(
+                        {
+                            AppDvsTask.celery_task_id: dispatch_id,
+                            AppDvsTask.dispatch_status: "publishing",
+                            AppDvsTask.dispatch_reserved_at: reserved_at,
+                            AppDvsTask.dispatch_published_at: None,
+                            AppDvsTask.dispatch_attempts: AppDvsTask.dispatch_attempts + 1,
+                            AppDvsTask.last_dispatch_error: None,
+                        },
+                        synchronize_session=False,
+                    )
+                    db.commit()
+                    if reserved != 1:
+                        continue
+
+                    run_dvs_task.apply_async(args=(tid,), task_id=dispatch_id)
+                    published_to_broker = True
+                    updated = db.query(AppDvsTask).filter(
+                        AppDvsTask.task_id == tid,
+                        AppDvsTask.celery_task_id == dispatch_id,
+                        AppDvsTask.dispatch_status == "publishing",
+                    ).update(
+                        {
+                            AppDvsTask.dispatch_status: "published",
+                            AppDvsTask.dispatch_published_at: now_local(),
+                            AppDvsTask.last_dispatch_error: None,
+                        },
+                        synchronize_session=False,
+                    )
                     db.commit()
                     published += 1
-                    logger.info("published task=%s celery_id=%s", tid, ar.id)
+                    if updated != 1:
+                        logger.info(
+                            "published task=%s celery_id=%s; task was claimed before publish acknowledgement",
+                            tid,
+                            dispatch_id,
+                        )
+                    else:
+                        logger.info("published task=%s celery_id=%s", tid, dispatch_id)
                 except Exception as exc:
-                    logger.warning("publish failed task=%s: %s (retry next loop)", row.task_id, exc)
                     db.rollback()
-                    break  # Redis 不可达, 下轮再试
+                    if published_to_broker:
+                        # Celery may already have accepted the message. Releasing the
+                        # DB reservation here would turn an acknowledgement-write
+                        # failure into a guaranteed duplicate publication.
+                        logger.exception(
+                            "publish acknowledgement update failed task=%s celery_id=%s; "
+                            "keeping reservation for aging recovery",
+                            tid,
+                            dispatch_id,
+                        )
+                        continue
+                    # Only release the reservation owned by this publication attempt.
+                    try:
+                        db.query(AppDvsTask).filter(
+                            AppDvsTask.task_id == tid,
+                            AppDvsTask.status == "pending",
+                            AppDvsTask.celery_task_id == dispatch_id,
+                            AppDvsTask.dispatch_status == "publishing",
+                        ).update(
+                            {
+                                AppDvsTask.celery_task_id: None,
+                                AppDvsTask.dispatch_status: "pending",
+                                AppDvsTask.dispatch_reserved_at: None,
+                                AppDvsTask.dispatch_published_at: None,
+                                AppDvsTask.last_dispatch_error: str(exc)[:4096],
+                            },
+                            synchronize_session=False,
+                        )
+                        db.commit()
+                    except Exception:
+                        db.rollback()
+                        logger.exception(
+                            "publish release failed task=%s celery_id=%s; aging recovery will handle it",
+                            tid,
+                            dispatch_id,
+                        )
+                    logger.exception(
+                        "publish failed task=%s celery_id=%s; reservation released for next pump",
+                        tid,
+                        dispatch_id,
+                    )
+                    continue
         finally:
             try:
                 next(db_gen)
@@ -165,8 +266,8 @@ class Dispatcher:
         from app.celery_app import app as celery_app
         from app.service.task_paths import cleanup_task_data
         from app.service.task_events import TaskEventLockTimeout
-        # 1. 取所有活 worker 已知的 celery_id
-        # DB lease 为死亡判定真相源 (不查 celery inspect, 避免 inspect 超时/worker 不可达误判):
+        # DB lease is the running-worker truth source. Pending-message recovery below
+        # uses inspect only to prove whether a published Celery id is still observable.
         # running + 心跳超时(lease 过期) = worker 死了 → revoke 兜底 + 清理 + 回 pending (pump 重发)
         db_gen = get_db()
         db = next(db_gen)
@@ -204,10 +305,13 @@ class Dispatcher:
                 row.execution_owner_id = None
                 row.execution_lease_until = None
                 row.dispatch_status = None
+                row.dispatch_reserved_at = None
+                row.dispatch_published_at = None
                 reset += 1
                 logger.warning("stale reset task=%s celery_id=%s hb_stale=%s (lease expired, worker dead, data cleaned)",
                                row.task_id, cid, heartbeat_stale)
-            # pending 任务: pump 每 3s 重发 (无 celery_id 门), 不需要 stale 恢复
+            pending_reset = self._recover_aged_pending_dispatches(db, celery_app, now)
+            reset += pending_reset
             if reset:
                 db.commit()
         finally:
@@ -216,6 +320,104 @@ class Dispatcher:
             except StopIteration:
                 logger.debug("dispatcher: stale_once db generator closed")
         return reset
+
+    def _recover_aged_pending_dispatches(self, db, celery_app, now) -> int:
+        """Release lost pending dispatch reservations only when recovery is safe."""
+        from app.db.models import AppDvsTask
+
+        cutoff = now - timedelta(seconds=PENDING_CELERY_STALE_SECONDS)
+        rows = (
+            db.query(AppDvsTask)
+            .filter(
+                AppDvsTask.status == "pending",
+                AppDvsTask.is_deleted.is_(False),
+                AppDvsTask.celery_task_id.is_not(None),
+                AppDvsTask.execution_owner_id.is_(None),
+                AppDvsTask.execution_lease_until.is_(None),
+                AppDvsTask.dispatch_reserved_at.is_not(None),
+                AppDvsTask.dispatch_reserved_at < cutoff,
+            )
+            .order_by(AppDvsTask.dispatch_reserved_at.asc())
+            .limit(PENDING_RECOVERY_BATCH)
+            .all()
+        )
+        if not rows:
+            return 0
+
+        try:
+            inspect = celery_app.control.inspect(timeout=INSPECT_TIMEOUT)
+            ping = inspect.ping()
+            stats = inspect.stats()
+            active = inspect.active()
+            reserved = inspect.reserved()
+            scheduled = inspect.scheduled()
+            free_slots = _healthy_worker_capacity(ping, stats, active)
+        except Exception:
+            logger.exception(
+                "pending dispatch aging inspect failed; skip recovery for %d task(s)",
+                len(rows),
+            )
+            return 0
+
+        if free_slots is None:
+            logger.warning(
+                "pending dispatch aging skipped: Celery worker health/capacity is incomplete; candidates=%d",
+                len(rows),
+            )
+            return 0
+        if free_slots <= 0:
+            logger.info(
+                "pending dispatch aging deferred: all healthy worker slots are busy; candidates=%d",
+                len(rows),
+            )
+            return 0
+
+        known_ids = (
+            _collect_known_celery_ids(active)
+            | _collect_known_celery_ids(reserved)
+            | _collect_known_celery_ids(scheduled)
+        )
+        released = 0
+        for row in rows:
+            dispatch_id = str(row.celery_task_id or "").strip()
+            if not dispatch_id:
+                continue
+            if dispatch_id in known_ids:
+                continue
+            # Match the old id in the WHERE clause so an overlapping claim/retry
+            # can never have its newer reservation erased.
+            changed = db.query(AppDvsTask).filter(
+                AppDvsTask.task_id == row.task_id,
+                AppDvsTask.status == "pending",
+                AppDvsTask.is_deleted.is_(False),
+                AppDvsTask.celery_task_id == dispatch_id,
+                AppDvsTask.execution_owner_id.is_(None),
+                AppDvsTask.execution_lease_until.is_(None),
+                AppDvsTask.dispatch_reserved_at.is_not(None),
+                AppDvsTask.dispatch_reserved_at < cutoff,
+            ).update(
+                {
+                    AppDvsTask.celery_task_id: None,
+                    AppDvsTask.dispatch_status: "pending",
+                    AppDvsTask.dispatch_reserved_at: None,
+                    AppDvsTask.dispatch_published_at: None,
+                    AppDvsTask.last_dispatch_error: (
+                        "pending dispatch aged out: Celery message not observed; scheduled for retry"
+                    ),
+                },
+                synchronize_session=False,
+            )
+            if changed:
+                released += 1
+                free_slots -= 1
+                logger.warning(
+                    "pending dispatch aged out task=%s celery_id=%s; released for retry",
+                    row.task_id,
+                    dispatch_id,
+                )
+                if free_slots <= 0:
+                    break
+        return released
 
     # ── debugger 调度: 扫终态失败任务 → 发给 debugger (scheduler 职责) ──
     def _debug_dispatch_loop(self) -> None:

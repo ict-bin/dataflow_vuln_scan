@@ -57,8 +57,8 @@ def _parse_args(source_root: str, path: Path) -> list[str]:
     return lang + [
         "-fsyntax-only", "-ffreestanding", "-fno-builtin", "-Wno-everything",
         f"-I{source_root}",
-        f"-I{Path(source_root) / "src"}",
-        f"-I{Path(source_root) / "include"}",
+        f"-I{Path(source_root) / 'src'}",
+        f"-I{Path(source_root) / 'include'}",
     ]
 
 

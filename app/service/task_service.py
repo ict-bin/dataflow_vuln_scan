@@ -1541,6 +1541,9 @@ class TaskService:
         row.control_version = int(row.control_version or 0) + 1
         row.dispatch_status = "pending"
         row.celery_task_id = None  # dispatcher 泵会重新发布
+        row.dispatch_reserved_at = None
+        row.dispatch_published_at = None
+        row.last_dispatch_error = None
         flag_modified(row, "task_config_json")
         flag_modified(row, "latest_abnormal_reason_json")
         db.commit(); db.refresh(row)
@@ -1654,6 +1657,9 @@ class TaskService:
         row.execution_heartbeat_at = None
         row.dispatch_status = None
         row.celery_task_id = None
+        row.dispatch_reserved_at = None
+        row.dispatch_published_at = None
+        row.last_dispatch_error = None
         # 清空运行结果大字段，保留任务输入定义以支持后续 restart/resume。
         row.stages_json = None
         row.result_json = None

@@ -206,6 +206,39 @@ _MIGRATIONS = [
         name="celery_task_id",
         statement="ALTER TABLE secflow_app_dvs_tasks ADD COLUMN celery_task_id VARCHAR(64) NULL",
     ),
+    Migration(
+        kind="column",
+        table_name="secflow_app_dvs_tasks",
+        name="dispatch_reserved_at",
+        statement="ALTER TABLE secflow_app_dvs_tasks ADD COLUMN dispatch_reserved_at DATETIME NULL",
+    ),
+    Migration(
+        kind="column",
+        table_name="secflow_app_dvs_tasks",
+        name="dispatch_published_at",
+        statement="ALTER TABLE secflow_app_dvs_tasks ADD COLUMN dispatch_published_at DATETIME NULL",
+    ),
+    Migration(
+        kind="column",
+        table_name="secflow_app_dvs_tasks",
+        name="dispatch_attempts",
+        statement="ALTER TABLE secflow_app_dvs_tasks ADD COLUMN dispatch_attempts INT NOT NULL DEFAULT 0",
+    ),
+    Migration(
+        kind="column",
+        table_name="secflow_app_dvs_tasks",
+        name="last_dispatch_error",
+        statement="ALTER TABLE secflow_app_dvs_tasks ADD COLUMN last_dispatch_error TEXT NULL",
+    ),
+    Migration(
+        kind="index",
+        table_name="secflow_app_dvs_tasks",
+        name="ix_dvs_tasks_dispatch_pending",
+        statement=(
+            "CREATE INDEX ix_dvs_tasks_dispatch_pending "
+            "ON secflow_app_dvs_tasks (status, is_deleted, celery_task_id, created_at)"
+        ),
+    ),
 ]
 
 

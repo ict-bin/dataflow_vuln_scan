@@ -122,11 +122,19 @@ def _clean_restart_update_fields(row: AppDvsTask, *, reason: str) -> dict:
     }
 
 
-def claim_specific_task(db: Session, owner_id: str, task_id: str) -> ClaimedTask | None:
+def claim_specific_task(
+    db: Session,
+    owner_id: str,
+    task_id: str,
+    *,
+    celery_task_id: str | None = None,
+) -> ClaimedTask | None:
     """Celery worker 收到 LAUNCH 后按 task_id 认领 (非竞争性)。
 
     与 v1 claim (已删) 的区别: 不扫表竞争, 只认领指定 task_id。
     用于 Celery 消费: dispatcher 已把该 task 路由到本 worker, 这里设 owner/epoch/lease。
+    当传入 celery_task_id 时，它必须与当前 DB 投递 ID 一致；旧 Redis 消息不能
+    认领已经重新投递的任务。没有 Celery ID 的内部兼容调用保持原有语义。
     只认领 pending (正常) 或 running 但租约过期 (acks_late 重投/孤儿);
     running 且租约新鲜 → 返回 None (别的活 worker 在跑, 本消息作废 ack 掉)。
     """
@@ -140,6 +148,8 @@ def claim_specific_task(db: Session, owner_id: str, task_id: str) -> ClaimedTask
         .first()
     )
     if candidate is None:
+        return None
+    if celery_task_id is not None and candidate.celery_task_id != celery_task_id:
         return None
     status = str(candidate.status or "pending")
     if status == "pending":
@@ -178,6 +188,8 @@ def claim_specific_task(db: Session, owner_id: str, task_id: str) -> ClaimedTask
             AppDvsTask.id == candidate.id,
             AppDvsTask.is_deleted.is_(False),
             AppDvsTask.status == expected_status,
+            AppDvsTask.celery_task_id == celery_task_id
+            if celery_task_id is not None else AppDvsTask.id.is_not(None),
             ((AppDvsTask.execution_lease_until.is_(None)) | (AppDvsTask.execution_lease_until < now))
             if expected_status == "running" else AppDvsTask.status.is_not(None),
         )
