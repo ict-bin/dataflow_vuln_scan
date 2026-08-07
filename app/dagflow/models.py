@@ -336,6 +336,13 @@ class Finding:
     entry_point: str = ""
     trigger_path: str = ""
     evidence: str = ""
+    source_file: str = ""
+    function_name: str = ""
+    line: str = ""
+    code_snippet: str = ""
+    code_explanation: str = ""
+    fix_suggestion: str = ""
+    poc: str = ""
     location_func: str = ""
     location_line: str = ""
     dag_path: list[dict] = field(default_factory=list)

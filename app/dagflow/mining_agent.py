@@ -39,7 +39,9 @@ class MiningAgent:
     def __init__(self, *, config: Any, store: DagflowStore, sessions_dir: Path,
                  vuln_store: Any, run_id: str, func_lookup: Any,
                  on_event: Any = None, task_id: str = "",
-                 graph_recorder: Any = None) -> None:
+                 graph_recorder: Any = None,
+                 vuln_root: Path | None = None,
+                 source_root: str = "") -> None:
         self.config = config
         self.store = store
         self.sessions_dir = Path(sessions_dir)
@@ -49,7 +51,8 @@ class MiningAgent:
         self.on_event = on_event
         self.graph_recorder = graph_recorder
         self.task_id = task_id
-        self.source_root = getattr(config, "cwd", "") or getattr(config, "source_root", "")
+        self.vuln_root = Path(vuln_root) if vuln_root else self.sessions_dir.parent / "vulnerabilities"
+        self.source_root = source_root or getattr(config, "cwd", "") or getattr(config, "source_root", "")
         self._acfg = (config.workers.agents[0] if config.workers.agents else None)
         self._default_tools = getattr(config.workers, "default_tools", None)
 
@@ -106,8 +109,43 @@ class MiningAgent:
             parsed = {"findings": []}
         findings = self._parse_findings(parsed)
         node_id = f"{func.file}::{func.name}"
-        finding_store.save_findings(self.vuln_store, findings, run_id=self.run_id,
-                                    node_id=node_id, func=func)
+        # 用 V2 persist_finding 落库 (完整报告 + intake 上报 + MySQL)
+        from ..dataflow_v2.finding_store import persist_finding
+        from ..vuln_report_utils import format_vuln_report_md
+        self.vuln_root.mkdir(parents=True, exist_ok=True)
+        context_text = self._build_taint_context(func, taint_sig, chain, source)
+        for f in findings:
+            item = {
+                "vuln_type": f.vuln_type, "severity": f.severity, "title": f.title,
+                "summary": f.summary, "entry_point": f.entry_point, "trigger_path": f.trigger_path,
+                "evidence": f.evidence,
+                "source_file": f.source_file or func.file,
+                "function_name": f.function_name or func.name,
+                "line": f.line or f.location_line,
+                "code_snippet": f.code_snippet,
+                "code_explanation": f.code_explanation,
+                "fix_suggestion": f.fix_suggestion,
+                "poc": f.poc,
+                "exploitability": f.exploitability,
+                "confidence": f.confidence,
+                "dimensions": {k: v.to_dict() for k, v in f.dimensions.items()},
+            }
+            try:
+                persist_finding(
+                    graph_store=self.vuln_store, run_id=self.run_id, task_id=self.task_id,
+                    source_root=self.source_root, vuln_root=self.vuln_root,
+                    func_file=func.file, func_name=func.name, func_description="",
+                    item=item, context_text=context_text, context_session_path=sp,
+                    cfg_project_id=getattr(self.config, "project_id", ""),
+                    cfg_task_name=getattr(self.config, "task_name", ""),
+                    cfg_parent_task_name=getattr(self.config, "parent_task_name", ""),
+                    cfg_parent_task_id=getattr(self.config, "parent_task_id", ""),
+                    cfg_parent_task_type=getattr(self.config, "parent_task_type", ""),
+                    cfg_task_origin_type=getattr(self.config, "task_origin_type", ""),
+                    on_event=self.on_event,
+                )
+            except Exception as e:
+                logger.exception("persist_finding failed for %s/%s: %s", func.name, taint_sig, e)
         logger.info("[dagflow-mine] DONE func=%s taint=%s duration=%.1fs findings=%d error=%s",
                     func.name, taint_sig, _time.time() - _t0, len(findings), (output.error or "")[:100])
         # 记录挖掘会话
@@ -147,6 +185,18 @@ class MiningAgent:
         from .session_naming import session_path
         return session_path(self.sessions_dir, func.name, taint_sig, kind="vuln")
 
+    def _build_taint_context(self, func, taint_sig: str, chain, source) -> str:
+        """构建污点传播上下文 (供 persist_finding/format_vuln_report_md 使用)。"""
+        import json as _json
+        return (
+            f"## DAG 污点流图\n"
+            f"目标函数: `{func.file}::{func.name}` (行 {func.start_line}-{func.end_line})\n"
+            f"挖掘污点: {taint_sig}\n\n"
+            f"## 正向数据流链 (入口 → callee 效应序列 → sink)\n"
+            f"```json\n{_json.dumps(chain, ensure_ascii=False, indent=2)[:20000]}\n```\n\n"
+            f"## 本函数完整源码\n```c\n{source}\n```"
+        )
+
     def _parse_findings(self, parsed: dict) -> list[Finding]:
         out: list[Finding] = []
         for item in (parsed.get("findings") or []):
@@ -165,6 +215,13 @@ class MiningAgent:
                 entry_point=str(item.get("entry_point", "")),
                 trigger_path=str(item.get("trigger_path", "")),
                 evidence=str(item.get("evidence", "")),
+                source_file=str(item.get("source_file", "")),
+                function_name=str(item.get("function_name", "")),
+                line=str(item.get("line", "")),
+                code_snippet=str(item.get("code_snippet", "")),
+                code_explanation=str(item.get("code_explanation", "")),
+                fix_suggestion=str(item.get("fix_suggestion", "")),
+                poc=str(item.get("poc", "")),
                 location_func=str(loc.get("function", "")),
                 location_line=str(loc.get("line", "")),
                 dag_path=list(item.get("dag_path") or []),

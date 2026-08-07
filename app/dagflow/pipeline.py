@@ -317,7 +317,9 @@ class DagflowPipeline:
                                 vuln_store=vuln_store, run_id=task_id,
                                 func_lookup=func_index.get_by_name,
                                 on_event=self.on_event, task_id=task_id,
-                                graph_recorder=graph_rec)
+                                graph_recorder=graph_rec,
+                                vuln_root=nfs_run / "vulnerabilities",
+                                source_root=self.source_root)
             miner.cancel_event = self.cancel_event
 
             def _mine_one(func, taint_sig):
