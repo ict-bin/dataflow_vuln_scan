@@ -4,7 +4,7 @@
   三种模式用独立数据库: dvs_complete / dvs_autonomous / dvs_dagflow
   以 source_dir_id (sha1(source_root)[:16]) 为分区键
   源码信息表 (functions/include/class) 无 task_id, 共享不清
-  分析记录表 (processed_taints/dag_*/taints/propagations/orchestration) 有 task_id, restart 清本任务的
+  分析记录表 (processed_taints/taints/propagations/orchestration) 有 task_id, restart 清本任务的
   V2 跨任务去重范围由 parent_task_scope_id 隔离
 
 当前只实现写 + 清理, 不实现读 (worker 读仍走 SQLite)。
@@ -170,62 +170,10 @@ ALTER TABLE orchestration ADD COLUMN IF NOT EXISTS target_function VARCHAR(512) 
 ALTER TABLE orchestration ADD COLUMN IF NOT EXISTS target_signature VARCHAR(512) NOT NULL DEFAULT '';
 """
 
-_DDL_WITH_TASK_DAG = """
-CREATE TABLE IF NOT EXISTS dag_processed_taints (
-    func_id          VARCHAR(128) NOT NULL,
-    taint_signature  VARCHAR(128) NOT NULL,
-    task_id          VARCHAR(64) NOT NULL,
-    analyzed_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (func_id, taint_signature, task_id)
-);
-CREATE INDEX idx_dag_processed_taints ON dag_processed_taints(func_id, taint_signature);
-CREATE INDEX idx_dpt_task ON dag_processed_taints(task_id);
-CREATE TABLE IF NOT EXISTS dag_nodes (
-    func_id          VARCHAR(128) NOT NULL,
-    taint_signature  VARCHAR(128) NOT NULL,
-    node_id          INTEGER NOT NULL,
-    line             INTEGER NOT NULL DEFAULT 0,
-    taint            VARCHAR(128) NOT NULL,
-    parents_json     TEXT,
-    checks_json      TEXT,
-    prune_json       TEXT,
-    is_source        INTEGER NOT NULL DEFAULT 0,
-    task_id          VARCHAR(64) NOT NULL,
-    PRIMARY KEY (func_id, taint_signature, node_id, task_id)
-);
-CREATE TABLE IF NOT EXISTS dag_edges (
-    func_id            VARCHAR(128) NOT NULL,
-    taint_signature    VARCHAR(256) NOT NULL,
-    edge_id            VARCHAR(128) NOT NULL,
-    from_node          INTEGER NOT NULL,
-    to_node            INTEGER NOT NULL,
-    line               INTEGER NOT NULL DEFAULT 0,
-    condition_json     TEXT,
-    taints_json        TEXT,
-    kind               VARCHAR(32) NOT NULL DEFAULT 'inside',
-    sink_ref           VARCHAR(512),
-    param_taints_json  TEXT,
-    escape_subkind     VARCHAR(128),
-    carrier            VARCHAR(128),
-    escape_via          VARCHAR(128),
-    task_id            VARCHAR(64) NOT NULL,
-    PRIMARY KEY (func_id, taint_signature, edge_id, task_id)
-);
-CREATE INDEX idx_dag_edges ON dag_edges(sink_ref);
-CREATE TABLE IF NOT EXISTS dag_meta (
-    func_id         VARCHAR(128) NOT NULL,
-    taint_signature VARCHAR(512) NOT NULL,
-    self_contained  INTEGER NOT NULL DEFAULT 0,
-    description     TEXT,
-    taint_failed    INTEGER NOT NULL DEFAULT 0,
-    task_id         VARCHAR(64) NOT NULL,
-    PRIMARY KEY (func_id, taint_signature, task_id)
-);
-"""
 
 _V2_TASK_TABLES = ["processed_taints", "taints", "propagations", "orchestration"]
 # processed_taints 保留每任务审计；跨任务占位由 scope claim 表负责。
-_DAG_TASK_TABLES = ["dag_processed_taints", "dag_nodes", "dag_edges", "dag_meta"]
+# DAG 表的 DDL/方法已独立到 app/dagflow/dag_mysql_store.py (可整删)
 
 
 class SharedMysqlStore(MysqlReadMixin):
@@ -401,8 +349,7 @@ class SharedMysqlStore(MysqlReadMixin):
         _exec_multi(_DDL_NO_TASK)
         if self.mode in ("complete", "autonomous"):
             _exec_multi(_DDL_WITH_TASK_V2)
-        elif self.mode == "dagflow":
-            _exec_multi(_DDL_WITH_TASK_DAG)
+        # DAG 模式的 DDL 由 DAGMysqlStore._ensure_schema 覆盖处理
         # 迁移: 清除旧版本的 source_dir_id 冗余列
         self._migrate_drop_source_dir_id()
 
@@ -486,9 +433,9 @@ class SharedMysqlStore(MysqlReadMixin):
     # ── 清理 (restart/delete 调) ──────────────────────────────────────
 
     def clear_task_analysis(self):
-        """清本任务在本源码目录的所有分析记录 (不清函数索引)。"""
-        tables = _V2_TASK_TABLES if self.mode in ("complete", "autonomous") else _DAG_TASK_TABLES
-        for t in tables:
+        """清本任务 V2 分析记录 (不清函数索引/共享表)。
+        DAG 模式由 DAGMysqlStore.clear_task_analysis 覆盖。"""
+        for t in _V2_TASK_TABLES:
             try:
                 with self._engine.begin() as conn:
                     conn.execute(sa_text(
@@ -504,8 +451,8 @@ class SharedMysqlStore(MysqlReadMixin):
                         {"tid": self.task_id})
             except Exception as e:
                 logger.warning("[shared_mysql] clear scope claims failed: %s", str(e)[:120])
-        logger.info("[shared_mysql] cleared task %s analysis records (mode=%s, source_dir=%s, parent_scope=%s, tables=%s)",
-                    self.task_id, self.mode, self.source_dir_id, self.parent_task_scope_id, tables)
+        logger.info("[shared_mysql] cleared task %s V2 analysis records (mode=%s, source_dir=%s, parent_scope=%s)",
+                    self.task_id, self.mode, self.source_dir_id, self.parent_task_scope_id)
 
     # ── 源码信息 (无 task_id, 共享) ──────────────────────────────────
 
@@ -734,67 +681,6 @@ class SharedMysqlStore(MysqlReadMixin):
                 "tf": target_function, "tsig": target_signature})
             conn.commit()
 
-    # ── DAG (仅 dagflow 模式) ─────────────────────────────────────────
-
-    def dag_try_reserve(self, func_id: str, taint_sig: str) -> bool:
-        """INSERT IGNORE → rowcount=1 表示本任务占位成功。"""
-        with self._engine.connect() as conn:
-            r = conn.execute(sa_text(
-                "INSERT IGNORE INTO dag_processed_taints (func_id,taint_signature,task_id) "
-                "VALUES (:fid,:ts,:tid)"),
-                {"fid": func_id, "ts": taint_sig, "tid": self.task_id})
-            conn.commit()
-            return r.rowcount > 0
-
-    def dag_delete_processed(self, func_id: str, taint_sig: str):
-        with self._engine.connect() as conn:
-            conn.execute(sa_text(
-                "DELETE FROM dag_processed_taints WHERE func_id=:fid AND taint_signature=:ts AND task_id=:tid"),
-                {"fid": func_id, "ts": taint_sig, "tid": self.task_id})
-            conn.commit()
-
-    def save_dag(self, func_id: str, taint_sig: str, nodes: list[dict], edges: list[dict], meta: dict):
-        """保存 DAG (先删旧再插, 限定 source_dir + func + taint + task)。"""
-        import json
-        tid = self.task_id
-        with self._engine.connect() as conn:
-            for t in ("dag_nodes", "dag_edges", "dag_meta"):
-                conn.execute(sa_text(
-                    f"DELETE FROM {t} WHERE func_id=:fid AND taint_signature=:ts AND task_id=:tid"),
-                    {"fid": func_id, "ts": taint_sig, "tid": tid})
-            for n in nodes:
-                conn.execute(sa_text(
-                    """INSERT IGNORE INTO dag_nodes (func_id,taint_signature,node_id,line,taint,
-                    parents_json,checks_json,prune_json,is_source,task_id)
-                    VALUES (:fid,:ts,:nid,:ln,:t,:p,:c,:pr,:is,:tid)"""),
-                    {"fid": func_id, "ts": taint_sig, "nid": n["node_id"], "ln": n["line"],
-                     "t": n["taint"], "p": json.dumps(n.get("parents", []), ensure_ascii=False),
-                     "c": json.dumps(n.get("checks", []), ensure_ascii=False),
-                     "pr": json.dumps(n.get("prune", {}), ensure_ascii=False) if n.get("prune") else "",
-                     "is": 1 if n.get("is_source") else 0, "tid": tid})
-            for e in edges:
-                conn.execute(sa_text(
-                    """INSERT IGNORE INTO dag_edges (func_id,taint_signature,edge_id,from_node,to_node,
-                    line,condition_json,taints_json,kind,sink_ref,param_taints_json,escape_subkind,carrier,escape_via,task_id)
-                    VALUES (:fid,:ts,:eid,:fn,:tn,:ln,:cond,:taints,:kind,:sr,:pt,:es,:car,:ev,:tid)"""),
-                    {"fid": func_id, "ts": taint_sig, "eid": e["edge_id"],
-                     "fn": e["from_node"], "tn": e["to_node"], "ln": e["line"],
-                     "cond": json.dumps(e.get("condition", []), ensure_ascii=False),
-                     "taints": json.dumps(e.get("taints", []), ensure_ascii=False),
-                     "kind": e.get("kind", "inside"), "sr": e.get("sink_ref", ""),
-                     "pt": json.dumps(e.get("param_taints", []), ensure_ascii=False),
-                     "es": e.get("escape_subkind", ""), "car": e.get("carrier", ""),
-                     "ev": e.get("escape_via", ""), "tid": tid})
-            conn.execute(sa_text(
-                """INSERT IGNORE INTO dag_meta (func_id,taint_signature,self_contained,description,taint_failed,task_id)
-                VALUES (:fid,:ts,:sc,:desc,:tf,:tid)
-                ON DUPLICATE KEY UPDATE self_contained=VALUES(self_contained),
-                description=VALUES(description),taint_failed=VALUES(taint_failed)"""),
-                {"fid": func_id, "ts": taint_sig,
-                 "sc": 1 if meta.get("self_contained") else 0,
-                 "desc": meta.get("description", ""),
-                 "tf": 1 if meta.get("taint_failed") else 0, "tid": tid})
-            conn.commit()
 
 
 def dispose_engine(self):

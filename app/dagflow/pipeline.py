@@ -172,7 +172,6 @@ class DagflowPipeline:
         """阶段 1 taint 跟踪 -> 阶段 2 挖掘。返回 TaskResult (兼容 task_service model_dump)。"""
         from ..models import TaskResult, TaskStatus, TokenUsage
         from .dag_store import DagflowStore
-        from ..db.shared_mysql import create_shared_store
         from .taint_analyzer import TaintAnalyzer
         from .orchestrator import DagflowOrchestrator
         from .trackers import TrackerDispatcher
@@ -187,34 +186,28 @@ class DagflowPipeline:
         epoch_dir = Path(_root_out_dir or (Path(self.source_root) / "run"))
         # NFS run/ = epoch_dir.parent.parent (run/epochs/00NN -> run/epochs -> run/)
         nfs_run = epoch_dir.parent.parent if epoch_dir.name != "run" else epoch_dir
-        # MySQL 共享存储 (双写, 失败不阻断)
-        mysql_store = create_shared_store(
-            self._mysql_url, "dagflow", self.source_root, task_id,
+        # DAG MySQL 存储 (独立 DAGMysqlStore, 与 V2 代码完全分离)
+        from .dag_mysql_store import create_dag_mysql_store
+        mysql_store = create_dag_mysql_store(
+            self._mysql_url, self.source_root, task_id,
             project_id=getattr(self, 'task_id', '') and getattr(self.config, 'project_id', '') or '') \
             if hasattr(self, '_mysql_url') and self._mysql_url else None
-        # dagflow.db 放 /tmp (本地盘) — NFS 上 SQLite 并发写会损坏 (database disk image is malformed)
-        # MySQL 双写保证持久性; pipeline 每次 restart 都清空 dagflow.db, 无需 NFS 持久
+        # MySQL ONLY: 无 SQLite, DAG 数据全在 MySQL (dvs_<source_dir_id>)
         _local_dag = Path(f"/tmp/dagflow_{task_id}")
         _local_dag.mkdir(parents=True, exist_ok=True)
-        store = DagflowStore(_local_dag, mysql_store=mysql_store)  # dagflow.db -> /tmp (local, no NFS corruption)
-        # 清空旧数据 (restart 时 dagflow.db 在 /tmp + MySQL 双写, 需清两处防秒过)
-        store._exec("DELETE FROM dag_processed_taints")
-        store._exec("DELETE FROM taint_dag_nodes")
-        store._exec("DELETE FROM taint_dag_edges")
-        store._exec("DELETE FROM taint_dag_meta")
+        store = DagflowStore(_local_dag, mysql_store=mysql_store)
         if mysql_store:
             from sqlalchemy import text as sa_text
-            params = {"sid": mysql_store.source_dir_id, "tid": mysql_store.task_id}
+            params = {"tid": mysql_store.task_id}
             for table in ['dag_processed_taints', 'dag_nodes', 'dag_edges', 'dag_meta']:
                 try:
                     with mysql_store._engine.begin() as conn:
                         conn.execute(sa_text(
-                            f"DELETE FROM {table} WHERE source_dir_id=:sid AND task_id=:tid"),
+                            f"DELETE FROM {table} WHERE task_id=:tid"),
                             params)
                 except Exception as e:
                     logger.debug("[dagflow] clear MySQL %s: %s", table, str(e)[:80])
-            logger.info("[dagflow] cleared stale MySQL dag tables")
-        logger.info("[dagflow] cleared stale dagflow.db data")
+            logger.info("[dagflow] cleared stale MySQL dag tables for task=%s", mysql_store.task_id)
         sessions_dir = epoch_dir / "sessions"  # sessions -> NFS (debugging 用, append-only 无并发写问题)
         # functions.db 放 /tmp (本地盘) — NFS 上 SQLite 并发写会损坏
         (_local_dag / "dataflow-v2").mkdir(parents=True, exist_ok=True)
