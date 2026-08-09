@@ -28,6 +28,28 @@
 
 ## 输出 JSON (顶层唯一 ```json, 最后输出)
 
+每条 finding **必须包含全部以下字段**（key 英文，value 中文）：
+
+| 字段 | 要求 |
+|------|------|
+| `vuln_type` | 归一化短横线形式 CWE 类型（如 `heap-buffer-overflow`） |
+| `severity` | `critical\|high\|medium\|low\|info`，反映真实可利用后果 |
+| `title` | 中文简明描述漏洞本质及触发条件 |
+| `summary` | 中文一段话：source→sink 路径、缺失的防御、为何可绕过、实质后果 |
+| `source_file` | 漏洞所在文件（相对源码根目录） |
+| `function_name` | 漏洞所在函数名 |
+| `line` | 漏洞发生行号（如 `L123` 或 `123`） |
+| `entry_point` | 漏洞最初入口：污点最初从哪个外部入口进入系统 |
+| `trigger_path` | 触发路径：从外部入口到漏洞触发点的逐步骤描述 |
+| `evidence` | 判断依据：逐行带行号的关键代码证据 |
+| `code_snippet` | 漏洞处源码片段（带行号，只贴漏洞相关几行，不贴整函数） |
+| `code_explanation` | 漏洞结合代码说明（哪行哪步导致问题，引用行号） |
+| `fix_suggestion` | 修复建议（具体怎么改：加校验/换安全函数/边界检查） |
+| `poc` | 参考级简单利用脚本：用 \`\`\`代码块 包裹并标注语言。**不必可运行，仅作参考骨架** |
+| `exploitability` | `{preconditions, trigger_complexity, worst_case_impact}`，全中文 |
+| `dimensions` | `{D1, D2, D3, D4}`，每项 `{passed:bool, reason:中文}` |
+| `confidence` | 0.0–1.0，反映能通过下游验证的把握 |
+
 ```json
 {
   "findings": [
@@ -36,10 +58,16 @@
       "severity": "high",
       "title": "中文标题",
       "summary": "中文: source→sink 路径 + 缺失防御 + 后果",
+      "source_file": "src/x.c",
+      "function_name": "f",
+      "line": "12",
       "entry_point": "中文: 污点最初外部入口",
       "trigger_path": "中文: 分步入口→触发点",
       "evidence": "中文: 逐行带行号证据 (含跨函数 callee 文件:行号)",
-      "location": {"function": "f", "line": "12"},
+      "code_snippet": "行 10: char buf[64];\n行 12: memcpy(buf, input, len);",
+      "code_explanation": "行 10: buf 固定 64 字节\n行 12: len 未校验, memcpy 越界写入栈",
+      "fix_suggestion": "memcpy 前校验 len <= sizeof(buf)",
+      "poc": "```python\nimport struct\n# 构造超长输入触发溢出\npayload = b'A' * 256\nsend(payload)\n```",
       "exploitability": {"preconditions": "...", "trigger_complexity": "...", "worst_case_impact": "..."},
       "dimensions": {"D1":{"pass":true,"reason":"..."},"D2":{"pass":true,"reason":"..."},"D3":{"pass":true,"reason":"..."},"D4":{"pass":true,"reason":"..."}},
       "confidence": 0.8
@@ -49,6 +77,8 @@
 ```
 
 无漏洞时 `findings: []`。不靠函数名预筛 (check_*/handle_* 名字不可信, 须按链效应/源码判)。
+
+**所有多行字段必须用 `\n` 真实换行，禁止用 `→`/`；` 串联成一行**——服务端会原样写进漏洞报告 .md。
 
 ## 约束（防止会话爆炸）
 
