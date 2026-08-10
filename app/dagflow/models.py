@@ -289,6 +289,97 @@ class TaintDAG:
             _l.info("top-level edges: %d parsed, distributed to nodes", len(top_edges))
         return dag
 
+    @staticmethod
+    def from_propagations(d: dict) -> "TaintDAG":
+        """从传播列表组装 DAG (脚本组装, LLM 只输出扁平传播列表)。
+
+        LLM 输出: {propagations: [...], sources: [...], prunes: [...], description, self_contained, taint_failed}
+        脚本组装: 变量名 → node, propagation → edge, 同变量多来源 → merge 节点。
+        """
+        # 1. 收集 sources → 创建 source 节点
+        nodes: dict[str, TaintNode] = {}  # var_name → node
+        for s in (d.get("sources") or []):
+            var = str(s.get("var", "")).strip()
+            if not var or var in nodes:
+                continue
+            sl, el = _norm_line(s.get("line", 0))
+            nodes[var] = TaintNode(
+                id=len(nodes), line=sl, line_end=el, taint=var,
+                source=str(s.get("source_call", "") or ""), is_source=True)
+
+        # 2. 收集 propagation 的 from_var/to_var → 创建节点
+        for p in (d.get("propagations") or []):
+            if not isinstance(p, dict):
+                continue
+            for var_key in ("from_var", "to_var"):
+                var = str(p.get(var_key, "")).strip()
+                if not var or var in nodes:
+                    continue
+                sl, el = _norm_line(p.get(f"{var_key}_line", 0))
+                nodes[var] = TaintNode(id=len(nodes), line=sl, line_end=el, taint=var)
+
+        # 3. 从 propagation 构建边
+        for p in (d.get("propagations") or []):
+            if not isinstance(p, dict):
+                continue
+            from_var = str(p.get("from_var", "")).strip()
+            to_var = str(p.get("to_var", "")).strip()
+            from_node = nodes.get(from_var)
+            if from_node is None:
+                logger.warning("propagation skip: from_var %r not in nodes", from_var)
+                continue
+            to_node = nodes.get(to_var)
+            to_id = to_node.id if to_node else -1
+            sl, el = _norm_line(p.get("to_line", 0))
+            # cond_lines / check_lines
+            cond_lines = _norm_line_list(p.get("cond_lines"))
+            check_lines = _norm_line_list(p.get("check_lines"))
+            # 转回原始格式 (list of int or [int, int])
+            cond_raw = [v[0] if v[1] == 0 else list(v) for v in cond_lines]
+            check_raw = [v[0] if v[1] == 0 else list(v) for v in check_lines]
+            edge = TaintEdge(
+                to_node=to_id, line=sl, line_end=el,
+                kind=str(p.get("kind", "inside")),
+                taints=[from_var] if from_var else [],
+                callee=str(p.get("callee", "") or ""),
+                tainted_args=list(p.get("tainted_args") or []),
+                cond_lines=cond_raw,
+                carrier=str(p.get("carrier", "") or ""),
+                escape_via=str(p.get("escape_via", "") or ""),
+                sink_ref=str(p.get("callee", "") or ""),
+            )
+            from_node.children.append(edge)
+            # check_lines → 挂到 from_node
+            if check_raw:
+                from_node.check_lines.extend(check_raw)
+
+        # 4. prunes
+        for pr in (d.get("prunes") or []):
+            if not isinstance(pr, dict):
+                continue
+            var = str(pr.get("var", "")).strip()
+            if var in nodes:
+                nodes[var].prune = PruneSignal.from_dict(pr.get("reason"))
+
+        # 5. parents 从 edges 反推
+        all_nodes = list(nodes.values())
+        for i, n in enumerate(all_nodes):
+            n.id = i
+        for n in all_nodes:
+            for e in n.children:
+                if 0 <= e.to_node < len(all_nodes):
+                    if n.id not in all_nodes[e.to_node].parents:
+                        all_nodes[e.to_node].parents.append(n.id)
+
+        return TaintDAG(
+            func_id=str(d.get("func_id", "")),
+            taint_signature=str(d.get("taint_signature", "")),
+            nodes=all_nodes,
+            self_contained=bool(d.get("self_contained", False)),
+            description=str(d.get("description", "")),
+            taint_failed=bool(d.get("taint_failed", False)),
+        )
+
 
 # ── 工作队列项 ────────────────────────────────────────────────────────
 

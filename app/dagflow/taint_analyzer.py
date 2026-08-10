@@ -96,12 +96,20 @@ class TaintAnalyzer:
                 depth=getattr(self, "_cur_depth", 0), status="analyzing", analysis_status="pending")
         def _parse_check(res, all_texts):
             text = getattr(res, "output", "") or ""
+            # 优先: 传播列表格式 (from_propagations)
+            p = _extract_json_object(text, "propagations")
+            if isinstance(p, dict) and isinstance(p.get("propagations"), list):
+                return p, ""
+            # 回退: 旧 DAG JSON 格式 (from_dict, 兼容)
             p = _extract_json_object(text, "nodes")
-            if p is None:
-                p = _greedy_json_object(text)
-            if not isinstance(p, dict) or not isinstance(p.get("nodes"), list):
-                return None, f"dagflow taint JSON parse failed for {func.name}/{taint_sig}"
-            return p, ""
+            if isinstance(p, dict) and isinstance(p.get("nodes"), list):
+                return p, ""
+            # 最后回退: greedy
+            p = _greedy_json_object(text)
+            if isinstance(p, dict):
+                if isinstance(p.get("propagations"), list) or isinstance(p.get("nodes"), list):
+                    return p, ""
+            return None, f"dagflow taint JSON parse failed for {func.name}/{taint_sig}"
 
         output, parsed, _warn = run_agent_with_design_retry(
             prompt, model=self._acfg.model,
@@ -126,11 +134,17 @@ class TaintAnalyzer:
             on_event=getattr(self, "on_event", None),
             label=f"dagflow/{func.name}", retry_max=3,
         )
-        if not isinstance(parsed, dict) or not isinstance(parsed.get("nodes"), list):
+        if not isinstance(parsed, dict):
             raise RuntimeError(f"dagflow taint JSON parse failed for {func.name}/{taint_sig}")
         parsed["func_id"] = func.func_id
         parsed["taint_signature"] = taint_sig or "auto"
-        dag = TaintDAG.from_dict(parsed)
+        # 优先传播列表格式, 回退旧 DAG JSON
+        if isinstance(parsed.get("propagations"), list):
+            dag = TaintDAG.from_propagations(parsed)
+        elif isinstance(parsed.get("nodes"), list):
+            dag = TaintDAG.from_dict(parsed)
+        else:
+            raise RuntimeError(f"dagflow taint JSON: no propagations or nodes for {func.name}/{taint_sig}")
         # 后处理: 从行号解析源码补全 condition/checks/param_taints/sink_ref
         fill_lines(dag, func, self.source_root, func_lookup=self.func_lookup)
         logger.info("[dagflow-taint] DONE func=%s taint=%s duration=%.1fs error=%s output_len=%d nodes=%d",
