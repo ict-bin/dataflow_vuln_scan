@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from app.dataflow_v2.function_extractor import ensure_file_indexed, find_func_in_source
 from app.dataflow_v2.models import FunctionRecord
 from app.dataflow_v2.store import DataflowStore
+from test_storage_fakes import make_dataflow_store
 
 
 class DataflowV2FunctionResolutionTests(unittest.TestCase):
@@ -17,7 +18,7 @@ class DataflowV2FunctionResolutionTests(unittest.TestCase):
         self.source_root = Path(self.td.name) / "src"
         self.run_root = Path(self.td.name) / "run"
         self.source_root.mkdir(parents=True, exist_ok=True)
-        self.store = DataflowStore(self.run_root)
+        self.store = make_dataflow_store(self.run_root)
 
     def tearDown(self):
         self.store.close()

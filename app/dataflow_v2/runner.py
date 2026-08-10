@@ -128,7 +128,11 @@ class DataflowV2Runner:
         err_msg = ""
 
         try:
-            store = DataflowStore(v2_run_dir, mysql_store=self._create_mysql_store("complete"))
+            store = DataflowStore(
+                v2_run_dir,
+                mysql_store=self._create_mysql_store("complete"),
+                cross_task_function_dedup_enabled=cfg.cross_task_function_dedup_enabled,
+            )
             # 增量索引: 只索引根函数所在文件 (不全量扫描)
             # 分析过程中 callee 查不到时用 v2_db index <file> 增量索引
             self._emit("v2_indexing_source_tree")

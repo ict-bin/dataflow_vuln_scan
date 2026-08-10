@@ -6,6 +6,7 @@ from pathlib import Path
 from app.dataflow_v2 import DataflowStore, FunctionRecord, TaintParamInfo
 from app.dataflow_v2.analysis import TaintAnalysisCallbacks
 from app.models import TaskConfig
+from test_storage_fakes import make_dataflow_store
 
 
 def _make_callbacks(tmp_path: Path) -> TaintAnalysisCallbacks:
@@ -40,7 +41,7 @@ def _make_callbacks(tmp_path: Path) -> TaintAnalysisCallbacks:
 
 def test_external_callee_inference_no_longer_emits_return_taint(tmp_path: Path):
     callbacks = _make_callbacks(tmp_path)
-    store = DataflowStore(tmp_path / "df")
+    store = make_dataflow_store(tmp_path / "df")
     func = FunctionRecord(
         file="src/demo.c",
         name="demo_func",
@@ -91,7 +92,7 @@ def test_external_callee_inference_no_longer_emits_return_taint(tmp_path: Path):
 
 def test_model_return_taint_is_kept_as_result_only(tmp_path: Path):
     callbacks = _make_callbacks(tmp_path)
-    store = DataflowStore(tmp_path / "df")
+    store = make_dataflow_store(tmp_path / "df")
     func = FunctionRecord(
         file="src/demo.c",
         name="demo_func",

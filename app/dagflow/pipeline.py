@@ -195,7 +195,13 @@ class DagflowPipeline:
         # MySQL ONLY: 无 SQLite, DAG 数据全在 MySQL (dvs_<source_dir_id>)
         _local_dag = Path(f"/tmp/dagflow_{task_id}")
         _local_dag.mkdir(parents=True, exist_ok=True)
-        store = DagflowStore(_local_dag, mysql_store=mysql_store)
+        store = DagflowStore(
+            _local_dag,
+            mysql_store=mysql_store,
+            cross_task_function_dedup_enabled=getattr(
+                self.config, "cross_task_function_dedup_enabled", True
+            ),
+        )
         if mysql_store:
             from sqlalchemy import text as sa_text
             params = {"tid": mysql_store.task_id}
@@ -217,7 +223,13 @@ class DagflowPipeline:
         v2_store = None
         try:
             from ..dataflow_v2.store import DataflowStore
-            v2_store = DataflowStore(_local_dag / "dataflow-v2", mysql_store=mysql_store)
+            v2_store = DataflowStore(
+                _local_dag / "dataflow-v2",
+                mysql_store=mysql_store,
+                cross_task_function_dedup_enabled=getattr(
+                    self.config, "cross_task_function_dedup_enabled", True
+                ),
+            )
             logger.info("[dagflow] v2_store OK: %s", _local_dag / "dataflow-v2")
         except Exception as e:
             logger.warning("[dagflow] v2_store FAILED: %s", e)

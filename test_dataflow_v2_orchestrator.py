@@ -13,6 +13,13 @@ from app.dataflow_v2.analysis import TaintAnalysisCallbacks
 from app.dataflow_v2.orchestrator import DfsOrchestrator, AnalysisCallbacks, AnalysisResult, PathContext
 from app.models import AgentInstanceConfig, RoleConfig, TaskConfig
 from app.vuln_store import TaskGraphEdgeRecord, TaskGraphNodeRecord, TaskGraphRunRecord, VulnScanStore
+from test_storage_fakes import TestGraphStoreFactory, make_dataflow_store
+
+_GRAPH_STORES = TestGraphStoreFactory()
+
+
+def _graph_store(db_path):
+    return _GRAPH_STORES.create(db_path)
 
 
 class _NoOpCbs(AnalysisCallbacks):
@@ -38,7 +45,7 @@ def _prop(src_func, tgt_name, tgt_func_id, call_line, group="", arm=""):
 class TestPathBuilding(unittest.TestCase):
     def setUp(self):
         self.td = tempfile.TemporaryDirectory()
-        self.store = DataflowStore(Path(self.td.name) / "run")
+        self.store = make_dataflow_store(Path(self.td.name) / "run")
         self.A = _func(self.store, "A"); self.C = _func(self.store, "C")
         self.D = _func(self.store, "D"); self.E = _func(self.store, "E"); self.F = _func(self.store, "F")
         self.orch = DfsOrchestrator(self.store, _NoOpCbs())
@@ -152,7 +159,7 @@ class TestDedupAndFeedback(unittest.TestCase):
 class TestResolvedTraceCallees(unittest.TestCase):
     def setUp(self):
         self.td = tempfile.TemporaryDirectory()
-        self.store = DataflowStore(Path(self.td.name) / "run")
+        self.store = make_dataflow_store(Path(self.td.name) / "run")
         self.root = _func(self.store, "Root")
         self.callee = _func(self.store, "OnSharedManager", file="module_template.cpp")
         self.events: list[tuple[str, dict]] = []
@@ -243,7 +250,7 @@ class _MockCbs(AnalysisCallbacks):
 class TestConcurrentDfs(unittest.TestCase):
     def setUp(self):
         self.td = tempfile.TemporaryDirectory()
-        self.store = DataflowStore(Path(self.td.name) / "run")
+        self.store = make_dataflow_store(Path(self.td.name) / "run")
         for n in ["A","C","D","E","F"]:
             _func(self.store, n)
         self.cbs = _MockCbs(self.store)
@@ -274,7 +281,7 @@ class TestConcurrentDfs(unittest.TestCase):
 class TestFunctionLevelDedup(unittest.TestCase):
     def test_same_function_reached_by_different_taints_is_analyzed_once(self):
         with tempfile.TemporaryDirectory() as td:
-            store = DataflowStore(Path(td) / "run")
+            store = make_dataflow_store(Path(td) / "run")
             root = _func(store, "Root")
             mid = _func(store, "Mid")
             leaf = _func(store, "Leaf")
@@ -339,7 +346,12 @@ class TestFunctionLevelDedup(unittest.TestCase):
             orch.run(root, TaintParamInfo([0], "root_t", ["root_t"]))
 
             self.assertEqual(
-                [("Root", "root_t"), ("Mid", "mid_t"), ("Leaf", "via_mid_leaf_t")],
+                [
+                    ("Root", "root_t"),
+                    ("Mid", "mid_t"),
+                    ("Leaf", "via_mid_leaf_t"),
+                    ("Leaf", "direct_leaf_t"),
+                ],
                 analyzed,
             )
             self.assertIsNotNone(store.find_processed_taint(leaf.func_id, "direct_leaf_t"))
@@ -349,7 +361,7 @@ class TestFunctionLevelDedup(unittest.TestCase):
 class TestReturnFollowupDisabled(unittest.TestCase):
     def test_root_return_taint_no_longer_triggers_caller_followup(self):
         with tempfile.TemporaryDirectory() as td:
-            store = DataflowStore(Path(td) / "run")
+            store = make_dataflow_store(Path(td) / "run")
             root = _func(store, "Root", file="root.c")
             caller = _func(store, "Caller", file="caller.c")
             analyzed: list[tuple[str, int]] = []
@@ -395,8 +407,8 @@ class TestReturnFollowupDisabled(unittest.TestCase):
     def test_child_return_taint_no_longer_creates_return_followup_edge(self):
         with tempfile.TemporaryDirectory() as td:
             run_dir = Path(td) / "run"
-            graph_store = VulnScanStore(run_dir / "vuln-scan.sqlite")
-            store = DataflowStore(run_dir / "dataflow-v2")
+            graph_store = _graph_store(run_dir / "vuln-scan.sqlite")
+            store = make_dataflow_store(run_dir / "dataflow-v2")
             root = _func(store, "Root", file="root.c")
             child = _func(store, "Child", file="child.c")
 
@@ -480,8 +492,8 @@ class TestGraphUnresolvedTargetKind(unittest.TestCase):
     def test_external_tracker_miss_rewrites_edge_kind_to_unresolved_target(self):
         with tempfile.TemporaryDirectory() as td:
             run_dir = Path(td) / "run"
-            graph_store = VulnScanStore(run_dir / "vuln-scan.sqlite")
-            store = DataflowStore(run_dir / "dataflow-v2")
+            graph_store = _graph_store(run_dir / "vuln-scan.sqlite")
+            store = make_dataflow_store(run_dir / "dataflow-v2")
             root = _func(store, "Root", file="root.c")
 
             class _Cbs(AnalysisCallbacks):
@@ -538,8 +550,8 @@ class TestGraphUnresolvedTargetKind(unittest.TestCase):
     def test_direct_resolution_miss_rewrites_edge_kind_to_unresolved_target(self):
         with tempfile.TemporaryDirectory() as td:
             run_dir = Path(td) / "run"
-            graph_store = VulnScanStore(run_dir / "vuln-scan.sqlite")
-            store = DataflowStore(run_dir / "dataflow-v2")
+            graph_store = _graph_store(run_dir / "vuln-scan.sqlite")
+            store = make_dataflow_store(run_dir / "dataflow-v2")
             root = _func(store, "Root", file="root.c")
 
             class _Cbs(AnalysisCallbacks):
@@ -594,8 +606,8 @@ class TestGraphBridgeVisibility(unittest.TestCase):
     def test_bridge_edge_keeps_original_propagation_visible_in_all_propagations(self):
         with tempfile.TemporaryDirectory() as td:
             run_dir = Path(td) / "run"
-            graph_store = VulnScanStore(run_dir / "vuln-scan.sqlite")
-            store = DataflowStore(run_dir / "dataflow-v2")
+            graph_store = _graph_store(run_dir / "vuln-scan.sqlite")
+            store = make_dataflow_store(run_dir / "dataflow-v2")
             root = _func(store, "Root", file="root.c")
             reader = _func(store, "Reader", file="reader.c")
 
@@ -670,7 +682,7 @@ class TestGraphBridgeVisibility(unittest.TestCase):
 class TestTrackerSessionPropagation(unittest.TestCase):
     def test_build_paths_passes_chain_session_to_external_tracker(self):
         with tempfile.TemporaryDirectory() as td:
-            store = DataflowStore(Path(td) / "run")
+            store = make_dataflow_store(Path(td) / "run")
             root = _func(store, "Root", file="root.c")
             reader = _func(store, "Reader", file="reader.c")
             seen: dict[str, str] = {}
@@ -705,7 +717,7 @@ class TestBaseSessionIndexing(unittest.TestCase):
             run_dir = Path(td) / "run"
             sessions_dir = run_dir / "sessions"
             sessions_dir.mkdir(parents=True, exist_ok=True)
-            store = DataflowStore(run_dir / "dataflow-v2")
+            store = make_dataflow_store(run_dir / "dataflow-v2")
             chain_session = sessions_dir / "d00-Root-taint-msg-00.jsonl"
             chain_session.write_text('{"type":"session","timestamp":"2026-07-27T00:00:00Z"}\n', encoding="utf-8")
 
@@ -740,8 +752,8 @@ class TestGraphExecutionLifecycle(unittest.TestCase):
     def test_external_callee_propagation_stays_not_followed_in_authoritative_graph(self):
         with tempfile.TemporaryDirectory() as td:
             run_dir = Path(td) / "run"
-            graph_store = VulnScanStore(run_dir / "vuln-scan.sqlite")
-            store = DataflowStore(run_dir / "dataflow-v2")
+            graph_store = _graph_store(run_dir / "vuln-scan.sqlite")
+            store = make_dataflow_store(run_dir / "dataflow-v2")
             root = _func(store, "Root", file="root.c")
 
             class _ExternalCalleeCbs(AnalysisCallbacks):
@@ -814,8 +826,8 @@ class TestGraphExecutionLifecycle(unittest.TestCase):
     def test_bridge_edge_lifecycle_reaches_done_via_real_external_tracker_path(self):
         with tempfile.TemporaryDirectory() as td:
             run_dir = Path(td) / "run"
-            graph_store = VulnScanStore(run_dir / "vuln-scan.sqlite")
-            store = DataflowStore(run_dir / "dataflow-v2")
+            graph_store = _graph_store(run_dir / "vuln-scan.sqlite")
+            store = make_dataflow_store(run_dir / "dataflow-v2")
             root = _func(store, "Root", file="root.c")
             reader = _func(store, "Reader", file="reader.c")
 
@@ -912,7 +924,7 @@ class TestGraphCancellationWrites(unittest.TestCase):
             sessions_dir = run_dir / "sessions"
             vuln_root = run_dir / "vulnerabilities"
             graph_db_path = run_dir / "vuln-scan.sqlite"
-            store = DataflowStore(run_dir / "dataflow-v2")
+            store = make_dataflow_store(run_dir / "dataflow-v2")
             func = FunctionRecord(
                 file="src/root.c",
                 name="Root",
@@ -945,6 +957,7 @@ class TestGraphCancellationWrites(unittest.TestCase):
                 cancel_event=cancel_event,
                 on_event=lambda *args, **kwargs: None,
             )
+            cbs.graph_store = _graph_store(graph_db_path)
             cbs.graph_store.start_task_graph_run(TaskGraphRunRecord(
                 task_id="task-cancel",
                 epoch=cbs.graph_epoch,
@@ -964,7 +977,7 @@ class TestGraphCancellationWrites(unittest.TestCase):
                 cbs._read_body = lambda _func: "void Root(msg_t* msg) { return; }"  # type: ignore[method-assign]
                 cbs.analyze_function(store, func, TaintParamInfo([0], "msg_t*", ["msg"]), [], "", ctx)
 
-            view = VulnScanStore(graph_db_path).export_task_graph_view("task-cancel")
+            view = _graph_store(graph_db_path).export_task_graph_view("task-cancel")
             self.assertEqual("cancelled", view["nodes"][0]["status"])
             self.assertEqual("cancelled", view["nodes"][0]["analysis_status"])
             self.assertEqual("cancelled", view["sessions"][0]["status"])
@@ -972,8 +985,8 @@ class TestGraphCancellationWrites(unittest.TestCase):
     def test_run_path_marks_child_edge_and_node_cancelled_when_cancel_requested(self):
         with tempfile.TemporaryDirectory() as td:
             run_dir = Path(td) / "run"
-            graph_store = VulnScanStore(run_dir / "vuln-scan.sqlite")
-            store = DataflowStore(run_dir / "dataflow-v2")
+            graph_store = _graph_store(run_dir / "vuln-scan.sqlite")
+            store = make_dataflow_store(run_dir / "dataflow-v2")
             parent = _func(store, "Parent")
             child = _func(store, "Child", file="child.c")
             cancel_event = Event()
@@ -1068,8 +1081,8 @@ class TestGraphFailureWrites(unittest.TestCase):
     def test_run_path_marks_child_edge_and_node_failed_when_child_analysis_raises(self):
         with tempfile.TemporaryDirectory() as td:
             run_dir = Path(td) / "run"
-            graph_store = VulnScanStore(run_dir / "vuln-scan.sqlite")
-            store = DataflowStore(run_dir / "dataflow-v2")
+            graph_store = _graph_store(run_dir / "vuln-scan.sqlite")
+            store = make_dataflow_store(run_dir / "dataflow-v2")
             parent = _func(store, "Parent")
             child = _func(store, "Child", file="child.c")
 

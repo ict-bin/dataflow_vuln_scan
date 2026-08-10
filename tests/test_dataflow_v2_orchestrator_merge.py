@@ -3,6 +3,7 @@ from pathlib import Path
 from app.dataflow_v2.models import FunctionRecord, TaintParamInfo, Validation
 from app.dataflow_v2.orchestrator import ChainStep, DfsOrchestrator, AnalysisCallbacks
 from app.dataflow_v2.store import DataflowStore
+from test_storage_fakes import make_dataflow_store
 
 
 def _func(name: str) -> FunctionRecord:
@@ -35,7 +36,7 @@ def _step(
 
 
 def _orch(tmp_path: Path) -> DfsOrchestrator:
-    store = DataflowStore(tmp_path / "dataflow-v2")
+    store = make_dataflow_store(tmp_path / "dataflow-v2")
     return DfsOrchestrator(store, AnalysisCallbacks())
 
 

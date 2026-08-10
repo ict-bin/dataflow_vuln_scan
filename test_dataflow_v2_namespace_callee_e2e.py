@@ -14,6 +14,7 @@ from app.dataflow_v2.orchestrator import AnalysisCallbacks, AnalysisResult, DfsO
 from app.dataflow_v2.store import DataflowStore
 from app.dataflow_v2.trackers import resolve_external
 from app.dataflow_v2.trackers import resolve_indirect
+from test_storage_fakes import make_dataflow_store
 
 
 class _RealCaseCallbacks(AnalysisCallbacks):
@@ -69,7 +70,7 @@ class DataflowV2NamespaceCalleeE2ETests(unittest.TestCase):
         self.td = tempfile.TemporaryDirectory()
         self.source_root = Path(self.td.name) / "source"
         self.source_root.mkdir(parents=True, exist_ok=True)
-        self.store = DataflowStore(Path(self.td.name) / "run")
+        self.store = make_dataflow_store(Path(self.td.name) / "run")
         self.root_file = self.source_root / "socket_module.cpp"
         self.def_file = self.source_root / "module_template.cpp"
         self.root_file.write_text(

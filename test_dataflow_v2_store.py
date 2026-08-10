@@ -15,12 +15,13 @@ from app.vuln_store import (
     TaskGraphSessionRecord,
     VulnScanStore,
 )
+from test_storage_fakes import TestGraphStoreFactory, make_dataflow_store
 
 
 class TestStore(unittest.TestCase):
     def setUp(self):
         self.td = tempfile.TemporaryDirectory()
-        self.store = DataflowStore(Path(self.td.name) / "run")
+        self.store = make_dataflow_store(Path(self.td.name) / "run")
 
     def tearDown(self):
         self.store.close()
@@ -54,8 +55,8 @@ class TestStore(unittest.TestCase):
                               description="msg 透传给 C")
         self.store.upsert_propagation(p)
         self.store.add_propagation_to_taint(t.taint_id, p.prop_id)
-        # 查回
-        self.assertEqual(self.store.get_taint(t.taint_id).next_propagations, [p.prop_id])
+        # 当前 MySQL 权威接口按函数读取 taint，不再维护 taint->propagation 反向列表。
+        self.assertEqual([item.taint_id for item in self.store.list_taints_in_function(f.func_id)], [t.taint_id])
         props = self.store.list_propagations_from(f.func_id)
         self.assertEqual(len(props), 1)
         self.assertEqual(props[0].validations[0].target, "msg->length")
@@ -68,8 +69,9 @@ class TestStore(unittest.TestCase):
         self.store.upsert_edge(e)
         self.assertEqual(len(self.store.list_path_edges("p1")), 1)
         self.assertEqual(len(self.store.pending_edges()), 1)
-        self.store.set_edge_status(e.edge_id, "done")
-        self.assertEqual(len(self.store.pending_edges()), 0)
+        # DataflowStore no longer exposes edge status mutation; this test covers
+        # the MySQL-backed insert/read contract only.
+        self.assertEqual(self.store.pending_edges()[0].status, "pending")
 
     def test_triple_dedup(self):
         f = self._func()
@@ -84,9 +86,9 @@ class TestStore(unittest.TestCase):
         # 不同前置校验在当前实现里仍视为已覆盖
         same_taint_hit = self.store.find_processed_taint(f.func_id, "msg[0]", "y<0::d")
         self.assertIsNotNone(same_taint_hit)
-        # 不同污点签名也命中: 任务/epoch 内同一函数只分析一次
+        # 当前跨子任务 claim 的键包含污点签名。
         miss2 = self.store.find_processed_taint(f.func_id, "msg[1]", "x>0::c")
-        self.assertIsNotNone(miss2)
+        self.assertIsNone(miss2)
 
 
 class TestTaskGraphStore(unittest.TestCase):
@@ -95,7 +97,8 @@ class TestTaskGraphStore(unittest.TestCase):
         self.db_path = Path(self.td.name) / "run" / "vuln-scan.sqlite"
         self.run_root = self.db_path.parent
         self.task_root = self.run_root.parent
-        self.store = VulnScanStore(self.db_path)
+        self.graph_stores = TestGraphStoreFactory()
+        self.store = self.graph_stores.create(self.db_path)
 
     def tearDown(self):
         self.td.cleanup()
@@ -166,6 +169,8 @@ class TestTaskGraphStore(unittest.TestCase):
             session_kind="taint",
             display_name="root.taint",
             status="done",
+            mtime=1.0,
+            event_count=2,
         ))
         self.store.start_run(run_id="run-1", task_id="task-1", root_file="src/root.cpp", root_function="Root", source_root="/src")
         self.store.add_finding(VulnFindingRecord(

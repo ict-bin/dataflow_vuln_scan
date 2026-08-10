@@ -24,10 +24,12 @@ logger = logging.getLogger("dvs.dagflow.dag_store")
 class DagflowStore:
     """dagflow DAG 存储 + 去重锚点 (MySQL ONLY)。"""
 
-    def __init__(self, run_dir: str | Path | None = None, mysql_store: Any = None) -> None:
+    def __init__(self, run_dir: str | Path | None = None, mysql_store: Any = None,
+                 cross_task_function_dedup_enabled: bool = True) -> None:
         # run_dir 保留兼容签名, 不再创建 SQLite 文件
         self.run_dir = Path(run_dir) if run_dir else Path("/tmp/dagflow_none")
         self._mysql = mysql_store  # SharedMysqlStore (必需)
+        self._cross_task_function_dedup_enabled = bool(cross_task_function_dedup_enabled)
 
     def close(self) -> None:
         pass  # MySQL 连接由 SharedMysqlStore 管理
@@ -65,19 +67,19 @@ class DagflowStore:
     # ── 去重锚点 (跨任务: find/try_reserve 不含 task_id) ──────────────────
     def find_processed_taint(self, func_id: str, taint_signature: str) -> bool:
         """(func_id, taint_signature) 已被任意任务分析过? (跨任务)"""
-        if not self._mysql:
+        if not self._cross_task_function_dedup_enabled or not self._mysql:
             return False
         return self._mysql.dag_find_processed(func_id, taint_signature)
 
     def try_reserve(self, func_id: str, taint_signature: str) -> bool:
         """分析前占位 (跨任务原子: INSERT...WHERE NOT EXISTS)。"""
-        if not self._mysql:
+        if not self._cross_task_function_dedup_enabled or not self._mysql:
             return True  # 无 MySQL 时放行 (不阻断)
         return self._mysql.dag_try_reserve(func_id, taint_signature)
 
     def delete_processed_taint(self, func_id: str, taint_signature: str) -> None:
         """analyze 失败时删占位 (只删本任务)。"""
-        if not self._mysql:
+        if not self._cross_task_function_dedup_enabled or not self._mysql:
             return
         self._mysql.dag_delete_processed(func_id, taint_signature)
 

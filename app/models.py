@@ -135,6 +135,10 @@ class ServiceConfig(BaseModel):
     max_trace_depth: int = Field(default=3, ge=1, le=1000, description="函数调用递归追踪最大深度")
     deep_trace_enabled: bool = Field(default=False, description="深度探索模式：不按 max_trace_depth 截断，依赖污点收敛去重")
     callee_concurrency: int = Field(default=4, ge=-1, description="callee 并行分析数：-1=自动/不限, 1=串行, N=最多 N 个并发 BFS 工作池")
+    cross_task_function_dedup_enabled: bool = Field(
+        default=True,
+        description="是否启用同一父任务范围内的跨子任务函数污点去重",
+    )
 
     # 入口快速筛查（Entry Screening）：分析前先判断根函数是否为模块入口
     entry_screen_enabled: bool = Field(default=False, description="是否启用入口快速筛查：开启后分析前先判定根函数是否为模块入口，非入口直接以 PASSED 结束并注明理由")
@@ -194,6 +198,7 @@ class TaskConfig(BaseModel):
     max_trace_depth: int = Field(default=3)
     deep_trace_enabled: bool = Field(default=False)
     callee_concurrency: int = Field(default=4)
+    cross_task_function_dedup_enabled: bool = Field(default=True)
     entry_screen_enabled: bool = Field(default=False)
     entry_screen_whitelist: list[str] = Field(default_factory=lambda: list(DEFAULT_ENTRY_WHITELIST))
     entry_screen_thinking_level: str = Field(default="off")

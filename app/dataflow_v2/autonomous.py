@@ -107,7 +107,11 @@ class AutonomousRunner:
             if not cfg.source_file:
                 return TaskResult(task_id=tid, status=TaskStatus.INVALID_INPUT, task=cfg.task,
                                   error="autonomous: source_file 未指定")
-            store = DataflowStore(v2_run_dir, mysql_store=self._create_mysql_store("autonomous"))
+            store = DataflowStore(
+                v2_run_dir,
+                mysql_store=self._create_mysql_store("autonomous"),
+                cross_task_function_dedup_enabled=cfg.cross_task_function_dedup_enabled,
+            )
             self._emit("v2_indexing_source_tree")
             ensure_file_indexed(source_root, cfg.source_file, store)
             root_func = store.find_function(cfg.function_name, cfg.source_file) \

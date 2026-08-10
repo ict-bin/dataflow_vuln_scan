@@ -687,6 +687,7 @@ class RunAgentPromptFileTests(unittest.TestCase):
 
     def test_legacy_dagflow_vuln_mining_is_forced_off(self):
         from app.dagflow.mining_agent import MiningAgent
+        from app.dagflow.models import TaintDAG
 
         cfg = SimpleNamespace(
             cwd="/tmp/source",
@@ -702,7 +703,12 @@ class RunAgentPromptFileTests(unittest.TestCase):
                 default_tools=["read"],
             ),
         )
-        store = SimpleNamespace(load_dag=lambda *_: object())
+        store = SimpleNamespace(
+            load_dag=lambda func_id, taint_sig: TaintDAG(
+                func_id=func_id,
+                taint_signature=taint_sig,
+            ),
+        )
         captured: dict[str, object] = {}
 
         def fake_run_agent(*, thinking_level: str, **kwargs):

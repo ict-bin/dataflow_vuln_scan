@@ -47,10 +47,12 @@ def _validation_from_dict(v: dict) -> Validation:
 class DataflowStore:
     """V2 引擎存储访问层 (MySQL ONLY, 无 SQLite)。"""
 
-    def __init__(self, run_dir: str | Path, mysql_store=None) -> None:
+    def __init__(self, run_dir: str | Path, mysql_store=None,
+                 cross_task_function_dedup_enabled: bool = True) -> None:
         self.run_dir = Path(run_dir)
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self._mysql = mysql_store  # SharedMysqlStore
+        self._cross_task_function_dedup_enabled = bool(cross_task_function_dedup_enabled)
 
     def close(self) -> None:
         pass  # MySQL 连接由 SharedMysqlStore 管理
@@ -171,7 +173,7 @@ class DataflowStore:
     # ── processed_taints (父任务范围内函数级去重 + 每任务审计) ─────────
     def add_processed_taint(self, func_id: str, pt: ProcessedTaint) -> None:
         """写入 processed_taint (func_id 级, per-task 隔离)。"""
-        if not self._mysql:
+        if not self._cross_task_function_dedup_enabled or not self._mysql:
             return
         ts = _norm_sig(pt.taint_signature or "")
         tp_json = json.dumps(pt.taint_params, ensure_ascii=False)
@@ -182,7 +184,7 @@ class DataflowStore:
 
         仅同一父任务范围内的已有分析会使占位失败。
         """
-        if not self._mysql:
+        if not self._cross_task_function_dedup_enabled or not self._mysql:
             return True
         ts = _norm_sig(pt.taint_signature or "")
         tp_json = json.dumps(pt.taint_params, ensure_ascii=False)
@@ -191,7 +193,7 @@ class DataflowStore:
     def delete_processed_taint(self, func_id: str, taint_signature: str,
                                pre_validation_signature: str = "") -> None:
         """删除占位 (仅本任务记录, 分析失败时让后续可重试)。"""
-        if not self._mysql:
+        if not self._cross_task_function_dedup_enabled or not self._mysql:
             return
         ts = _norm_sig(taint_signature or "")
         self._mysql.v2_delete_processed_taint(func_id, ts)
@@ -202,7 +204,7 @@ class DataflowStore:
 
         同一父任务范围内任意任务已分析过该函数+该污点 → 跳过并复用。
         """
-        if not self._mysql:
+        if not self._cross_task_function_dedup_enabled or not self._mysql:
             return None
         ts = _norm_sig(taint_signature or "")
         return self._mysql.v2_find_processed_taint(func_id, ts)
