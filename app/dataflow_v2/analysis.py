@@ -509,7 +509,13 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
             self.graph_store.update_task_graph_node(node_id, primary_session_relpath=session_relpath)
 
         # 3) 构造 prompt
-        prompt = self._build_prompt(func, body, taint_params, pre_validations)
+        prompt = self._build_prompt(
+            func,
+            body,
+            taint_params,
+            pre_validations,
+            include_entry_analysis_context=getattr(ctx, "depth", 0) == 0,
+        )
         acfg = self.cfg.workers.agents[0] if self.cfg.workers.agents else None
         if acfg is None:
             return AnalysisResult(description="no agent configured", self_contained=False)
@@ -1213,8 +1219,66 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
         )
         return inferred
 
+    def _build_entry_analysis_prompt_context(self, taint_params: TaintParamInfo) -> str:
+        """Render optional entry-analysis evidence for the root taint prompt."""
+        cfg = getattr(self, "cfg", None)
+        if cfg is None:
+            return ""
+
+        def _value(name: str, limit: int = 1000) -> str:
+            value = " ".join(str(getattr(cfg, name, "") or "").split())
+            if len(value) <= limit:
+                return value
+            return f"{value[:limit].rstrip()}...（上游内容已截断）"
+
+        lines: list[str] = []
+        function_description = _value("function_description")
+        if function_description:
+            source = _value("function_description_source", 80)
+            suffix = f" [{source}]" if source else ""
+            lines.append(f"- 函数职责{suffix}: {function_description}")
+
+        entry_reason = _value("entry_reason")
+        if entry_reason:
+            source = _value("entry_reason_source", 80)
+            suffix = f" [{source}]" if source else ""
+            lines.append(f"- 外部可达性依据{suffix}: {entry_reason}")
+
+        current_taints = {
+            str(name).strip()
+            for name in (taint_params.names or [])
+            if str(name).strip() and str(name).strip() != "auto"
+        }
+        taint_lines: list[str] = []
+        for detail in getattr(cfg, "taint_details", []) or []:
+            if not isinstance(detail, dict):
+                continue
+            name = str(detail.get("name") or "").strip()
+            description = " ".join(str(detail.get("description") or "").split())
+            if not name or not description or name not in current_taints:
+                continue
+            if len(description) > 1000:
+                description = f"{description[:1000].rstrip()}...（上游内容已截断）"
+            source = " ".join(str(detail.get("description_source") or "").split())[:80]
+            suffix = f" [{source}]" if source else ""
+            taint_lines.append(f"  - {name}{suffix}: {description}")
+        if taint_lines:
+            lines.append("- 当前入口污点的上游说明:")
+            lines.extend(taint_lines)
+
+        if not lines:
+            return ""
+        lines.extend((
+            "",
+            "以上为上游入口分析结论，必须结合当前源码复核。重点验证当前污点是否仍由外部攻击者控制、"
+            "是否经过充分校验，以及其向具体 handler、危险操作或下游函数的真实传播；不要据此自动把其他参数视为污点。",
+        ))
+        context = "\n".join(lines)
+        return f"## 上游入口分析结论（需结合源码复核）\n{context}"
+
     def _build_prompt(self, func: FunctionRecord, body: str,
-                      taint_params: TaintParamInfo, pre_validations: list[Validation]) -> str:
+                      taint_params: TaintParamInfo, pre_validations: list[Validation],
+                      *, include_entry_analysis_context: bool = False) -> str:
         if taint_params.names == ["auto"] or taint_params.signature == "auto":
             taint_desc = ("自行分析（EA 未指定具体污点参数）。\n"
                           "请识别本函数中所有外部输入来源，包括但不限于：\n"
@@ -1233,6 +1297,12 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
             current_func=func,
         )
         pre_val_text = "\n".join(upstream_validation_hints) or "(无)"
+        entry_context = (
+            self._build_entry_analysis_prompt_context(taint_params)
+            if include_entry_analysis_context
+            else ""
+        )
+        entry_context_section = f"\n\n{entry_context}" if entry_context else ""
         return (
             f"# 阶段：单函数污点传播分析 Fork\n\n"
             f"**重要**: 本 session 继承了父函数的分析历史。你只分析 **当前函数体** "
@@ -1243,7 +1313,7 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
             f"对攻击者不可控的常量、编译期固定值、静态配置、进程内部状态、纯内部派生值以及其他无法控制的内容，以及不太可能造成安全危害的污点,如简单的类型或者已经经过足够多校验的污点，一律不要作为污点继续跟踪，也不要输出到最终结果，可根据经验进行判断是否属于攻击者可控内容。\n\n"
             f"如果目标函数和传入的污点，不太可能造成安全问题，或者目标函数功能是没有危险的，也不需要跟踪，也不要输出到最终结果,只有值得接下来分析的污点和目标函数，才需要输出到最终结果中。\n\n"
             f"如果代码是二进制逆向的代码，或者识别的target_function是函数指针之类（或者是变量），需要识别所有可能的函数指针（有必要请读取原始文件），不要直接输出逆向的回调变量，需要输出的是回调变量的函数，如果有多个可能性，每一种可能性都需要输出（同样需要遵守有危险的污点才记录的标准）\n\n"
-            f"入口污点: {taint_desc}\n\n"
+            f"入口污点: {taint_desc}{entry_context_section}\n\n"
             "## 校验提醒（从根到本函数已累积，识别可能不准确，仅供参考）\n"
             f"前置校验摘要（上游链路）:\n{pre_val_text}\n"
             "当前函数内相关校验点:\n(待分析，请在输出中体现)\n"

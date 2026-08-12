@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from app.dataflow_v2.analysis import TaintAnalysisCallbacks, _collect_validation_hints, _format_validation_hint
-from app.dataflow_v2.models import FunctionRecord, PropagationRecord, Validation
+from app.dataflow_v2.models import FunctionRecord, PropagationRecord, TaintParamInfo, Validation
 
 
 def test_format_validation_hint_includes_owner_function():
@@ -135,3 +135,65 @@ def test_build_prompt_uses_structured_validation_sections():
     assert "当前函数内相关校验点" in prompt
     assert "可能相关的调用点" in prompt
     assert "1/output/libipsec.c::IPSEC_AH_HandleInputPktV4 @L9697" in prompt
+
+
+def test_root_prompt_includes_only_present_matching_entry_analysis_context():
+    cb = object.__new__(TaintAnalysisCallbacks)
+    cb.source_root = "/src/root"
+    cb.cfg = type("Cfg", (), {
+        "function_description": "按 method_index 分发 RPC 输入给服务 handler",
+        "function_description_source": "agent",
+        "entry_reason": "该函数是 RPC 服务方法分发点",
+        "entry_reason_source": "agent",
+        "taint_details": [
+            {"name": "input", "description": "客户端请求反序列化后的消息内容", "description_source": "agent"},
+            {"name": "ignored", "description": "不应注入当前污点会话"},
+        ],
+    })()
+    func = FunctionRecord(file="service.c", name="dispatch", signature="void dispatch(void)", start_line=1, end_line=4)
+    prompt = cb._build_prompt(
+        func,
+        "void dispatch(void) {}",
+        TaintParamInfo(positions=[0], signature="input", names=["input"]),
+        [],
+        include_entry_analysis_context=True,
+    )
+
+    assert "## 上游入口分析结论（需结合源码复核）" in prompt
+    assert "函数职责 [agent]: 按 method_index 分发 RPC 输入给服务 handler" in prompt
+    assert "外部可达性依据 [agent]: 该函数是 RPC 服务方法分发点" in prompt
+    assert "input [agent]: 客户端请求反序列化后的消息内容" in prompt
+    assert "ignored" not in prompt
+
+
+def test_non_root_prompt_omits_entry_analysis_context_when_fields_are_missing():
+    cb = object.__new__(TaintAnalysisCallbacks)
+    cb.source_root = "/src/root"
+    cb.cfg = type("Cfg", (), {
+        "function_description": "",
+        "function_description_source": "",
+        "entry_reason": "",
+        "entry_reason_source": "",
+        "taint_details": [{"name": "input", "description": "only root can use this"}],
+    })()
+    func = FunctionRecord(file="service.c", name="callee", signature="void callee(void)", start_line=1, end_line=4)
+    prompt = cb._build_prompt(
+        func,
+        "void callee(void) {}",
+        TaintParamInfo(positions=[0], signature="input", names=["input"]),
+        [],
+    )
+
+    assert "上游入口分析结论" not in prompt
+    assert "only root can use this" not in prompt
+
+
+def test_entry_analysis_context_is_empty_when_config_has_no_entry_fields():
+    cb = object.__new__(TaintAnalysisCallbacks)
+    cb.cfg = type("Cfg", (), {})()
+
+    context = cb._build_entry_analysis_prompt_context(
+        TaintParamInfo(positions=[0], signature="input", names=["input"]),
+    )
+
+    assert context == ""
