@@ -11,6 +11,7 @@ ARG BASE_IMAGE=ghcr.io/gaiasechw/secflow-app-dataflow-vuln-scan-base:latest
 FROM ${BASE_IMAGE}
 
 ARG SECFLOW_BUILD_VERSION=""
+ARG ATHENA_SKILL_SHA=""
 
 WORKDIR /opt/dataflow_vuln_scan
 
@@ -49,7 +50,23 @@ COPY skills/            ./skills/
 COPY extensions/        ./extensions/
 COPY config.example.json .env.example ./
 
-RUN printf '{"build_version":"%s"}\n' "$SECFLOW_BUILD_VERSION" > /opt/dataflow_vuln_scan/build_meta.json
+# Athena 是与漏洞挖掘同级注册的 Pi skill。以 Actions 解析出的 SHA 固定版本，
+# 使远程 main 更新能够失效 Buildx 缓存，同时每个镜像可审计、可复现。
+RUN test -n "$ATHENA_SKILL_SHA" \
+    && mkdir -p /opt/dataflow_vuln_scan/skills/athena-dataflow-vulnerability \
+    && git init /opt/dataflow_vuln_scan/skills/athena-dataflow-vulnerability \
+    && git -C /opt/dataflow_vuln_scan/skills/athena-dataflow-vulnerability remote add origin https://github.com/AI4SecResearch/Athena-skill.git \
+    && git -C /opt/dataflow_vuln_scan/skills/athena-dataflow-vulnerability fetch --depth 1 origin "$ATHENA_SKILL_SHA" \
+    && git -C /opt/dataflow_vuln_scan/skills/athena-dataflow-vulnerability checkout --detach FETCH_HEAD \
+    && test "$(git -C /opt/dataflow_vuln_scan/skills/athena-dataflow-vulnerability rev-parse HEAD)" = "$ATHENA_SKILL_SHA" \
+    && test -f /opt/dataflow_vuln_scan/skills/athena-dataflow-vulnerability/SKILL.md \
+    && test -f /opt/dataflow_vuln_scan/skills/athena-dataflow-vulnerability/athena.py \
+    && sed -i 's/^name: athena-skill$/name: athena-dataflow-vulnerability/' /opt/dataflow_vuln_scan/skills/athena-dataflow-vulnerability/SKILL.md \
+    && grep -Fx 'name: athena-dataflow-vulnerability' /opt/dataflow_vuln_scan/skills/athena-dataflow-vulnerability/SKILL.md \
+    && chmod +x /opt/dataflow_vuln_scan/skills/athena-dataflow-vulnerability/athena.py \
+    && printf '%s\n' "$ATHENA_SKILL_SHA" > /opt/dataflow_vuln_scan/skills/athena-dataflow-vulnerability/REVISION \
+    && rm -rf /opt/dataflow_vuln_scan/skills/athena-dataflow-vulnerability/.git \
+    && printf '{"build_version":"%s","athena_skill_sha":"%s"}\n' "$SECFLOW_BUILD_VERSION" "$ATHENA_SKILL_SHA" > /opt/dataflow_vuln_scan/build_meta.json
 RUN find . -name '*.sh' -exec sed -i 's/\r$//' {} + \
     && chmod +x scripts/*.sh 2>/dev/null || true \
     && chmod +x scripts/autonomous/*.py 2>/dev/null || true \
@@ -74,6 +91,7 @@ RUN mkdir -p /root/.pi/agent/skills \
     && ln -sf /opt/dataflow_vuln_scan/skills/write-taint-flow /root/.pi/agent/skills/write-taint-flow \
     && ln -sf /opt/dataflow_vuln_scan/skills/write-taint-graph /root/.pi/agent/skills/write-taint-graph \
     && ln -sf /opt/dataflow_vuln_scan/skills/mine-dataflow-vulnerability /root/.pi/agent/skills/mine-dataflow-vulnerability \
+    && ln -sf /opt/dataflow_vuln_scan/skills/athena-dataflow-vulnerability /root/.pi/agent/skills/athena-dataflow-vulnerability \
     && ln -sf /opt/dataflow_vuln_scan/skills/v2/v2-database /root/.pi/agent/skills/v2-database
 
 # ═══ 挂载点 ═══════════════════════════════════════════════════════════════════

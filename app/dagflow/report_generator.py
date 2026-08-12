@@ -22,12 +22,19 @@ def _task_pi_dir(config: Any, role: str) -> str:
 
 def _system_prompt() -> str:
     """系统提示: 内嵌 V2 SKILL (mine-dataflow-vulnerability)。"""
-    from ..vuln_report_utils import build_v2_system_prompt, EMBEDDED_VULN_MINING_SKILL
+    from ..vuln_report_utils import (
+        ATHENA_DATAFLOW_VULN_SKILL_GUIDANCE,
+        EMBEDDED_VULN_MINING_SKILL,
+        build_v2_system_prompt,
+        with_athena_report_env,
+    )
     return (
         build_v2_system_prompt(custom="vuln-mining")
         + "\n\n# 内嵌技能：mine-dataflow-vulnerability\n"
           "禁止再读取 skills/mine-dataflow-vulnerability/SKILL.md。\n\n"
         + EMBEDDED_VULN_MINING_SKILL
+        + "\n\n"
+        + ATHENA_DATAFLOW_VULN_SKILL_GUIDANCE
     )
 
 
@@ -55,8 +62,11 @@ class ReportGenerator:
         prompt = self._build_prompt(candidates, chain, func, source)
         from ..llm_retry import run_agent_with_design_retry
         from ..parsers import _extract_json_object
-        v2_env = {"DVS_SOURCE_ROOT": str(self.source_root),
-                  "DVS_V2_DB_DIR": str(self.sessions_dir.parent / "dataflow-v2")}
+        v2_env = with_athena_report_env(
+            {"DVS_SOURCE_ROOT": str(self.source_root),
+             "DVS_V2_DB_DIR": str(self.sessions_dir.parent / "dataflow-v2")},
+            str(getattr(self.config, "project_id", "") or ""),
+        )
         logger.info("[dagflow-report] CALLING run_agent func=%s candidates=%d session=%s",
                     func.name, len(candidates), session_path[-60:])
 

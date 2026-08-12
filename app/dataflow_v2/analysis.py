@@ -31,9 +31,11 @@ from ..runner import run_agent
 from ..llm_retry import run_agent_with_design_retry
 from ..vuln_intake_reporter import report_finding_to_intake
 from ..vuln_report_utils import (EMBEDDED_VULN_MINING_SKILL as _EMBEDDED_VULN_MINING_SKILL,
+                                  ATHENA_DATAFLOW_VULN_SKILL_GUIDANCE as _ATHENA_DATAFLOW_VULN_SKILL_GUIDANCE,
                                   build_v2_system_prompt as _build_v2_system_prompt,
                                   format_vuln_report_md as _format_vuln_report_md,
-                                  read_prompt as _read_prompt, safe_name as _safe_name)
+                                  read_prompt as _read_prompt, safe_name as _safe_name,
+                                  with_athena_report_env as _with_athena_report_env)
 from ..vuln_store import (
     TaskGraphNodeRecord,
     TaskGraphSessionRecord,
@@ -1475,13 +1477,19 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
         step2_system = (_build_v2_system_prompt(custom="vuln-mining")
                         + "\n\n# 内嵌技能：mine-dataflow-vulnerability\n"
                           "禁止再读取 skills/mine-dataflow-vulnerability/SKILL.md。\n\n"
-                        + _EMBEDDED_VULN_MINING_SKILL)
+                        + _EMBEDDED_VULN_MINING_SKILL
+                        + "\n\n"
+                        + _ATHENA_DATAFLOW_VULN_SKILL_GUIDANCE)
         logger.info("[V2-mine] STEP2 report CALLING run_agent (session=%s thinking=%s candidates=%d)",
                     str(fork_session)[-60:], _thinking, len(candidates))
         output = run_agent(
             prompt=step2_prompt, model=acfg.model, tools=acfg.tools or self.cfg.workers.default_tools,
             cwd=str(self.vuln_root.parent), session_file=str(fork_session),
-            system_prompt=step2_system, cancel_event=self.cancel_event, env=v2_env,
+            system_prompt=step2_system, cancel_event=self.cancel_event,
+            env=_with_athena_report_env(
+                v2_env,
+                getattr(self.cfg, "project_id", "") or "",
+            ),
             thinking_level=_thinking, run_timeout_seconds=self.cfg.agent_run_timeout_seconds,
             timeout_retry_enabled=self.cfg.agent_timeout_retry_enabled,
             timeout_max_retries=self.cfg.agent_timeout_max_retries,

@@ -242,6 +242,23 @@ def format_vuln_report_md(item: dict, finding_id: str, source_file: str,
 # 内嵌技能文本 (v1 vuln_workflow 与 v2 mine_vulns 共用)
 EMBEDDED_VULN_MINING_SKILL = read_prompt("skills/mine-dataflow-vulnerability/SKILL.md")
 
+ATHENA_DATAFLOW_VULN_SKILL_GUIDANCE = """# 按需知识库检索：athena-dataflow-vulnerability
+
+仅在漏洞报告生成阶段，如果当前源码、候选漏洞和污点传播上下文不足以确认攻击前提、接口或协议语义、权限限制、已知利用条件或安全约束时，才允许使用 `athena-dataflow-vulnerability` skill 查询。每个具体问题最多查询一次，查询必须带上模块、函数、接口或协议和待确认问题。
+
+Athena 返回仅能补充领域背景，不能代替当前任务的源码证据。报告中的源码位置、行号、污点传播边、调用路径、可达性和漏洞结论必须由当前代码与上下文支撑；不得依据检索结果编造它们。Athena 不可达、返回错误或缺少项目 ID 时，不得阻塞报告生成，继续依据现有证据完成判断。
+
+调用时使用 Pi skill 的绝对路径：`A=/root/.pi/agent/skills/athena-dataflow-vulnerability/athena.py; "$A" ask "<问题>"`。运行期已注入当前项目的 `ATHENA_PROJECT_ID` 和调用方标识。"""
+
+
+def with_athena_report_env(base_env: dict[str, str], project_id: str = "") -> dict[str, str]:
+    """Add Athena configuration only to vulnerability-report agent calls."""
+    return {
+        **base_env,
+        "ATHENA_PROJECT_ID": str(project_id or ""),
+        "ATHENA_CALLER": "dataflow-vuln-scan",
+    }
+
 # V2 数据库使用技能 (所有 v2 LLM 共用, 提前注入 system prompt 减少轮次)
 EMBEDDED_V2_DB_SKILL = read_prompt("skills/v2/v2-database/SKILL.md")
 

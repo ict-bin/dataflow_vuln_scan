@@ -17,6 +17,7 @@ jobs:
     outputs:
       date_tag: ${{ steps.date.outputs.date_tag }}
       image_name: ${{ steps.img.outputs.name }}
+      athena_skill_sha: ${{ steps.athena.outputs.sha }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -37,6 +38,13 @@ jobs:
           DATE_TAG="$(TZ=Asia/Shanghai date -d "@${COMMIT_TS}" +'%Y%m%d-%H%M%S')-${SHORT_SHA}"
           echo "date_tag=${DATE_TAG}" >> "$GITHUB_OUTPUT"
           echo "Generated tag: ${DATE_TAG}"
+      - name: Resolve Athena skill main revision
+        id: athena
+        run: |
+          ATHENA_SKILL_SHA="$(git ls-remote https://github.com/AI4SecResearch/Athena-skill.git refs/heads/main | awk '{print $1}')"
+          test -n "${ATHENA_SKILL_SHA}"
+          echo "sha=${ATHENA_SKILL_SHA}" >> "$GITHUB_OUTPUT"
+          echo "Athena skill main revision: ${ATHENA_SKILL_SHA}"
 
   build-amd64:
     needs: prepare
@@ -59,6 +67,7 @@ jobs:
             --platform linux/amd64 \
             --build-arg SECFLOW_BUILD_VERSION=${{ needs.prepare.outputs.date_tag }} \
             --build-arg CACHEBUST=${{ github.sha }} \
+            --build-arg ATHENA_SKILL_SHA=${{ needs.prepare.outputs.athena_skill_sha }} \
             --cache-from type=gha,scope=secflow-app-dataflow-vuln-scan-amd64 \
             --cache-to type=gha,scope=secflow-app-dataflow-vuln-scan-amd64,mode=max \
             --file Dockerfile \
@@ -89,6 +98,7 @@ jobs:
             --platform linux/arm64 \
             --build-arg SECFLOW_BUILD_VERSION=${{ needs.prepare.outputs.date_tag }} \
             --build-arg CACHEBUST=${{ github.sha }} \
+            --build-arg ATHENA_SKILL_SHA=${{ needs.prepare.outputs.athena_skill_sha }} \
             --cache-from type=gha,scope=secflow-app-dataflow-vuln-scan-arm64 \
             --cache-to type=gha,scope=secflow-app-dataflow-vuln-scan-arm64,mode=max \
             --file Dockerfile \
