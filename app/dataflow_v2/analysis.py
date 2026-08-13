@@ -53,7 +53,7 @@ from .finding_store import persist_finding
 from .models import (
     FunctionRecord, PropagationRecord, TaintParamInfo, TaintRecord, Validation,
 )
-from .orchestrator import AnalysisResult, AnalysisCallbacks, PathContext, _session_path
+from .orchestrator import AnalysisResult, AnalysisCallbacks, PathContext, PathFunction, _session_path
 from .store import DataflowStore
 
 logger = logging.getLogger("dvs.dataflow_v2")
@@ -115,6 +115,126 @@ def _format_validation_hint(v: Validation) -> str:
     return (
         f"- [{v.kind or 'other'}] {owner} {_format_line_hint(v.line)}: "
         f"{v.target or '(unknown)'} - {v.summary or '(no summary)'}"
+    )
+
+
+def _validation_key(v: Validation) -> tuple[str, str, int, str, str, str]:
+    return (
+        str(v.function_file or ""),
+        str(v.function_name or ""),
+        int(v.line or 0),
+        str(v.kind or ""),
+        str(v.target or ""),
+        str(v.summary or ""),
+    )
+
+
+def _format_path_taint(taint_params: TaintParamInfo) -> str:
+    names = [str(name).strip() for name in (taint_params.names or []) if str(name).strip()]
+    if names and names != ["auto"]:
+        return ", ".join(names)
+    signature = str(taint_params.signature or "").strip()
+    return signature if signature and signature != "auto" else "自动识别"
+
+
+def _format_ordered_validation_chain(
+    function_chain: list[PathFunction],
+    validations: list[Validation],
+    *,
+    max_validations: int = 30,
+) -> str:
+    """Render accumulated validations grouped by DFS function/taint order."""
+    grouped: dict[tuple[str, str], list[Validation]] = {}
+    seen: set[tuple[str, str, int, str, str, str]] = set()
+    for validation in validations:
+        if not (validation.target or validation.summary):
+            continue
+        key = _validation_key(validation)
+        if key in seen:
+            continue
+        seen.add(key)
+        owner = (str(validation.function_file or ""), str(validation.function_name or ""))
+        grouped.setdefault(owner, []).append(validation)
+
+    remaining = max(0, int(max_validations))
+    lines: list[str] = []
+    represented: set[tuple[str, str]] = set()
+    for item in function_chain:
+        func = item.func
+        owner = (str(func.file or ""), str(func.name or ""))
+        represented.add(owner)
+        lines.append(f"{func.name or '(unknown)'} -- {_format_path_taint(item.taint_params)}")
+        owner_validations = grouped.get(owner, [])
+        emitted = 0
+        for validation in owner_validations:
+            if remaining <= 0:
+                break
+            lines.append(
+                f"    [{validation.kind or 'other'}] {_format_line_hint(validation.line)}: "
+                f"{validation.target or '(unknown)'} - {validation.summary or '(no summary)'}"
+            )
+            emitted += 1
+            remaining -= 1
+        if emitted == 0:
+            lines.append("    (无已识别校验)")
+
+    unassociated = [
+        validation
+        for owner, owner_validations in grouped.items()
+        if owner not in represented
+        for validation in owner_validations
+    ]
+    if unassociated and remaining > 0:
+        lines.append("(未能关联调用链的校验)")
+        for validation in unassociated:
+            if remaining <= 0:
+                break
+            lines.append(
+                f"    [{validation.kind or 'other'}] {_format_function_identity(validation.function_file, validation.function_name)} "
+                f"{_format_line_hint(validation.line)}: {validation.target or '(unknown)'} - "
+                f"{validation.summary or '(no summary)'}"
+            )
+            remaining -= 1
+    if len(seen) > max(0, int(max_validations)):
+        lines.append("    (其余已累积校验已省略)")
+    return "\n".join(lines) or "(无)"
+
+
+def _path_function_chain(ctx: PathContext, func: FunctionRecord,
+                         taint_params: TaintParamInfo) -> list[PathFunction]:
+    """Return the DFS root-to-current chain, including a safe direct-call fallback."""
+    chain = list(getattr(ctx, "function_chain", []) or [])
+    if not chain:
+        return [PathFunction(func, taint_params)]
+    return chain
+
+
+def _format_path_call_chain(ctx: PathContext, func: FunctionRecord,
+                            taint_params: TaintParamInfo) -> str:
+    """Render the root-to-current taint propagation path without taint details."""
+    return "\n".join(
+        f"{item.func.file or '(unknown)'}-->{item.func.name or '(unknown)'}"
+        for item in _path_function_chain(ctx, func, taint_params)
+    ) or "(无)"
+
+
+def _path_validations(pre_validations: list[Validation],
+                      props: list[PropagationRecord]) -> list[Validation]:
+    """Combine upstream and current-function validations for prompt rendering only."""
+    return list(pre_validations) + [
+        validation
+        for prop in props
+        for validation in prop.validations
+    ]
+
+
+def _format_path_validation_context(ctx: PathContext, func: FunctionRecord,
+                                    taint_params: TaintParamInfo,
+                                    props: list[PropagationRecord]) -> str:
+    """Render the current DFS taint path and its validations in call order."""
+    return _format_ordered_validation_chain(
+        _path_function_chain(ctx, func, taint_params),
+        _path_validations(ctx.pre_validations, props),
     )
 
 
@@ -516,6 +636,7 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
             body,
             taint_params,
             pre_validations,
+            path_context=ctx,
             include_entry_analysis_context=getattr(ctx, "depth", 0) == 0,
         )
         acfg = self.cfg.workers.agents[0] if self.cfg.workers.agents else None
@@ -1280,6 +1401,7 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
 
     def _build_prompt(self, func: FunctionRecord, body: str,
                       taint_params: TaintParamInfo, pre_validations: list[Validation],
+                      path_context: PathContext | None = None,
                       *, include_entry_analysis_context: bool = False) -> str:
         if taint_params.names == ["auto"] or taint_params.signature == "auto":
             taint_desc = ("自行分析（EA 未指定具体污点参数）。\n"
@@ -1293,12 +1415,13 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                           f"名字 {taint_params.names}\n"
                           "注意：即使上游已经传入了污点参数，也必须在当前函数内重新判断这些参数是否真的属于外部攻击者可控制的输入；"
                           "只对可被外部攻击者控制的内容继续标注和跟踪，不能默认所有传入参数都要作为污点，所有外部攻击者无法控制的内容都不要标注和跟踪，所有污点中，那些不太可能造成安全危险的污点也不要标记和跟踪。")
-        upstream_validation_hints, _ = _collect_validation_hints(
+        function_chain = list(getattr(path_context, "function_chain", []) or [])
+        if not function_chain:
+            function_chain = [PathFunction(func, taint_params)]
+        pre_val_text = _format_ordered_validation_chain(
+            function_chain,
             pre_validations,
-            [],
-            current_func=func,
         )
-        pre_val_text = "\n".join(upstream_validation_hints) or "(无)"
         entry_context = (
             self._build_entry_analysis_prompt_context(taint_params)
             if include_entry_analysis_context
@@ -1316,8 +1439,8 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
             f"如果目标函数和传入的污点，不太可能造成安全问题，或者目标函数功能是没有危险的，也不需要跟踪，也不要输出到最终结果,只有值得接下来分析的污点和目标函数，才需要输出到最终结果中。\n\n"
             f"如果代码是二进制逆向的代码，或者识别的target_function是函数指针之类（或者是变量），需要识别所有可能的函数指针（有必要请读取原始文件），不要直接输出逆向的回调变量，需要输出的是回调变量的函数，如果有多个可能性，每一种可能性都需要输出（同样需要遵守有危险的污点才记录的标准）\n\n"
             f"入口污点: {taint_desc}{entry_context_section}\n\n"
-            "## 校验提醒（从根到本函数已累积，识别可能不准确，仅供参考）\n"
-            f"前置校验摘要（上游链路）:\n{pre_val_text}\n"
+            "## 校验提醒（按污点传播调用顺序，识别可能不准确，仅供参考）\n"
+            f"前置校验（函数 -- 污点；每个函数下列出其已识别校验）:\n{pre_val_text}\n"
             "当前函数内相关校验点:\n(待分析，请在输出中体现)\n"
             "可能相关的调用点:\n(待分析，请在输出中体现)\n\n"
             f"## 函数体\n```c\n{body}\n```\n\n"
@@ -1380,8 +1503,9 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
         taints = store.list_taints_in_function(func.func_id)
         props = store.list_propagations_from(func.func_id)
         dataflow_text = self._format_taint_context(func, taint_params, ctx, taints, props, store)
-        validation_hints, function_hints = _collect_validation_hints(ctx.pre_validations, props, current_func=func)
-        validation_hint_text = "\n".join(validation_hints) or "(无)"
+        path_call_chain_text = _format_path_call_chain(ctx, func, taint_params)
+        path_validation_text = _format_path_validation_context(ctx, func, taint_params, props)
+        _, function_hints = _collect_validation_hints(ctx.pre_validations, props, current_func=func)
         function_hint_text = "\n".join(function_hints) or "(无)"
         v2_env = {"DVS_V2_DB_DIR": str(self.vuln_root.parent / "dataflow-v2"),
                   "DVS_SOURCE_ROOT": self.source_root,
@@ -1400,8 +1524,13 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
             f"目标函数: `{func.file}::{func.name}` (行 {func.start_line}-{func.end_line})\n"
             f"源码绝对根目录: `{self.source_root}`。`{func.file}` 是相对该根目录的源码路径；如果需要使用 read/find 读取源码，请基于这个绝对根目录定位文件，不要基于当前工作目录拼接路径。\n"
             f"污点: 位置 {taint_params.positions} 签名 {taint_params.signature} 名字 {taint_params.names}\n\n"
+            "## 污点传播调用过程\n"
+            "以下为本次漏洞判断对应的调用传播路径，按入口到目标函数顺序，每行一个函数。\n"
+            f"{path_call_chain_text}\n\n"
             "## 校验提醒（识别可能不准确，仅供参考）\n"
-            f"### 可能相关的校验点（最多 30 个）\n{validation_hint_text}\n\n"
+            "校验按当前污点传播路径从入口到目标函数的顺序组织；"
+            "每行“函数 -- 污点”表示该函数收到的污点，缩进行表示该函数已识别的校验。\n"
+            f"{path_validation_text}\n\n"
             f"### 可能相关的调用点（最多 30 个）\n{function_hint_text}\n\n"
             "请重点核对这些校验是否真的覆盖危险参数、是否发生在危险操作之前、是否只是部分校验或可被绕过。\n"
             "尤其要关注路径可达性：不要把来自不同互斥分支、不同调用点、不同传播条件下的校验和危险操作简单合并。"
@@ -1703,20 +1832,18 @@ class TaintAnalysisCallbacks(AnalysisCallbacks):
                               props: list[PropagationRecord],
                               store: DataflowStore | None = None) -> str:
         from .function_extractor import read_function_body
-        pre_val = "\n".join(
-            _format_validation_hint(v)
-            for v in ctx.pre_validations
-            if v.target or v.summary
-        ) or "(无)"
-        validation_hints, function_hints = _collect_validation_hints(ctx.pre_validations, props, current_func=func)
+        path_call_chain_text = _format_path_call_chain(ctx, func, tp)
+        path_validation_text = _format_path_validation_context(ctx, func, tp, props)
+        _, function_hints = _collect_validation_hints(ctx.pre_validations, props, current_func=func)
         func_body = read_function_body(self.source_root, func, max_lines=4000)
         lines = [f"## 函数: {func.file}::{func.name} (行 {func.start_line}-{func.end_line})",
                  f"功能: {func.description or '(待分析)'}",
                  f"入口污点: 位置 {tp.positions} 签名 {tp.signature} 名字 {tp.names}",
-                 "校验提醒（识别可能不准确，仅供参考）:",
-                 f"前置校验摘要（上游链路）:\n{pre_val}",
-                 "当前函数内相关校验点:",
-                 "\n".join(validation_hints) or "(无)",
+                 "污点传播调用过程（按入口到目标函数顺序，每行一个函数）:",
+                 path_call_chain_text,
+                 "校验提醒（按调用顺序；识别可能不准确，仅供参考）:",
+                 "每行“函数 -- 污点”表示该函数收到的污点，缩进行表示该函数已识别的校验。",
+                 path_validation_text,
                  "可能相关的调用点:",
                  "\n".join(function_hints) or "(无)",
                  "",

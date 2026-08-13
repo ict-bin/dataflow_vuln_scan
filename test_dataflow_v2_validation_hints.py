@@ -1,7 +1,15 @@
 from __future__ import annotations
 
-from app.dataflow_v2.analysis import TaintAnalysisCallbacks, _collect_validation_hints, _format_validation_hint
+from app.dataflow_v2.analysis import (
+    TaintAnalysisCallbacks,
+    _collect_validation_hints,
+    _format_ordered_validation_chain,
+    _format_path_call_chain,
+    _format_path_validation_context,
+    _format_validation_hint,
+)
 from app.dataflow_v2.models import FunctionRecord, PropagationRecord, TaintParamInfo, Validation
+from app.dataflow_v2.orchestrator import PathContext, PathFunction
 
 
 def test_format_validation_hint_includes_owner_function():
@@ -103,7 +111,82 @@ def test_collect_validation_hints_includes_caller_context_for_callsites():
     )
 
 
-def test_build_prompt_uses_structured_validation_sections():
+def test_ordered_validation_chain_groups_by_function_and_taint_path_order():
+    root = FunctionRecord(file="root.c", name="root", signature="void root(void)", start_line=1, end_line=10)
+    middle = FunctionRecord(file="middle.c", name="middle", signature="void middle(void)", start_line=1, end_line=10)
+    current = FunctionRecord(file="current.c", name="current", signature="void current(void)", start_line=1, end_line=10)
+    text = _format_ordered_validation_chain(
+        [
+            PathFunction(root, TaintParamInfo(names=["packet"], signature="packet")),
+            PathFunction(middle, TaintParamInfo(names=["payload"], signature="payload")),
+            PathFunction(current, TaintParamInfo(names=["length"], signature="length")),
+        ],
+        [
+            Validation(line=20, kind="length_check", target="length", summary="caps payload length", function_file="middle.c", function_name="middle"),
+            Validation(line=4, kind="null_check", target="packet", summary="rejects null packet", function_file="root.c", function_name="root"),
+            Validation(line=5, kind="bounds_check", target="packet", summary="checks packet boundary", function_file="root.c", function_name="root"),
+        ],
+    )
+
+    assert text.index("root -- packet") < text.index("middle -- payload") < text.index("current -- length")
+    assert "    [null_check] @L4: packet - rejects null packet" in text
+    assert "    [bounds_check] @L5: packet - checks packet boundary" in text
+    assert "    [length_check] @L20: length - caps payload length" in text
+    assert "current -- length\n    (无已识别校验)" in text
+
+
+def test_vuln_path_validation_context_merges_upstream_and_current_validations():
+    root = FunctionRecord(file="root.c", name="root", signature="void root(void)", start_line=1, end_line=10)
+    current = FunctionRecord(file="current.c", name="current", signature="void current(void)", start_line=1, end_line=10)
+    ctx = PathContext("path-1")
+    ctx.function_chain = [
+        PathFunction(root, TaintParamInfo(names=["packet"], signature="packet")),
+        PathFunction(current, TaintParamInfo(names=["payload"], signature="payload")),
+    ]
+    ctx.pre_validations = [
+        Validation(line=4, kind="null_check", target="packet", summary="rejects null packet",
+                   function_file="root.c", function_name="root"),
+    ]
+    text = _format_path_validation_context(
+        ctx,
+        current,
+        TaintParamInfo(names=["payload"], signature="payload"),
+        [
+            PropagationRecord(
+                source_func_id=current.func_id,
+                validations=[
+                    Validation(line=20, kind="bounds_check", target="payload", summary="checks payload range",
+                               function_file="current.c", function_name="current"),
+                ],
+            )
+        ],
+    )
+
+    assert text.index("root -- packet") < text.index("current -- payload")
+    assert "    [null_check] @L4: packet - rejects null packet" in text
+    assert "    [bounds_check] @L20: payload - checks payload range" in text
+
+
+def test_path_call_chain_uses_file_arrow_function_in_propagation_order():
+    root = FunctionRecord(file="src/net/input.c", name="ParsePacket", signature="void ParsePacket(void)", start_line=1, end_line=10)
+    current = FunctionRecord(file="src/net/copy.c", name="CopyToBuffer", signature="void CopyToBuffer(void)", start_line=1, end_line=10)
+    ctx = PathContext("path-1")
+    ctx.function_chain = [
+        PathFunction(root, TaintParamInfo(names=["packet"], signature="packet")),
+        PathFunction(current, TaintParamInfo(names=["payload"], signature="payload")),
+    ]
+
+    text = _format_path_call_chain(ctx, current, TaintParamInfo(names=["payload"], signature="payload"))
+
+    assert text.splitlines() == [
+        "src/net/input.c-->ParsePacket",
+        "src/net/copy.c-->CopyToBuffer",
+    ]
+    assert "packet" not in text
+    assert "payload" not in text
+
+
+def test_build_prompt_uses_path_grouped_validation_section():
     cb = object.__new__(TaintAnalysisCallbacks)
     cb.source_root = "/src/root"
     func = FunctionRecord(
@@ -113,6 +196,10 @@ def test_build_prompt_uses_structured_validation_sections():
         start_line=9243,
         end_line=10159,
     )
+    path_context = PathContext("path-1")
+    path_context.function_chain = [
+        PathFunction(func, TaintParamInfo(positions=[0], signature="a1", names=["a1"])),
+    ]
     prompt = cb._build_prompt(
         func,
         "int demo(void) { return 0; }",
@@ -129,12 +216,14 @@ def test_build_prompt_uses_structured_validation_sections():
                 function_end_line=func.end_line,
             )
         ],
+        path_context=path_context,
     )
 
-    assert "前置校验摘要（上游链路）" in prompt
+    assert "按污点传播调用顺序" in prompt
+    assert "IPSEC_AH_HandleInputPktV4 -- a1" in prompt
+    assert "    [bounds_check] @L9697: *a3 - ensures auth offset is not below ip header length" in prompt
     assert "当前函数内相关校验点" in prompt
     assert "可能相关的调用点" in prompt
-    assert "1/output/libipsec.c::IPSEC_AH_HandleInputPktV4 @L9697" in prompt
 
 
 def test_root_prompt_includes_only_present_matching_entry_analysis_context():

@@ -63,12 +63,13 @@ class AnalysisResult:
 
 
 class PathContext:
-    """一条 DFS 路径的累积上下文 (前置校验链 + 已走边)。"""
+    """一条 DFS 路径的累积上下文 (前置校验链 + 有序函数/污点链)。"""
 
     def __init__(self, path_id: str) -> None:
         self.path_id = path_id
         self.pre_validations: list[Validation] = []   # 从根到当前的前置校验链
         self.edges: list[OrchestrationEdge] = []
+        self.function_chain: list[PathFunction] = []  # 根到当前的函数/污点顺序，仅供 prompt 展示
         self.depth: int = 0
 
     def validation_signature(self) -> str:
@@ -78,6 +79,7 @@ class PathContext:
         c = PathContext(new_path_id)
         c.pre_validations = list(self.pre_validations)
         c.edges = list(self.edges)
+        c.function_chain = list(self.function_chain)
         c.depth = self.depth
         return c
 
@@ -133,6 +135,14 @@ class AnalysisCallbacks:
         输出“兴趣点” (interest_points: 最可能产生漏洞、值得往深跟的 callee/sink)。
         编排器只跟入兴趣点 (目标深挖), 不做全 callee BFS。返回 AnalysisResult (含 interest_points)。"""
         return AnalysisResult()
+
+
+@dataclass(frozen=True)
+class PathFunction:
+    """污点传播路径中的一个函数及其进入该函数时的污点。"""
+
+    func: FunctionRecord
+    taint_params: TaintParamInfo
 
 
 class ChainStep:
@@ -273,6 +283,7 @@ class DfsOrchestrator:
             base_session: str = "") -> None:
         """从根函数出发 DFS。"""
         ctx = PathContext(path_id=_path_id(root_func.func_id, root_taint.signature, "0"))
+        ctx.function_chain = [PathFunction(root_func, root_taint)]
         self._process(root_func, root_taint, ctx.pre_validations, base_session, ctx, 0)
 
     # ── 核心: 处理一个函数 (返回 my_discovered) ──────────────
@@ -453,6 +464,7 @@ class DfsOrchestrator:
                 )
             sub_ctx = ctx.fork(_path_id(step.func.func_id, step.taint_params.signature, str(depth + 1)))
             sub_ctx.pre_validations = list(incoming)
+            sub_ctx.function_chain.append(PathFunction(step.func, step.taint_params))
             try:
                 child_fb = self._process(step.func, step.taint_params, incoming, base_session, sub_ctx, depth + 1)
             except BaseException:
