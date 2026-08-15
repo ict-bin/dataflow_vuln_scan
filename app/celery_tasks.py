@@ -26,6 +26,22 @@ _PGID_LOCK = threading.Lock()
 _PGID: dict[str, int] = {}
 
 
+@app.task(bind=True, name="app.celery_tasks.run_knowledge_summary_task", acks_late=True)
+def run_knowledge_summary_task(self, summary_task_id: str) -> dict:
+    """Consume one human-confirmed knowledge-summary task from its dedicated queue."""
+    from app.service.knowledge_summary import get_knowledge_summary_service
+
+    claimed = get_knowledge_summary_service().run_task(summary_task_id)
+    status = "done" if claimed else "skipped"
+    logger.info(
+        "run_knowledge_summary_task %s summary_task=%s celery_id=%s",
+        status,
+        summary_task_id,
+        self.request.id,
+    )
+    return {"summary_task_id": summary_task_id, "status": status}
+
+
 @app.task(bind=True, name="app.celery_tasks.run_dvs_task", acks_late=True)
 def run_dvs_task(self, task_id: str) -> dict:
     """执行一个 DVS 任务 (Celery prefork 子进程)。"""

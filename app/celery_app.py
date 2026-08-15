@@ -40,7 +40,10 @@ app.conf.update(
     broker_connection_retry_on_startup=True,
     result_expires=86400,
     task_default_queue="dvs",
-    task_routes={"app.celery_tasks.run_dvs_task": {"queue": "dvs"}},
+    task_routes={
+        "app.celery_tasks.run_dvs_task": {"queue": "dvs"},
+        "app.celery_tasks.run_knowledge_summary_task": {"queue": "dvs-knowledge-summary"},
+    },
     # 控制命令 (revoke/ping) 走默认 broadcast, 不需额外配置
 )
 

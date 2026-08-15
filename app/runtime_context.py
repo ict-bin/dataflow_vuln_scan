@@ -29,3 +29,7 @@ DEBUGGER_ENABLED = _env_bool("DVS_ENABLE_DEBUGGER", ROLE in {"all", "debugger"})
 def is_debugger_role() -> bool:
     """debugger 角色：独立 Pod，任务失败时 LLM 自动调试生成故障定位报告。"""
     return ROLE in {"debugger", "all"}
+
+
+def is_knowledge_summary_role() -> bool:
+    return ROLE in {"knowledge-summary", "knowledge-summary-scheduler", "knowledge-summary-worker", "all"}

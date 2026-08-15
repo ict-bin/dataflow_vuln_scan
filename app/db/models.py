@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import Boolean, DateTime, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.mysql import JSON
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -79,6 +79,73 @@ class AppDvsTask(Base):
     celery_task_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
 
     is_deleted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+
+class AppDvsKnowledgeSummaryTask(Base):
+    """LLM knowledge summary generated from a human-confirmed DVS case."""
+
+    __tablename__ = "secflow_app_dvs_knowledge_summary_tasks"
+    __table_args__ = (
+        UniqueConstraint("case_id", "decision_fingerprint", name="ux_dvs_knowledge_case_decision"),
+        Index("ix_dvs_knowledge_project_status_created", "project_id", "status", "created_at"),
+        Index("ix_dvs_knowledge_dvs_task", "dvs_task_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    summary_task_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    project_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    case_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    dvs_task_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    finding_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    decision: Mapped[str] = mapped_column(String(32), nullable=False)
+    decision_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    human_confirmed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    case_updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="queued", index=True)
+    source_snapshot_json: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
+    result_json: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    task_root: Mapped[str] = mapped_column(String(1024), nullable=False)
+    finding_dir: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)
+    output_dir: Mapped[str] = mapped_column(String(1024), nullable=False)
+    execution_owner_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True, index=True)
+    execution_epoch: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    lease_until: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, index=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    celery_task_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True, index=True)
+    dispatch_requested_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, index=True)
+    last_dispatch_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    superseded_by_task_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    superseded_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=now_local, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=now_local, onupdate=now_local)
+
+
+class AppDvsKnowledgeSummaryScanState(Base):
+    """Persistent scan watermark and leader observability for knowledge summaries."""
+
+    __tablename__ = "secflow_app_dvs_knowledge_summary_scan_state"
+    __table_args__ = (
+        UniqueConstraint("scanner_name", name="ux_dvs_knowledge_scan_scanner"),
+        Index("ix_dvs_knowledge_scan_project", "project_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    scanner_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    project_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, index=True)
+    watermark_updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    last_successful_scan_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    last_full_scan_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    leader_instance_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    last_scan_case_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_created_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_skipped_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_dispatched_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=now_local)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=now_local, onupdate=now_local)
 
 
 class AppDvsWorkerSlot(Base):

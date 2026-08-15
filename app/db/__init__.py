@@ -27,6 +27,36 @@ class Migration:
 
 _MIGRATIONS = [
     Migration(
+        kind="column",
+        table_name="secflow_app_dvs_knowledge_summary_tasks",
+        name="human_confirmed_at",
+        statement="ALTER TABLE secflow_app_dvs_knowledge_summary_tasks ADD COLUMN human_confirmed_at DATETIME NULL",
+    ),
+    Migration(
+        kind="column",
+        table_name="secflow_app_dvs_knowledge_summary_tasks",
+        name="case_updated_at",
+        statement="ALTER TABLE secflow_app_dvs_knowledge_summary_tasks ADD COLUMN case_updated_at DATETIME NULL",
+    ),
+    Migration(
+        kind="column",
+        table_name="secflow_app_dvs_knowledge_summary_tasks",
+        name="superseded_by_task_id",
+        statement="ALTER TABLE secflow_app_dvs_knowledge_summary_tasks ADD COLUMN superseded_by_task_id VARCHAR(64) NULL",
+    ),
+    Migration(
+        kind="column",
+        table_name="secflow_app_dvs_knowledge_summary_tasks",
+        name="superseded_at",
+        statement="ALTER TABLE secflow_app_dvs_knowledge_summary_tasks ADD COLUMN superseded_at DATETIME NULL",
+    ),
+    Migration(
+        kind="index",
+        table_name="secflow_app_dvs_knowledge_summary_tasks",
+        name="ix_dvs_knowledge_superseded_by",
+        statement="CREATE INDEX ix_dvs_knowledge_superseded_by ON secflow_app_dvs_knowledge_summary_tasks (superseded_by_task_id)",
+    ),
+    Migration(
         kind="index",
         table_name="secflow_app_dvs_worker_slots",
         name="ix_dvs_worker_slots_heartbeat",

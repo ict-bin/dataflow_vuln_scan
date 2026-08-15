@@ -1,0 +1,210 @@
+from __future__ import annotations
+
+from pathlib import Path
+from types import SimpleNamespace
+import base64
+import os
+import subprocess
+import sys
+
+import app.service.knowledge_summary as knowledge_summary
+
+
+class _TaskQuery:
+    def __init__(self, task):
+        self.task = task
+
+    def filter(self, *_args):
+        return self
+
+    def one_or_none(self):
+        return self.task
+
+    def update(self, *_args, **_kwargs):
+        return 0
+
+
+class _Db:
+    def __init__(self, task):
+        self.task = task
+        self.rows = []
+        self.commits = 0
+
+    def query(self, _model):
+        return _TaskQuery(self.task)
+
+    def add(self, row):
+        self.rows.append(row)
+
+    def flush(self):
+        pass
+
+    def commit(self):
+        self.commits += 1
+
+    def rollback(self):
+        pass
+
+    def close(self):
+        pass
+
+
+class _SummaryQuery:
+    def __init__(self, row):
+        self.row = row
+
+    def filter_by(self, **_kwargs):
+        return self
+
+    def one_or_none(self):
+        return self.row
+
+
+class _SummaryDb:
+    def __init__(self, row):
+        self.row = row
+        self.commits = 0
+
+    def query(self, _model):
+        return _SummaryQuery(self.row)
+
+    def commit(self):
+        self.commits += 1
+
+    def close(self):
+        pass
+
+
+def _case(*, run_id: str = "dvs_12345678", project_id: str = "project-a", updated_at: str = "2026-08-15T00:00:00"):
+    return {
+        "id": "case-1",
+        "project_id": project_id,
+        "human_confirmed": True,
+        "confirmation_status": "vulnerable",
+        "updated_at": updated_at,
+        "source_task": {"run_id": run_id, "finding_id": "finding-1"},
+        "metadata": {},
+    }
+
+
+def test_create_uses_source_task_run_id_only(monkeypatch, tmp_path: Path):
+    files_root = tmp_path / "files"
+    finding_dir = files_root / "project-a" / "app" / "secflow-app-dataflow-vuln-scan" / "dvs_12345678" / "output" / "vulnerabilities" / "finding-1"
+    finding_dir.mkdir(parents=True)
+    source_root = files_root / "project-a" / "source"
+    source_root.mkdir(parents=True)
+    task = SimpleNamespace(task_id="dvs_12345678", project_id="project-a", is_deleted=False, output_path=str(files_root / "project-a" / "app" / "secflow-app-dataflow-vuln-scan"), source_root_path=str(source_root), input_path=str(source_root))
+    db = _Db(task)
+    monkeypatch.setattr(knowledge_summary, "_FILESERVER_ROOT", files_root)
+    monkeypatch.setattr(knowledge_summary, "_session", lambda: db)
+    case = _case()
+    case["metadata"] = {"dataflow_vuln_scan": {"output_dir": str(finding_dir)}}
+
+    assert knowledge_summary.KnowledgeSummaryService()._create_from_case(case)
+    assert len(db.rows) == 1
+    assert db.rows[0].dvs_task_id == "dvs_12345678"
+    assert db.rows[0].status == "queued"
+
+
+def test_create_records_non_dvs_or_missing_run_id_as_skipped(monkeypatch):
+    db = _Db(None)
+    monkeypatch.setattr(knowledge_summary, "_session", lambda: db)
+    service = knowledge_summary.KnowledgeSummaryService()
+    assert service._create_from_case(_case(run_id="test-e2e"))
+    assert db.rows[0].status == "skipped"
+
+
+def test_project_mismatch_is_recorded_as_skipped(monkeypatch):
+    db = _Db(None)
+    monkeypatch.setattr(knowledge_summary, "_session", lambda: db)
+
+    assert knowledge_summary.KnowledgeSummaryService()._create_from_case(_case())
+    assert len(db.rows) == 1
+    assert db.rows[0].status == "skipped"
+    assert "项目不一致" in db.rows[0].error_message
+
+
+def test_changed_decision_fingerprint_creates_new_revision(monkeypatch, tmp_path: Path):
+    files_root = tmp_path / "files"
+    finding_dir = files_root / "project-a" / "app" / "secflow-app-dataflow-vuln-scan" / "dvs_12345678" / "output" / "vulnerabilities" / "finding-1"
+    finding_dir.mkdir(parents=True)
+    source_root = files_root / "project-a" / "source"
+    source_root.mkdir(parents=True)
+    task = SimpleNamespace(task_id="dvs_12345678", project_id="project-a", is_deleted=False, output_path=str(files_root / "project-a" / "app" / "secflow-app-dataflow-vuln-scan"), source_root_path=str(source_root), input_path=str(source_root))
+    db = _Db(task)
+    monkeypatch.setattr(knowledge_summary, "_FILESERVER_ROOT", files_root)
+    monkeypatch.setattr(knowledge_summary, "_session", lambda: db)
+    service = knowledge_summary.KnowledgeSummaryService()
+    first = _case()
+    first["metadata"] = {"dataflow_vuln_scan": {"output_dir": str(finding_dir)}}
+    second = _case(updated_at="2026-08-16T00:00:00")
+    second["metadata"] = first["metadata"]
+
+    assert service._create_from_case(first)
+    assert service._create_from_case(second)
+    assert db.rows[0].decision_fingerprint != db.rows[1].decision_fingerprint
+
+
+def test_snapshot_evidence_stays_bounded_and_under_fileserver(monkeypatch, tmp_path: Path):
+    files_root = tmp_path / "files"
+    finding_dir = files_root / "project-a" / "task" / "output" / "vulnerabilities" / "finding-1"
+    finding_dir.mkdir(parents=True)
+    (finding_dir / "report.md").write_text("evidence", encoding="utf-8")
+    (finding_dir / "large.log").write_bytes(b"x" * 100)
+    destination = tmp_path / "snapshot"
+    monkeypatch.setattr(knowledge_summary, "_FILESERVER_ROOT", files_root)
+    monkeypatch.setattr(knowledge_summary, "_EVIDENCE_MAX_FILE_BYTES", 32)
+    row = SimpleNamespace(finding_dir=str(finding_dir))
+
+    manifest = knowledge_summary.KnowledgeSummaryService()._snapshot_evidence(row, {}, destination)
+    assert manifest["copied_files"] == [{"path": "project-a/task/output/vulnerabilities/finding-1/report.md", "bytes": 8}]
+    assert (destination / "project-a/task/output/vulnerabilities/finding-1/report.md").read_text(encoding="utf-8") == "evidence"
+
+
+def test_enqueue_uses_dedicated_celery_queue(monkeypatch):
+    calls = []
+
+    class _Celery:
+        def send_task(self, *args, **kwargs):
+            calls.append((args, kwargs))
+
+    row = SimpleNamespace(status="queued", celery_task_id=None, dispatch_requested_at=None, last_dispatch_error=None)
+    db = _SummaryDb(row)
+    monkeypatch.setattr(knowledge_summary, "_session", lambda: db)
+    monkeypatch.setitem(sys.modules, "app.celery_app", SimpleNamespace(app=_Celery()))
+
+    assert knowledge_summary.enqueue_knowledge_summary_task("dks_12345678")
+    assert calls[0][0] == ("app.celery_tasks.run_knowledge_summary_task",)
+    assert calls[0][1]["args"] == ("dks_12345678",)
+    assert calls[0][1]["queue"] == "dvs-knowledge-summary"
+    assert row.celery_task_id.startswith("dks-dispatch-")
+
+
+def test_agent_output_requires_full_knowledge_schema():
+    incomplete = {"label": "SQL 注入"}
+    try:
+        knowledge_summary.KnowledgeSummaryOutput.model_validate(incomplete)
+    except Exception:
+        pass
+    else:
+        raise AssertionError("incomplete output must be rejected")
+
+
+def test_readonly_helper_blocks_writes_and_outside_paths(tmp_path: Path):
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    permitted = allowed / "evidence.txt"
+    permitted.write_text("safe", encoding="utf-8")
+    outside = tmp_path / "outside.txt"
+    outside.write_text("secret", encoding="utf-8")
+    helper = Path(__file__).parents[1] / "bin" / "knowledge_summary_readonly.py"
+    env = {**os.environ, "DVS_READONLY_ROOTS": str(allowed)}
+    def run(command: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, str(helper), "--command", base64.b64encode(command.encode()).decode()],
+            env=env, text=True, capture_output=True, check=False,
+        )
+
+    assert run(f"cat {permitted}").returncode == 0
+    assert run(f"cat {outside}").returncode != 0
+    assert run(f"rm {permitted}").returncode != 0
