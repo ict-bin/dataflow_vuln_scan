@@ -8,6 +8,7 @@ import subprocess
 import sys
 
 import app.service.knowledge_summary as knowledge_summary
+import app.service.llm_provider_sync as llm_provider_sync
 
 
 class _TaskQuery:
@@ -252,6 +253,77 @@ def test_agent_output_requires_full_knowledge_schema():
         pass
     else:
         raise AssertionError("incomplete output must be rejected")
+
+
+def test_knowledge_summary_uses_global_worker_agent_config(monkeypatch):
+    class _ConfigService:
+        def get_config(self, _db):
+            return {
+                "project_id": "",
+                "updated_at": "2026-08-16T00:00:00",
+                "agent_run_timeout_seconds": 900,
+                "agent_timeout_retry_enabled": False,
+                "agent_timeout_max_retries": 7,
+                "pi_max_retries": 5,
+                "pi_retry_delay": 2.5,
+                "workers": {
+                    "default_thinking_level": "low",
+                    "agents": [{"model": "local-glm/glm-5.2", "thinking_level": "high"}],
+                },
+            }
+
+    monkeypatch.setattr(knowledge_summary, "get_config_service", lambda: _ConfigService())
+    monkeypatch.setenv("DVS_KNOWLEDGE_SUMMARY_MODEL", "gaiasec/auto")
+    monkeypatch.delenv("DVS_KNOWLEDGE_SUMMARY_AGENT_TIMEOUT_SECONDS", raising=False)
+
+    runtime = knowledge_summary._knowledge_summary_agent_runtime(object())
+
+    assert runtime.model == "local-glm/glm-5.2"
+    assert runtime.thinking_level == "high"
+    assert runtime.run_timeout_seconds == 900
+    assert runtime.timeout_retry_enabled is False
+    assert runtime.timeout_max_retries == 7
+    assert runtime.pi_max_retries == 5
+    assert runtime.pi_retry_delay == 2.5
+
+
+def test_knowledge_summary_requires_configured_worker_agent(monkeypatch):
+    class _ConfigService:
+        def get_config(self, _db):
+            return {"workers": {"agents": []}}
+
+    monkeypatch.setattr(knowledge_summary, "get_config_service", lambda: _ConfigService())
+
+    try:
+        knowledge_summary._knowledge_summary_agent_runtime(object())
+    except RuntimeError as exc:
+        assert "未配置 Worker Agent" in str(exc)
+    else:
+        raise AssertionError("knowledge summary must not fall back to a hard-coded model")
+
+
+def test_provider_runtime_sync_uses_service_machine_token(monkeypatch):
+    calls = []
+    service_yaml = SimpleNamespace(
+        configcenter=SimpleNamespace(base_url="http://config-center", timeout=17),
+        auth_service=SimpleNamespace(service_machine_token="machine-token"),
+    )
+
+    monkeypatch.setattr(llm_provider_sync, "get_service_yaml", lambda: service_yaml, raising=False)
+    monkeypatch.setattr("app.config.get_service_yaml", lambda: service_yaml)
+    monkeypatch.setattr(
+        llm_provider_sync,
+        "sync_providers_to_pi",
+        lambda **kwargs: calls.append(kwargs) or True,
+    )
+
+    assert llm_provider_sync.sync_dvs_provider_runtime(db="db-session")
+    assert calls == [{
+        "base_url": "http://config-center",
+        "token": "machine-token",
+        "timeout": 17,
+        "db": "db-session",
+    }]
 
 
 def test_readonly_helper_blocks_writes_and_outside_paths(tmp_path: Path):

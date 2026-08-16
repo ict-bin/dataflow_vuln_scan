@@ -312,3 +312,16 @@ def sync_providers_to_pi(
     except Exception as e:
         logger.exception("同步 LLM Provider 时发生未知错误: %s", e)
     return False
+
+
+def sync_dvs_provider_runtime(db: Session | None = None) -> bool:
+    """Refresh the pod-local PI provider runtime from the DVS configuration center."""
+    from app.config import get_service_yaml
+
+    service_yaml = get_service_yaml()
+    return sync_providers_to_pi(
+        base_url=service_yaml.configcenter.base_url,
+        token=service_yaml.auth_service.service_machine_token,
+        timeout=service_yaml.configcenter.timeout,
+        db=db,
+    )

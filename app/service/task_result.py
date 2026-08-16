@@ -543,15 +543,8 @@ def _load_svc_config_from_db(db: Session, project_id: str) -> "object":
 def _write_models_json_from_db(db: Session) -> None:
     """从配置中心拉取 LLM Provider 并写入 pi 的 models.json。"""
     try:
-        from app.config import get_service_yaml
-        from app.service.llm_provider_sync import sync_providers_to_pi
-        svc_yaml = get_service_yaml()
-        sync_providers_to_pi(
-            base_url=svc_yaml.configcenter.base_url,
-            token=svc_yaml.auth_service.service_machine_token,
-            timeout=svc_yaml.configcenter.timeout,
-            db=db,
-        )
+        from app.service.llm_provider_sync import sync_dvs_provider_runtime
+        sync_dvs_provider_runtime(db)
     except Exception as _exc:
         logger.warning("_write_models_json_from_db failed: %s", _exc, exc_info=True)
 

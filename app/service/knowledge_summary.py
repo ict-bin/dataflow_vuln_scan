@@ -11,6 +11,7 @@ import shutil
 import threading
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
@@ -23,8 +24,12 @@ from sqlalchemy.exc import IntegrityError
 
 from app.config import get_service_yaml
 from app.db.models import AppDvsKnowledgeSummaryScanState, AppDvsKnowledgeSummaryTask, AppDvsTask
+from app.models import ServiceConfig
 from app.runner import run_agent
 from app.runtime_context import INSTANCE_ID
+from app.service.config_service import get_config_service
+from app.service.llm_provider_sync import sync_dvs_provider_runtime
+from app.service.pi_runtime import materialize_pi_runtime
 from app.time_utils import now_local
 
 logger = logging.getLogger("dvs.knowledge_summary")
@@ -43,6 +48,49 @@ _SCAN_LOOKBACK_SECONDS = max(60, int(os.environ.get("DVS_KNOWLEDGE_SUMMARY_SCAN_
 _FULL_SCAN_SECONDS = max(3600, int(os.environ.get("DVS_KNOWLEDGE_SUMMARY_FULL_SCAN_SECONDS", "86400")))
 _SCANNER_NAME = "dvs-human-confirmed-knowledge-summary-v1"
 _FILESERVER_ROOT = Path(os.environ.get("FILESERVER_ROOT", "/data/files")).resolve()
+
+
+@dataclass(frozen=True)
+class _KnowledgeSummaryAgentRuntime:
+    model: str
+    thinking_level: str
+    run_timeout_seconds: int
+    timeout_retry_enabled: bool
+    timeout_max_retries: int
+    pi_max_retries: int
+    pi_retry_delay: float
+
+
+def _knowledge_summary_agent_runtime(db) -> _KnowledgeSummaryAgentRuntime:
+    """Resolve the shared DVS Worker Agent configuration for knowledge summaries."""
+    config_data = dict(get_config_service().get_config(db))
+    config_data.pop("project_id", None)
+    config_data.pop("updated_at", None)
+    service_config = ServiceConfig(**config_data)
+    agents = list(service_config.workers.agents or [])
+    if not agents:
+        raise RuntimeError("数据流漏洞挖掘 Agent 参数配置中未配置 Worker Agent")
+    agent = agents[0]
+    model = _text(agent.model)
+    if not model:
+        raise RuntimeError("数据流漏洞挖掘 Agent 参数配置中的 Worker 模型为空")
+    thinking_level = _text(agent.thinking_level) or _text(service_config.workers.default_thinking_level) or "medium"
+    timeout_override = _text(os.environ.get("DVS_KNOWLEDGE_SUMMARY_AGENT_TIMEOUT_SECONDS"))
+    try:
+        run_timeout_seconds = int(timeout_override) if timeout_override else int(service_config.agent_run_timeout_seconds)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("知识总结 Agent 超时配置无效") from exc
+    if run_timeout_seconds <= 0:
+        raise RuntimeError("知识总结 Agent 超时配置必须大于 0")
+    return _KnowledgeSummaryAgentRuntime(
+        model=model,
+        thinking_level=thinking_level,
+        run_timeout_seconds=run_timeout_seconds,
+        timeout_retry_enabled=bool(service_config.agent_timeout_retry_enabled),
+        timeout_max_retries=int(service_config.agent_timeout_max_retries),
+        pi_max_retries=int(service_config.pi_max_retries),
+        pi_retry_delay=float(service_config.pi_retry_delay),
+    )
 
 
 class KnowledgeSummaryOutput(BaseModel):
@@ -665,15 +713,28 @@ class KnowledgeSummaryService:
                 authorized_roots.append(Path(row.finding_dir))
             if source_root:
                 authorized_roots.append(source_root)
+            agent_runtime = _knowledge_summary_agent_runtime(db)
+            if not sync_dvs_provider_runtime(db):
+                raise RuntimeError("知识总结 Agent Provider 运行时同步失败")
+            materialize_pi_runtime(secret="")
+            logger.info(
+                "knowledge summary agent runtime resolved source=dvs_global_workers_config model=%s thinking_level=%s",
+                agent_runtime.model,
+                agent_runtime.thinking_level,
+            )
             result = run_agent(
                 prompt,
-                model=os.environ.get("DVS_KNOWLEDGE_SUMMARY_MODEL", "gaiasec/auto"),
+                model=agent_runtime.model,
                 tools=["bash"],
                 system_prompt="你是软件安全知识工程师。只总结证据充分的可复用知识，不得改变任何原始文件。",
                 cwd=str(task_dir),
                 session_file=str(sessions_dir / "knowledge-summary.jsonl"),
-                thinking_level="medium",
-                run_timeout_seconds=int(os.environ.get("DVS_KNOWLEDGE_SUMMARY_AGENT_TIMEOUT_SECONDS", "1800")),
+                thinking_level=agent_runtime.thinking_level,
+                run_timeout_seconds=agent_runtime.run_timeout_seconds,
+                timeout_retry_enabled=agent_runtime.timeout_retry_enabled,
+                timeout_max_retries=agent_runtime.timeout_max_retries,
+                pi_max_retries=agent_runtime.pi_max_retries,
+                pi_retry_delay=agent_runtime.pi_retry_delay,
                 cancel_event=cancel_event,
                 env={"DVS_READONLY_ROOTS": ":".join(str(path.resolve()) for path in authorized_roots if path and path.is_dir())},
                 extension="/opt/dataflow_vuln_scan/extensions/knowledge-summary-readonly.ts",
