@@ -24,13 +24,30 @@ class _TaskQuery:
         return 0
 
 
+class _ExistingSummaryQuery:
+    def __init__(self, row):
+        self.row = row
+
+    def filter(self, *_args):
+        return self
+
+    def one_or_none(self):
+        return self.row
+
+    def update(self, *_args, **_kwargs):
+        return 0
+
+
 class _Db:
-    def __init__(self, task):
+    def __init__(self, task, summary_task=None):
         self.task = task
+        self.summary_task = summary_task
         self.rows = []
         self.commits = 0
 
-    def query(self, _model):
+    def query(self, model):
+        if model is knowledge_summary.AppDvsKnowledgeSummaryTask:
+            return _ExistingSummaryQuery(self.summary_task)
         return _TaskQuery(self.task)
 
     def add(self, row):
@@ -104,6 +121,53 @@ def test_create_uses_source_task_run_id_only(monkeypatch, tmp_path: Path):
     assert len(db.rows) == 1
     assert db.rows[0].dvs_task_id == "dvs_12345678"
     assert db.rows[0].status == "queued"
+
+
+def test_vuln_center_human_confirmation_fields_create_queued_task(monkeypatch, tmp_path: Path):
+    files_root = tmp_path / "files"
+    finding_dir = files_root / "project-a" / "app" / "secflow-app-dataflow-vuln-scan" / "dvs_12345678" / "output" / "vulnerabilities" / "finding-1"
+    finding_dir.mkdir(parents=True)
+    source_root = files_root / "project-a" / "source"
+    source_root.mkdir(parents=True)
+    task = SimpleNamespace(task_id="dvs_12345678", project_id="project-a", is_deleted=False, output_path=str(files_root / "project-a" / "app" / "secflow-app-dataflow-vuln-scan"), source_root_path=str(source_root), input_path=str(source_root))
+    db = _Db(task)
+    monkeypatch.setattr(knowledge_summary, "_FILESERVER_ROOT", files_root)
+    monkeypatch.setattr(knowledge_summary, "_session", lambda: db)
+    case = _case()
+    case.pop("human_confirmed")
+    case.pop("confirmation_status")
+    case.update({
+        "is_human_finished": True,
+        "decision_status": "vulnerable",
+        "human_confirmation": {"result": "vulnerable", "confirmed_at": "2026-08-16T00:00:00Z"},
+        "metadata": {"dataflow_vuln_scan": {"output_dir": str(finding_dir)}},
+    })
+
+    assert knowledge_summary.KnowledgeSummaryService()._create_from_case(case)
+    assert len(db.rows) == 1
+    assert db.rows[0].status == "queued"
+    assert db.rows[0].human_confirmed_at is not None
+
+
+def test_valid_case_recovers_same_fingerprint_skipped_task(monkeypatch, tmp_path: Path):
+    files_root = tmp_path / "files"
+    finding_dir = files_root / "project-a" / "app" / "secflow-app-dataflow-vuln-scan" / "dvs_12345678" / "output" / "vulnerabilities" / "finding-1"
+    finding_dir.mkdir(parents=True)
+    source_root = files_root / "project-a" / "source"
+    source_root.mkdir(parents=True)
+    task = SimpleNamespace(task_id="dvs_12345678", project_id="project-a", is_deleted=False, output_path=str(files_root / "project-a" / "app" / "secflow-app-dataflow-vuln-scan"), source_root_path=str(source_root), input_path=str(source_root))
+    skipped = SimpleNamespace(summary_task_id="dks_existing", status="skipped", result_json={"old": True}, error_message="漏洞中心记录未人工确认")
+    db = _Db(task, skipped)
+    monkeypatch.setattr(knowledge_summary, "_FILESERVER_ROOT", files_root)
+    monkeypatch.setattr(knowledge_summary, "_session", lambda: db)
+    case = _case()
+    case["metadata"] = {"dataflow_vuln_scan": {"output_dir": str(finding_dir)}}
+
+    assert knowledge_summary.KnowledgeSummaryService()._create_from_case(case)
+    assert db.rows == []
+    assert skipped.status == "queued"
+    assert skipped.error_message is None
+    assert skipped.result_json is None
 
 
 def test_create_records_non_dvs_or_missing_run_id_as_skipped(monkeypatch):

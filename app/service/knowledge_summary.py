@@ -90,7 +90,23 @@ def _parse_dt(value: object) -> datetime | None:
 
 
 def _decision(case: dict[str, Any]) -> str:
-    return _text(case.get("confirmation_status") or case.get("decision_status")).lower()
+    confirmation = _as_dict(case.get("human_confirmation"))
+    return _text(
+        case.get("confirmation_status")
+        or case.get("decision_status")
+        or confirmation.get("result")
+        or case.get("latest_human_decision")
+    ).lower()
+
+
+def _is_human_confirmed(case: dict[str, Any]) -> bool:
+    confirmation = _as_dict(case.get("human_confirmation"))
+    return bool(
+        case.get("human_confirmed")
+        or case.get("is_human_finished")
+        or confirmation.get("confirmed_at")
+        or confirmation.get("result")
+    )
 
 
 def _fingerprint(case: dict[str, Any], decision: str) -> str:
@@ -411,7 +427,7 @@ class KnowledgeSummaryService:
         fingerprint = _fingerprint({**case, "id": case_id}, decision or "invalid")
         db = _session()
         try:
-            if not bool(case.get("human_confirmed")):
+            if not _is_human_confirmed(case):
                 return self._create_skipped(db, case, case_id, project_id, fingerprint, "漏洞中心记录未人工确认")
             if decision not in {"vulnerable", "not_vulnerable"}:
                 return self._create_skipped(db, case, case_id, project_id, fingerprint, "人工确认结论不是 vulnerable/not_vulnerable")
@@ -441,24 +457,52 @@ class KnowledgeSummaryService:
             output_dir = _FILESERVER_ROOT / project_id / "app" / "secflow-app-dataflow-vuln-scan" / "knowledge-summary"
             snapshot = dict(case)
             snapshot["knowledge_summary_source_root"] = str(source_root)
-            row = AppDvsKnowledgeSummaryTask(
-                summary_task_id=f"dks_{uuid.uuid4().hex[:16]}",
-                project_id=project_id,
-                case_id=case_id,
-                dvs_task_id=dvs_task_id,
-                finding_id=finding_id or None,
-                decision=decision,
-                decision_fingerprint=fingerprint,
-                human_confirmed_at=_parse_dt(_as_dict(case.get("human_confirmation")).get("confirmed_at") or case.get("confirmed_at")),
-                case_updated_at=_parse_dt(case.get("updated_at")),
-                status="queued",
-                source_snapshot_json=snapshot,
-                task_root=str(task_root),
-                finding_dir=str(finding_dir) if finding_dir else None,
-                output_dir=str(output_dir),
-            )
-            db.add(row)
-            db.flush()
+            existing = db.query(AppDvsKnowledgeSummaryTask).filter(
+                AppDvsKnowledgeSummaryTask.case_id == case_id,
+                AppDvsKnowledgeSummaryTask.decision_fingerprint == fingerprint,
+            ).one_or_none()
+            if existing is not None:
+                if existing.status != "skipped":
+                    return False
+                row = existing
+                row.project_id = project_id
+                row.dvs_task_id = dvs_task_id
+                row.finding_id = finding_id or None
+                row.decision = decision
+                row.human_confirmed_at = _parse_dt(_as_dict(case.get("human_confirmation")).get("confirmed_at") or case.get("confirmed_at"))
+                row.case_updated_at = _parse_dt(case.get("updated_at"))
+                row.status = "queued"
+                row.source_snapshot_json = snapshot
+                row.result_json = None
+                row.error_message = None
+                row.task_root = str(task_root)
+                row.finding_dir = str(finding_dir) if finding_dir else None
+                row.output_dir = str(output_dir)
+                row.execution_owner_id = None
+                row.lease_until = None
+                row.celery_task_id = None
+                row.dispatch_requested_at = None
+                row.last_dispatch_error = None
+                row.finished_at = None
+            else:
+                row = AppDvsKnowledgeSummaryTask(
+                    summary_task_id=f"dks_{uuid.uuid4().hex[:16]}",
+                    project_id=project_id,
+                    case_id=case_id,
+                    dvs_task_id=dvs_task_id,
+                    finding_id=finding_id or None,
+                    decision=decision,
+                    decision_fingerprint=fingerprint,
+                    human_confirmed_at=_parse_dt(_as_dict(case.get("human_confirmation")).get("confirmed_at") or case.get("confirmed_at")),
+                    case_updated_at=_parse_dt(case.get("updated_at")),
+                    status="queued",
+                    source_snapshot_json=snapshot,
+                    task_root=str(task_root),
+                    finding_dir=str(finding_dir) if finding_dir else None,
+                    output_dir=str(output_dir),
+                )
+                db.add(row)
+                db.flush()
             db.query(AppDvsKnowledgeSummaryTask).filter(
                 AppDvsKnowledgeSummaryTask.case_id == case_id,
                 AppDvsKnowledgeSummaryTask.summary_task_id != row.summary_task_id,
